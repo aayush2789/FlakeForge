@@ -28,12 +28,28 @@ try:
     )
     from .docker_runner import DockerTestRunner
     from .reward import compute_reward
-    from .tools import apply_ast_patch, inject_logging, list_repo_structure, parse_ast_summary, read_file_excerpt
+    from .tools import (
+        apply_ast_patch,
+        get_failure_pattern,
+        inject_logging,
+        list_repo_structure,
+        parse_ast_summary,
+        read_file_excerpt,
+        resolve_target_from_evidence,
+    )
 except ImportError:
     from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord
     from server.docker_runner import DockerTestRunner
     from server.reward import compute_reward
-    from server.tools import apply_ast_patch, inject_logging, list_repo_structure, parse_ast_summary, read_file_excerpt
+    from server.tools import (
+        apply_ast_patch,
+        get_failure_pattern,
+        inject_logging,
+        list_repo_structure,
+        parse_ast_summary,
+        read_file_excerpt,
+        resolve_target_from_evidence,
+    )
 
 
 @dataclass
@@ -54,6 +70,7 @@ class EpisodeState:
     total_diff_lines: int = 0
     actions_taken: List[str] = field(default_factory=list)
     hypothesis_confidence_at_each_step: List[float] = field(default_factory=list)
+    hypothesis_history: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class FlakeForgeEnvironment(Environment):
@@ -97,12 +114,24 @@ class FlakeForgeEnvironment(Environment):
             obs.metadata = {"reason": "episode_already_done"}
             return obs
 
+        self._update_hypothesis_from_action(action)
+
+        if action.action_type not in {"GATHER_EVIDENCE", "REVERT_LAST_PATCH"}:
+            if self._episode.current_hypothesis is None:
+                obs = self._build_observation(reward=-1.0, done=False)
+                obs.metadata = {"reason": "action_requires_hypothesis"}
+                return obs
+            if self._episode.current_hypothesis.confidence < 0.3:
+                obs = self._build_observation(reward=-1.0, done=False)
+                obs.metadata = {"reason": "hypothesis_confidence_too_low"}
+                return obs
+
         self._episode.step_count += 1
         self._state.step_count = self._episode.step_count
         self._episode.actions_taken.append(action.action_type)
-        self._episode.hypothesis_confidence_at_each_step.append(
-            self._episode.current_hypothesis.confidence if self._episode.current_hypothesis else 0.0
-        )
+        current_conf = self._episode.current_hypothesis.confidence if self._episode.current_hypothesis else 0.0
+        self._episode.hypothesis_confidence_at_each_step.append(current_conf)
+        self._episode.hypothesis_history.append({"step": self._episode.step_count, "confidence": current_conf})
 
         execution = self._execute_action(action)
         if execution.get("no_op"):
@@ -120,14 +149,16 @@ class FlakeForgeEnvironment(Environment):
         self._episode.done = done
 
         judge_scores = action.parameters.get("judge_scores", {}) if isinstance(action.parameters, dict) else {}
+        failure_pattern = get_failure_pattern(post_runs)
         step_result = {
             "current_pass_rate": self._episode.current_pass_rate,
             "regression_detected": self._episode.regression_detected,
             "action_taken": action.action_type,
             "done": done,
             "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
+            "ast_diff": execution.get("ast_diff", {}),
         }
-        reward = compute_reward(self._episode, step_result, judge_scores)
+        reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
 
         self._state.current_pass_rate = self._episode.current_pass_rate
         self._state.baseline_pass_rate = self._episode.baseline_pass_rate
@@ -135,7 +166,20 @@ class FlakeForgeEnvironment(Environment):
         self._state.regression_detected = self._episode.regression_detected
 
         obs = self._build_observation(reward=reward, done=done)
-        obs.metadata = {**execution, "step_result": step_result}
+        obs.metadata = {
+            **execution,
+            "step_result": step_result,
+            "reward_breakdown": reward_breakdown,
+            "failure_pattern": {
+                "pass_rate": failure_pattern.pass_rate,
+                "most_common_error": failure_pattern.most_common_error,
+                "error_distribution": failure_pattern.error_distribution,
+                "duration_mean": failure_pattern.duration_mean,
+                "duration_std": failure_pattern.duration_std,
+                "flakiness_score": failure_pattern.flakiness_score,
+            },
+            "hypothesis_history": self._episode.hypothesis_history,
+        }
         return obs
 
     @property
@@ -207,16 +251,23 @@ class FlakeForgeEnvironment(Environment):
         test_file = self.test_id.split("::", 1)[0]
         test_path = self.repo_path / test_file
         target_file = str(test_path)
+        evidence = self._episode.current_hypothesis.evidence if self._episode.current_hypothesis else []
+        resolved_target = resolve_target_from_evidence(target_file, evidence)
 
         if action.action_type == "GATHER_EVIDENCE":
-            injection_points = self._injection_points_from_hypothesis()
+            injection_points = self._injection_points_from_hypothesis(resolved_target)
             patched_source = inject_logging(target_file, injection_points)
             Path(target_file).write_text(patched_source, encoding="utf-8")
             evidence_runs = self._run_test_n_times(n=5)
             self._episode.log_snippets.extend(self._extract_log_snippets(evidence_runs))
             self._episode.log_snippets = self._episode.log_snippets[-3:]
+            self._episode.current_hypothesis = self._infer_hypothesis(evidence_runs)
             subprocess.run(["git", "checkout", "--", test_file], cwd=self.repo_path, check=False, capture_output=True, text=True)
-            return {"action": action.action_type, "evidence_runs": len(evidence_runs)}
+            return {
+                "action": action.action_type,
+                "evidence_runs": len(evidence_runs),
+                "resolved_target": resolved_target,
+            }
 
         if action.action_type == "REVERT_LAST_PATCH":
             if not self._episode.patches_applied:
@@ -243,7 +294,10 @@ class FlakeForgeEnvironment(Environment):
             self._episode.total_diff_lines = max(0, self._episode.total_diff_lines - last_patch.lines_changed)
             return {"action": action.action_type, "reverted": target}
 
-        patch_spec = self._build_patch_spec(action)
+        if action.action_type != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
+            return {"action": action.action_type, "no_op": True, "reason": "unable_to_ground_evidence"}
+
+        patch_spec = self._build_patch_spec(action, resolved_target)
         result = apply_ast_patch(target_file, patch_spec)
         if not result.get("success"):
             return {"action": action.action_type, "patch_error": result.get("error", "patch_failed")}
@@ -261,9 +315,13 @@ class FlakeForgeEnvironment(Environment):
             "action": action.action_type,
             "lines_changed": patch_record.lines_changed,
             "diff": result.get("diff", ""),
+            "ast_diff": result.get("ast_diff", {}),
+            "resolved_target": resolved_target,
         }
 
-    def _injection_points_from_hypothesis(self) -> List[Dict[str, str]]:
+    def _injection_points_from_hypothesis(self, resolved_target: Dict[str, Any]) -> List[Dict[str, str]]:
+        if resolved_target.get("type") == "function":
+            return [{"function_name": resolved_target.get("identifier", "test_flaky_case"), "position": "entry"}]
         if not self._episode.current_hypothesis:
             return [{"function_name": "test_flaky_case", "position": "entry"}]
         points: List[Dict[str, str]] = []
@@ -274,8 +332,13 @@ class FlakeForgeEnvironment(Environment):
         return points or [{"function_name": "test_flaky_case", "position": "entry"}]
 
     def _extract_log_snippets(self, runs: List[RunRecord]) -> List[str]:
-        snippets = []
+        snippets: List[str] = []
         for run in runs:
+            if run.stderr_excerpt:
+                for line in run.stderr_excerpt.splitlines():
+                    line = line.strip()
+                    if line.startswith("{") and line.endswith("}"):
+                        snippets.append(line)
             payload = {
                 "passed": run.passed,
                 "duration_ms": run.duration_ms,
@@ -283,36 +346,37 @@ class FlakeForgeEnvironment(Environment):
                 "error_message": run.error_message,
             }
             snippets.append(json.dumps(payload))
+        # Keep a short, high-signal window.
         return snippets[:3]
 
-    def _build_patch_spec(self, action: FlakeForgeAction) -> Dict[str, Any]:
+    def _build_patch_spec(self, action: FlakeForgeAction, resolved_target: Dict[str, Any]) -> Dict[str, Any]:
         test_node_identifier = "def test_"
         if action.action_type == "ADD_TIMING_GUARD":
             return {
                 "operation": "insert_before",
-                "target": {"type": "call", "identifier": "await"},
+                "target": {"type": "call", "identifier": resolved_target.get("identifier", "await")},
                 "code_template": "await asyncio.sleep({delay_ms} / 1000)",
                 "parameters": {"delay_ms": action.parameters["delay_ms"]},
             }
         if action.action_type == "ADD_SYNCHRONIZATION":
             primitive = action.parameters["primitive"]
             return {
-                "operation": "insert_before",
-                "target": {"type": "line", "identifier": test_node_identifier},
-                "code_template": "# synchronization primitive applied: {primitive}",
-                "parameters": {"primitive": primitive},
+                "operation": "wrap_with",
+                "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
+                "code_template": "with {lock_var}:\\n    {body}",
+                "parameters": {"lock_var": "_flakeforge_lock", "primitive": primitive},
             }
         if action.action_type == "MOCK_DEPENDENCY":
             return {
                 "operation": "add_decorator",
-                "target": {"type": "function", "identifier": "test"},
+                "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
                 "code_template": "@unittest.mock.patch('{target}')",
                 "parameters": {"target": action.parameters["target"]},
             }
         if action.action_type == "RESET_STATE":
             return {
                 "operation": "insert_before",
-                "target": {"type": "line", "identifier": test_node_identifier},
+                "target": {"type": "line", "identifier": resolved_target.get("identifier", test_node_identifier)},
                 "code_template": "# reset state scope: {scope}",
                 "parameters": {"scope": action.parameters["scope"]},
             }
@@ -327,6 +391,43 @@ class FlakeForgeEnvironment(Environment):
                 },
             }
         raise ValueError(f"Unsupported action type for patching: {action.action_type}")
+
+    def _update_hypothesis_from_action(self, action: FlakeForgeAction) -> None:
+        if not isinstance(action.parameters, dict):
+            return
+        hypothesis_payload = action.parameters.get("hypothesis")
+        if not isinstance(hypothesis_payload, dict):
+            return
+        try:
+            self._episode.current_hypothesis = Hypothesis(**hypothesis_payload)
+        except Exception:
+            # Ignore malformed hypotheses and keep previous valid hypothesis.
+            return
+
+    def _infer_hypothesis(self, runs: List[RunRecord]) -> Hypothesis:
+        error_types = [r.error_type or "" for r in runs if not r.passed]
+        top_error = error_types[0] if error_types else ""
+
+        category = "NONDETERMINISM"
+        if "Timeout" in top_error or "TimeoutError" in top_error:
+            category = "TIMING_RACE"
+        elif "Connection" in top_error:
+            category = "EXTERNAL_DEPENDENCY"
+        elif "Assertion" in top_error:
+            category = "ORDER_DEPENDENCY"
+
+        pass_rate = self._pass_rate(runs)
+        confidence = max(0.3, min(0.95, 1.0 - abs(pass_rate - 0.5)))
+        evidence = [
+            self.test_id.split("::")[-1],
+            top_error or "intermittent_failure",
+        ]
+        return Hypothesis(
+            root_cause_category=category,
+            confidence=confidence,
+            evidence=evidence,
+            suggested_action="GATHER_EVIDENCE" if confidence < 0.5 else "ADD_TIMING_GUARD",
+        )
 
 
 # Backward compatible alias for template-generated class name.

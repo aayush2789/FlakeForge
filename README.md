@@ -11,245 +11,144 @@ tags:
   - openenv
 ---
 
-# Flakeforge Environment
+# FlakeForge Gym
 
-A simple test environment that echoes back messages. Perfect for testing the env APIs as well as demonstrating environment usage patterns.
+FlakeForge Gym is a POMDP-style reinforcement learning environment for training a single 3.5B code model with two sequential LoRA roles: an Analyzer that forms a hypothesis about a flaky CI failure, and a Fixer that chooses a repair action from a small, strict action space. The environment is deterministic; the model is the only learned component. A frozen judge model provides auxiliary shaping reward, and the Docker-isolated runner executes repeat validations.
+
+## Architecture
+
+- One trainable base model with two LoRA adapters
+- One frozen judge model for hypothesis and patch scoring
+- One deterministic environment that owns reset, step, validation, and state tracking
+- Seven action types with low-cardinality parameters
+- Structured observation JSON returned on every step
+
+## Current Status
+
+The core environment, reward, tools, Docker runner, seed repositories, and integration test scaffolding are in place. The remaining work is runtime hardening and final wiring against the judge and retrieval corpus at scale.
 
 ## Quick Start
 
-The simplest way to use the Flakeforge environment is through the `FlakeforgeEnv` class:
+Build the Docker image:
+
+```bash
+docker build -t flakeforge-env:latest -f server/Dockerfile .
+```
+
+Create a client from the image:
 
 ```python
-from FlakeForge import FlakeforgeAction, FlakeforgeEnv
+from FlakeForge import FlakeForgeAction, FlakeForgeEnv
 
+env = await FlakeForgeEnv.from_docker_image("flakeforge-env:latest")
 try:
-    # Create environment from Docker image
-    FlakeForgeenv = FlakeforgeEnv.from_docker_image("FlakeForge-env:latest")
-
-    # Reset
-    result = FlakeForgeenv.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-
-    # Send multiple messages
-    messages = ["Hello, World!", "Testing echo", "Final message"]
-
-    for msg in messages:
-        result = FlakeForgeenv.step(FlakeforgeAction(message=msg))
-        print(f"Sent: '{msg}'")
-        print(f"  → Echoed: '{result.observation.echoed_message}'")
-        print(f"  → Length: {result.observation.message_length}")
-        print(f"  → Reward: {result.reward}")
-
+    observation = await env.reset()
+    result = await env.step(
+        FlakeForgeAction(
+            action_type="GATHER_EVIDENCE",
+            parameters={"injection_target": "test"},
+        )
+    )
 finally:
-    # Always clean up
-    FlakeForgeenv.close()
+    await env.close()
 ```
 
-That's it! The `FlakeforgeEnv.from_docker_image()` method handles:
-- Starting the Docker container
-- Waiting for the server to be ready
-- Connecting to the environment
-- Container cleanup when you call `close()`
+## Action Space
 
-## Building the Docker Image
+The environment supports exactly seven actions:
 
-Before using the environment, you need to build the Docker image:
+- `GATHER_EVIDENCE`
+- `ADD_TIMING_GUARD`
+- `ADD_SYNCHRONIZATION`
+- `MOCK_DEPENDENCY`
+- `RESET_STATE`
+- `ADD_RETRY`
+- `REVERT_LAST_PATCH`
 
-```bash
-# From project root
-docker build -t FlakeForge-env:latest -f server/Dockerfile .
-```
+Each action has strict, low-cardinality parameters and is validated before the server accepts it.
 
-## Deploying to Hugging Face Spaces
+## Observation and State
 
-You can easily deploy your OpenEnv environment to Hugging Face Spaces using the `openenv push` command:
+The main state objects are defined in `models.py`:
 
-```bash
-# From the environment directory (where openenv.yaml is located)
-openenv push
+- `FlakeForgeAction`: validated action payload sent by the agent
+- `RunRecord`: one validation run result
+- `Hypothesis`: analyzer output with category, confidence, evidence, and suggested action
+- `PatchRecord`: record of one patch attempt
+- `ASTSummary`: compact code-structure summary used by tools and observations
+- `FlakeForgeObservation`: full episode observation payload returned by the environment
+- `FlakeForgeState`: compact server-side episode state
+- `FailurePattern`: structured failure diagnostics from repeated validation
 
-# Or specify options
-openenv push --namespace my-org --private
-```
+## Tools and Runner
 
-The `openenv push` command will:
-1. Validate that the directory is an OpenEnv environment (checks for `openenv.yaml`)
-2. Prepare a custom build for Hugging Face Docker space (enables web interface)
-3. Upload to Hugging Face (ensuring you're logged in)
+The server-side tooling layer in `server/tools.py` converts raw source into structured, token-efficient signals:
 
-### Prerequisites
+- `list_repo_structure(root_path)`
+- `read_file_excerpt(path, start_line, end_line)`
+- `parse_ast_summary(path)`
+- `resolve_target_from_evidence(path, evidence)`
+- `get_failure_pattern(run_records)`
+- `inject_logging(path, injection_points)`
+- `apply_ast_patch(path, patch_spec)`
+- `compute_diff(original_path, patched_source)`
+- `get_similar_fixes(root_cause_category, test_source, embedding_model)`
 
-- Authenticate with Hugging Face: The command will prompt for login if not already authenticated
+The test runner in `server/docker_runner.py` executes repeated pytest runs, parses failures, and checks regression scope outside the target test.
 
-### Options
+## Environment Loop
 
-- `--directory`, `-d`: Directory containing the OpenEnv environment (defaults to current directory)
-- `--repo-id`, `-r`: Repository ID in format 'username/repo-name' (defaults to 'username/env-name' from openenv.yaml)
-- `--base-image`, `-b`: Base Docker image to use (overrides Dockerfile FROM)
-- `--private`: Deploy the space as private (default: public)
+`server/FlakeForge_environment.py` handles:
 
-### Examples
+- Deterministic reset with baseline validation
+- Hypothesis tracking across steps
+- Gated action execution
+- Repeated validation after every step
+- Regression checks across the rest of the repo
+- Patch bookkeeping and revert support
+- Reward aggregation metadata
 
-```bash
-# Push to your personal namespace (defaults to username/env-name from openenv.yaml)
-openenv push
+## Reward
 
-# Push to a specific repository
-openenv push --repo-id my-org/my-env
+`server/reward.py` computes shaped reward from:
 
-# Push with a custom base image
-openenv push --base-image ghcr.io/meta-pytorch/openenv-base:latest
+- Stability improvement over baseline
+- Judge scores
+- Evidence overuse penalty
+- Semantic patch-efficiency penalty
+- Regression penalty
+- Retry abuse penalty
+- Terminal success/timeout shaping
 
-# Push as a private space
-openenv push --private
+## Seed Repositories
 
-# Combine options
-openenv push --repo-id my-org/my-env --base-image custom-base:latest --private
-```
+The `seed_repos/` directory contains eight flaky scenarios plus fixed solution variants:
 
-After deployment, your space will be available at:
-`https://huggingface.co/spaces/<repo-id>`
+- `timing_race`
+- `shared_state`
+- `external_dependency`
+- `order_dependency`
+- `resource_leak`
+- `nondeterminism`
+- `compound_timing_shared`
+- `compound_external_nondeterminism`
 
-The deployed space includes:
-- **Web Interface** at `/web` - Interactive UI for exploring the environment
-- **API Documentation** at `/docs` - Full OpenAPI/Swagger interface
-- **Health Check** at `/health` - Container health monitoring
-- **WebSocket** at `/ws` - Persistent session endpoint for low-latency interactions
+Each scenario includes a flaky module, flaky tests, and a matching solution variant.
 
-## Environment Details
+## Project Layout
 
-### Action
-**FlakeforgeAction**: Contains a single field
-- `message` (str) - The message to echo back
+- `__init__.py`: package exports
+- `client.py`: OpenEnv client wrapper
+- `models.py`: schema and validation source of truth
+- `openenv.yaml`: OpenEnv manifest
+- `pyproject.toml`: dependency and build metadata
+- `pytest.ini`: pytest config
+- `README.md`: high-level project documentation
+- `PROGRESS_REPORT.md`: implementation progress and file-role map
+- `server/`: environment runtime code
+- `seed_repos/`: flaky CI fixtures and fixed solution variants
+- `tests/`: integration tests
 
-### Observation
-**FlakeforgeObservation**: Contains the echo response and metadata
-- `echoed_message` (str) - The message echoed back
-- `message_length` (int) - Length of the message
-- `reward` (float) - Reward based on message length (length × 0.1)
-- `done` (bool) - Always False for echo environment
-- `metadata` (dict) - Additional info like step count
+## Validation
 
-### Reward
-The reward is calculated as: `message_length × 0.1`
-- "Hi" → reward: 0.2
-- "Hello, World!" → reward: 1.3
-- Empty message → reward: 0.0
-
-## Advanced Usage
-
-### Connecting to an Existing Server
-
-If you already have a Flakeforge environment server running, you can connect directly:
-
-```python
-from FlakeForge import FlakeforgeEnv
-
-# Connect to existing server
-FlakeForgeenv = FlakeforgeEnv(base_url="<ENV_HTTP_URL_HERE>")
-
-# Use as normal
-result = FlakeForgeenv.reset()
-result = FlakeForgeenv.step(FlakeforgeAction(message="Hello!"))
-```
-
-Note: When connecting to an existing server, `FlakeForgeenv.close()` will NOT stop the server.
-
-### Using the Context Manager
-
-The client supports context manager usage for automatic connection management:
-
-```python
-from FlakeForge import FlakeforgeAction, FlakeforgeEnv
-
-# Connect with context manager (auto-connects and closes)
-with FlakeforgeEnv(base_url="http://localhost:8000") as env:
-    result = env.reset()
-    print(f"Reset: {result.observation.echoed_message}")
-    # Multiple steps with low latency
-    for msg in ["Hello", "World", "!"]:
-        result = env.step(FlakeforgeAction(message=msg))
-        print(f"Echoed: {result.observation.echoed_message}")
-```
-
-The client uses WebSocket connections for:
-- **Lower latency**: No HTTP connection overhead per request
-- **Persistent session**: Server maintains your environment state
-- **Efficient for episodes**: Better for many sequential steps
-
-### Concurrent WebSocket Sessions
-
-The server supports multiple concurrent WebSocket connections. To enable this,
-modify `server/app.py` to use factory mode:
-
-```python
-# In server/app.py - use factory mode for concurrent sessions
-app = create_app(
-    FlakeforgeEnvironment,  # Pass class, not instance
-    FlakeforgeAction,
-    FlakeforgeObservation,
-    max_concurrent_envs=4,  # Allow 4 concurrent sessions
-)
-```
-
-Then multiple clients can connect simultaneously:
-
-```python
-from FlakeForge import FlakeforgeAction, FlakeforgeEnv
-from concurrent.futures import ThreadPoolExecutor
-
-def run_episode(client_id: int):
-    with FlakeforgeEnv(base_url="http://localhost:8000") as env:
-        result = env.reset()
-        for i in range(10):
-            result = env.step(FlakeforgeAction(message=f"Client {client_id}, step {i}"))
-        return client_id, result.observation.message_length
-
-# Run 4 episodes concurrently
-with ThreadPoolExecutor(max_workers=4) as executor:
-    results = list(executor.map(run_episode, range(4)))
-```
-
-## Development & Testing
-
-### Direct Environment Testing
-
-Test the environment logic directly without starting the HTTP server:
-
-```bash
-# From the server directory
-python3 server/FlakeForge_environment.py
-```
-
-This verifies that:
-- Environment resets correctly
-- Step executes actions properly
-- State tracking works
-- Rewards are calculated correctly
-
-### Running Locally
-
-Run the server locally for development:
-
-```bash
-uvicorn server.app:app --reload
-```
-
-## Project Structure
-
-```
-FlakeForge/
-├── .dockerignore         # Docker build exclusions
-├── __init__.py            # Module exports
-├── README.md              # This file
-├── openenv.yaml           # OpenEnv manifest
-├── pyproject.toml         # Project metadata and dependencies
-├── uv.lock                # Locked dependencies (generated)
-├── client.py              # FlakeforgeEnv client
-├── models.py              # Action and Observation models
-└── server/
-    ├── __init__.py        # Server module exports
-    ├── FlakeForge_environment.py  # Core environment logic
-    ├── app.py             # FastAPI application (HTTP + WebSocket endpoints)
-    └── Dockerfile         # Container image definition
-```
+The integration test currently collects cleanly under pytest. Full Docker-backed execution is the next runtime validation step.

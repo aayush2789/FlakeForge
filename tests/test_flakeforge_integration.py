@@ -46,5 +46,23 @@ async def test_flakeforge_integration_contract() -> None:
         )
         assert timing.reward > -15
         assert len(timing.observation.patches_applied) == 1
+
+        retry = await env.step(
+            FlakeForgeAction(
+                action_type="ADD_RETRY",
+                parameters={"max_attempts": 2, "backoff_ms": 100},
+            )
+        )
+        retry_breakdown = retry.observation.metadata.get("reward_breakdown", {})
+        assert retry_breakdown.get("p_retry_abuse") == 2.0
+
+        revert = await env.step(
+            FlakeForgeAction(
+                action_type="REVERT_LAST_PATCH",
+                parameters={},
+            )
+        )
+        assert len(revert.observation.patches_applied) <= len(retry.observation.patches_applied)
+        assert revert.observation.metadata.get("action") == "REVERT_LAST_PATCH"
     finally:
         await env.close()

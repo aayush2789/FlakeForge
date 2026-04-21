@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 
-def compute_reward(episode_state: Any, step_result: Dict[str, Any], judge_scores: Dict[str, int]) -> float:
+def compute_reward(
+    episode_state: Any,
+    step_result: Dict[str, Any],
+    judge_scores: Dict[str, int],
+) -> Tuple[float, Dict[str, float]]:
     """Compute scalar reward from environment and judge signals."""
 
     current_pass_rate = float(step_result.get("current_pass_rate", episode_state.current_pass_rate))
@@ -27,7 +31,14 @@ def compute_reward(episode_state: Any, step_result: Dict[str, Any], judge_scores
     action_taken = step_result.get("action_taken", "")
     p_retry_abuse = 2.0 if action_taken == "ADD_RETRY" else 0.0
 
-    reward = r_stability + r_judge + r_efficiency - p_regression - p_retry_abuse
+    ast_diff = step_result.get("ast_diff", {}) or {}
+    semantic_footprint = len(ast_diff.get("functions_modified", []))
+    r_semantic_efficiency = -0.1 * max(0, semantic_footprint - 1)
+
+    reward = r_stability + r_judge + r_efficiency + r_semantic_efficiency - p_regression - p_retry_abuse
+
+    terminal_bonus = 0.0
+    terminal_timeout_penalty = 0.0
 
     if step_result.get("done", False):
         success = current_pass_rate >= 1.0 and not step_result.get("regression_detected", False)
@@ -35,8 +46,20 @@ def compute_reward(episode_state: Any, step_result: Dict[str, Any], judge_scores
             episode_state.step_count >= episode_state.max_steps and current_pass_rate < 0.9
         )
         if success:
-            reward += 5.0
+            terminal_bonus = 5.0
+            reward += terminal_bonus
         elif timeout:
-            reward -= 5.0
+            terminal_timeout_penalty = 5.0
+            reward -= terminal_timeout_penalty
 
-    return float(reward)
+    breakdown = {
+        "r_stability": float(r_stability),
+        "r_judge": float(r_judge),
+        "r_efficiency": float(r_efficiency),
+        "r_semantic_efficiency": float(r_semantic_efficiency),
+        "p_regression": float(p_regression),
+        "p_retry_abuse": float(p_retry_abuse),
+        "terminal_bonus": float(terminal_bonus),
+        "terminal_timeout_penalty": float(terminal_timeout_penalty),
+    }
+    return float(reward), breakdown

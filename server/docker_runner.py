@@ -36,6 +36,7 @@ class DockerTestRunner:
                 duration_ms=duration_ms,
                 error_type=error_type,
                 error_message=error_message,
+                stderr_excerpt=(proc.stderr or "")[-500:],
             )
         except subprocess.TimeoutExpired:
             duration_ms = int((time.perf_counter() - start) * 1000)
@@ -44,6 +45,7 @@ class DockerTestRunner:
                 duration_ms=duration_ms,
                 error_type="TimeoutError",
                 error_message=f"pytest timed out after {timeout_seconds}s",
+                stderr_excerpt=None,
             )
         except Exception as exc:  # pragma: no cover
             duration_ms = int((time.perf_counter() - start) * 1000)
@@ -52,6 +54,7 @@ class DockerTestRunner:
                 duration_ms=duration_ms,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
+                stderr_excerpt=None,
             )
 
     def run_test_n_times(self, test_id: str, n: int, max_workers: int = 4) -> List[RunRecord]:

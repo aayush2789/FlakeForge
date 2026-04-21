@@ -108,10 +108,23 @@ class RunRecord:
     duration_ms: int
     error_type: Optional[str] = None
     error_message: Optional[str] = None
+    stderr_excerpt: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.error_message:
             self.error_message = self.error_message[:200]
+        if self.stderr_excerpt:
+            self.stderr_excerpt = self.stderr_excerpt[:500]
+
+
+@dataclass
+class FailurePattern:
+    pass_rate: float
+    most_common_error: Optional[str]
+    error_distribution: Dict[str, int]
+    duration_mean: float
+    duration_std: float
+    flakiness_score: float
 
 
 @dataclass

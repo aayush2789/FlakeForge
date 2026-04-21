@@ -7,12 +7,24 @@
 """FlakeForge Gym environment package."""
 
 from .client import FlakeForgeEnv, FlakeforgeEnv
+from .agent_architecture import (
+    AnalyzerRole,
+    BaseModelSpec,
+    FlakeForgeAgentArchitecture,
+    FixerRole,
+    LoRAAdapterSpec,
+)
 from .models import FlakeForgeAction, FlakeForgeObservation, FlakeforgeAction, FlakeforgeObservation
 
 __all__ = [
     "FlakeForgeAction",
     "FlakeForgeObservation",
     "FlakeForgeEnv",
+    "BaseModelSpec",
+    "LoRAAdapterSpec",
+    "AnalyzerRole",
+    "FixerRole",
+    "FlakeForgeAgentArchitecture",
     "FlakeforgeAction",
     "FlakeforgeObservation",
     "FlakeforgeEnv",
