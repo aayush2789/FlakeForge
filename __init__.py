@@ -7,24 +7,27 @@
 """FlakeForge Gym environment package."""
 
 from .client import FlakeForgeEnv, FlakeforgeEnv
-from .agent_architecture import (
+from .agent import (
     AnalyzerRole,
-    BaseModelSpec,
-    FlakeForgeAgentArchitecture,
     FixerRole,
+    FrozenJudge,
     LoRAAdapterSpec,
+    ModelBackend,
 )
 from .models import FlakeForgeAction, FlakeForgeObservation, FlakeforgeAction, FlakeforgeObservation
+from .training import build_grpo_batch, run_episode
 
 __all__ = [
     "FlakeForgeAction",
     "FlakeForgeObservation",
     "FlakeForgeEnv",
-    "BaseModelSpec",
     "LoRAAdapterSpec",
+    "ModelBackend",
     "AnalyzerRole",
     "FixerRole",
-    "FlakeForgeAgentArchitecture",
+    "FrozenJudge",
+    "run_episode",
+    "build_grpo_batch",
     "FlakeforgeAction",
     "FlakeforgeObservation",
     "FlakeforgeEnv",
