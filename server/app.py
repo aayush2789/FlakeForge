@@ -4,29 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-FastAPI application for the Flakeforge Environment.
-
-This module creates an HTTP server that exposes the FlakeforgeEnvironment
-over HTTP and WebSocket endpoints, compatible with EnvClient.
-
-Endpoints:
-    - POST /reset: Reset the environment
-    - POST /step: Execute an action
-    - GET /state: Get current environment state
-    - GET /schema: Get action/observation schemas
-    - WS /ws: WebSocket endpoint for persistent sessions
-
-Usage:
-    # Development (with auto-reload):
-    uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
-
-    # Production:
-    uvicorn server.app:app --host 0.0.0.0 --port 8000 --workers 4
-
-    # Or run directly:
-    python -m server.app
-"""
+"""FastAPI application for the FlakeForge environment server."""
 
 try:
     from openenv.core.env_server.http_server import create_app
@@ -36,21 +14,15 @@ except Exception as e:  # pragma: no cover
     ) from e
 
 try:
-    from ..models import FlakeforgeAction, FlakeforgeObservation
-    from .FlakeForge_environment import FlakeforgeEnvironment
+    from ..models import FlakeForgeAction, FlakeForgeObservation
+    from .FlakeForge_environment import FlakeForgeEnvironment
 except ModuleNotFoundError:
-    from models import FlakeforgeAction, FlakeforgeObservation
-    from server.FlakeForge_environment import FlakeforgeEnvironment
+    from models import FlakeForgeAction, FlakeForgeObservation
+    from server.FlakeForge_environment import FlakeForgeEnvironment
 
 
-# Create the app with web interface and README integration
-app = create_app(
-    FlakeforgeEnvironment,
-    FlakeforgeAction,
-    FlakeforgeObservation,
-    env_name="FlakeForge",
-    max_concurrent_envs=1,  # increase this number to allow more concurrent WebSocket sessions
-)
+env = FlakeForgeEnvironment()
+app = create_app(env, FlakeForgeAction, FlakeForgeObservation)
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
