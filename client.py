@@ -27,6 +27,7 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
     def __init__(self, base_url: str, **kwargs: Any) -> None:
         super().__init__(base_url=base_url, **kwargs)
         self._judge_scores: List[Dict[str, int]] = []
+        self._pending_judge_feedback: Optional[Dict[str, int]] = None
 
     def _step_payload(self, action: FlakeForgeAction) -> Dict[str, Any]:
         return action.model_dump()
@@ -45,12 +46,16 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
 
     async def reset(self, **kwargs: Any) -> StepResult[FlakeForgeObservation]:
         self._judge_scores = []
+        self._pending_judge_feedback = None
         return await super().reset(**kwargs)
 
     async def step(self, action: FlakeForgeAction, **kwargs: Any) -> StepResult[FlakeForgeObservation]:
+        if self._pending_judge_feedback:
+            action.judge_feedback = dict(self._pending_judge_feedback)
         result = await super().step(action, **kwargs)
         scores = await self._run_judge(result.observation)
         self._judge_scores.append(scores)
+        self._pending_judge_feedback = scores
         return result
 
     def get_judge_scores(self) -> List[Dict[str, int]]:

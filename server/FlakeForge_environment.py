@@ -139,16 +139,25 @@ class FlakeForgeEnvironment(Environment):
             obs.metadata = execution
             return obs
 
-        post_runs = self._run_test_n_times(n=20)
+        post_runs = self._run_test_n_times(n=10)
         self._episode.run_history.extend(post_runs)
         self._episode.run_history = self._episode.run_history[-10:]
         self._episode.current_pass_rate = self._pass_rate(post_runs)
         self._episode.regression_detected = self.runner.check_regressions(exclude_test_id=self.test_id, timeout_seconds=30)
 
         done = self._episode.regression_detected or self._episode.step_count >= self.max_steps or self._episode.current_pass_rate >= 1.0
+        final_validation_runs = 0
+        if done and not self._episode.regression_detected:
+            terminal_runs = self._run_test_n_times(n=50)
+            final_validation_runs = len(terminal_runs)
+            self._episode.current_pass_rate = self._pass_rate(terminal_runs)
+            self._episode.run_history.extend(terminal_runs)
+            self._episode.run_history = self._episode.run_history[-10:]
         self._episode.done = done
 
-        judge_scores = action.parameters.get("judge_scores", {}) if isinstance(action.parameters, dict) else {}
+        judge_scores = action.judge_feedback.model_dump() if action.judge_feedback is not None else {}
+        if judge_scores:
+            self._episode.judge_scores.append(judge_scores)
         failure_pattern = get_failure_pattern(post_runs)
         step_result = {
             "current_pass_rate": self._episode.current_pass_rate,
@@ -179,6 +188,7 @@ class FlakeForgeEnvironment(Environment):
                 "flakiness_score": failure_pattern.flakiness_score,
             },
             "hypothesis_history": self._episode.hypothesis_history,
+            "final_validation_runs": final_validation_runs,
         }
         return obs
 
@@ -375,31 +385,41 @@ class FlakeForgeEnvironment(Environment):
             }
         if action.action_type == "RESET_STATE":
             return {
-                "operation": "insert_before",
-                "target": {"type": "line", "identifier": resolved_target.get("identifier", test_node_identifier)},
-                "code_template": "# reset state scope: {scope}",
-                "parameters": {"scope": action.parameters["scope"]},
+                "operation": "ensure_reset_fixture",
+                "target": {
+                    "scope": action.parameters["scope"],
+                },
+                "code_template": "",
+                "parameters": {},
             }
         if action.action_type == "ADD_RETRY":
             return {
-                "operation": "insert_before",
-                "target": {"type": "line", "identifier": test_node_identifier},
-                "code_template": "# retry patch max_attempts={max_attempts} backoff_ms={backoff_ms}",
-                "parameters": {
+                "operation": "ensure_retry_wrapper",
+                "target": {
+                    "function_name": resolved_target.get("identifier", "test"),
                     "max_attempts": action.parameters["max_attempts"],
                     "backoff_ms": action.parameters["backoff_ms"],
                 },
+                "code_template": "",
+                "parameters": {},
+            }
+        if action.action_type == "SEED_RANDOMNESS":
+            return {
+                "operation": "ensure_seed_call",
+                "target": {
+                    "function_name": resolved_target.get("identifier", "test"),
+                    "library": action.parameters["library"],
+                },
+                "code_template": "",
+                "parameters": {},
             }
         raise ValueError(f"Unsupported action type for patching: {action.action_type}")
 
     def _update_hypothesis_from_action(self, action: FlakeForgeAction) -> None:
-        if not isinstance(action.parameters, dict):
-            return
-        hypothesis_payload = action.parameters.get("hypothesis")
-        if not isinstance(hypothesis_payload, dict):
+        if action.hypothesis is None:
             return
         try:
-            self._episode.current_hypothesis = Hypothesis(**hypothesis_payload)
+            self._episode.current_hypothesis = Hypothesis(**action.hypothesis.model_dump())
         except Exception:
             # Ignore malformed hypotheses and keep previous valid hypothesis.
             return
