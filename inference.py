@@ -35,7 +35,8 @@ if load_dotenv:
 
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "minimaxai/minimax-m2.7")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.3-70b-instruct")
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", "minimaxai/minimax-m2.7")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY")
 
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
@@ -46,6 +47,7 @@ MAX_STEPS = int(os.getenv("INFERENCE_MAX_STEPS", "14"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
 REQUEST_TIMEOUT_S = float(os.getenv("REQUEST_TIMEOUT_S", "45"))
+ENV_MESSAGE_TIMEOUT_S = float(os.getenv("ENV_MESSAGE_TIMEOUT_S", "180"))
 
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -146,9 +148,12 @@ def _attach_hypothesis_to_action(action: FlakeForgeAction, hypothesis: Hypothesi
 async def _build_env() -> FlakeForgeEnv:
     if USE_DOCKER_IMAGE:
         _log(f"[INIT] Using Docker image env: {LOCAL_IMAGE_NAME}")
-        return await FlakeForgeEnv.from_docker_image(LOCAL_IMAGE_NAME)
+        return await FlakeForgeEnv.from_docker_image(
+            LOCAL_IMAGE_NAME,
+            message_timeout_s=ENV_MESSAGE_TIMEOUT_S,
+        )
     _log(f"[INIT] Using HTTP env: {ENV_BASE_URL}")
-    return FlakeForgeEnv(base_url=ENV_BASE_URL)
+    return FlakeForgeEnv(base_url=ENV_BASE_URL, message_timeout_s=ENV_MESSAGE_TIMEOUT_S)
 
 
 async def run_inference() -> Dict[str, Any]:
@@ -156,7 +161,7 @@ async def run_inference() -> Dict[str, Any]:
         raise RuntimeError("Missing API key. Set NVIDIA_API_KEY or OPENAI_API_KEY.")
 
     model_backend = OpenAIModelBackend(MODEL_NAME, API_BASE_URL, NVIDIA_API_KEY)
-    judge_backend = OpenAIJudgeBackend(MODEL_NAME, API_BASE_URL, NVIDIA_API_KEY)
+    judge_backend = OpenAIJudgeBackend(JUDGE_MODEL, API_BASE_URL, NVIDIA_API_KEY)
     judge = FrozenJudge(backend=judge_backend)
 
     analyzer = AnalyzerRole(
@@ -189,7 +194,11 @@ async def run_inference() -> Dict[str, Any]:
             proposed_action = fixer.produce_action(obs, hypothesis)
             action = _attach_hypothesis_to_action(proposed_action, hypothesis)
 
-            step_result = await env.step(action)
+            try:
+                step_result = await env.step(action)
+            except Exception as exc:
+                _log(f"[ERROR] env.step failed at step={step_idx}: {type(exc).__name__}: {exc}")
+                break
             next_obs = _extract_observation(step_result)
             reward = float(getattr(step_result, "reward", next_obs.reward or 0.0))
 
@@ -242,6 +251,7 @@ async def run_inference() -> Dict[str, Any]:
             "episode_id": final_obs.episode_id,
             "test_identifier": final_obs.test_identifier,
             "model": MODEL_NAME,
+            "judge_model": JUDGE_MODEL,
             "environment": "docker_image" if USE_DOCKER_IMAGE else ENV_BASE_URL,
             "max_steps": MAX_STEPS,
             "steps_executed": len(steps),

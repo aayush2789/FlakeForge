@@ -83,7 +83,15 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
 
     @staticmethod
     def _build_hypothesis_prompt(observation: FlakeForgeObservation) -> str:
-        hypothesis = observation.current_hypothesis.model_dump() if observation.current_hypothesis else None
+        if observation.current_hypothesis:
+            hypothesis = {
+                "root_cause_category": observation.current_hypothesis.root_cause_category,
+                "confidence": observation.current_hypothesis.confidence,
+                "evidence": list(observation.current_hypothesis.evidence),
+                "suggested_action": observation.current_hypothesis.suggested_action,
+            }
+        else:
+            hypothesis = None
         return json.dumps(
             {
                 "task": "score_hypothesis",

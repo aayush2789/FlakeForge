@@ -137,64 +137,74 @@ class FlakeForgeEnvironment(Environment):
         self._episode.hypothesis_confidence_at_each_step.append(current_conf)
         self._episode.hypothesis_history.append({"step": self._episode.step_count, "confidence": current_conf})
 
-        execution = self._execute_action(action)
-        if execution.get("no_op"):
-            obs = self._build_observation(reward=-0.5, done=False)
-            obs.metadata = execution
-            return obs
+        try:
+            execution = self._execute_action(action)
+            if execution.get("no_op"):
+                obs = self._build_observation(reward=-0.5, done=False)
+                obs.metadata = execution
+                return obs
 
-        post_runs = self._run_test_n_times(n=10)
-        self._episode.run_history.extend(post_runs)
-        self._episode.run_history = self._episode.run_history[-10:]
-        self._episode.current_pass_rate = self._pass_rate(post_runs)
-        self._episode.regression_detected = self.runner.check_regressions(exclude_test_id=self.test_id, timeout_seconds=30)
-
-        done = self._episode.regression_detected or self._episode.step_count >= self.max_steps or self._episode.current_pass_rate >= 1.0
-        final_validation_runs = 0
-        if done and not self._episode.regression_detected:
-            terminal_runs = self._run_test_n_times(n=50)
-            final_validation_runs = len(terminal_runs)
-            self._episode.current_pass_rate = self._pass_rate(terminal_runs)
-            self._episode.run_history.extend(terminal_runs)
+            post_runs = self._run_test_n_times(n=10)
+            self._episode.run_history.extend(post_runs)
             self._episode.run_history = self._episode.run_history[-10:]
-        self._episode.done = done
+            self._episode.current_pass_rate = self._pass_rate(post_runs)
+            self._episode.regression_detected = self.runner.check_regressions(exclude_test_id=self.test_id, timeout_seconds=30)
 
-        judge_scores = action.judge_feedback.model_dump() if action.judge_feedback is not None else {}
-        if judge_scores:
-            self._episode.judge_scores.append(judge_scores)
-        failure_pattern = get_failure_pattern(post_runs)
-        step_result = {
-            "current_pass_rate": self._episode.current_pass_rate,
-            "regression_detected": self._episode.regression_detected,
-            "action_taken": action.action_type,
-            "done": done,
-            "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
-            "ast_diff": execution.get("ast_diff", {}),
-        }
-        reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
+            done = self._episode.regression_detected or self._episode.step_count >= self.max_steps or self._episode.current_pass_rate >= 1.0
+            final_validation_runs = 0
+            if done and not self._episode.regression_detected:
+                terminal_runs = self._run_test_n_times(n=50)
+                final_validation_runs = len(terminal_runs)
+                self._episode.current_pass_rate = self._pass_rate(terminal_runs)
+                self._episode.run_history.extend(terminal_runs)
+                self._episode.run_history = self._episode.run_history[-10:]
+            self._episode.done = done
 
-        self._state.current_pass_rate = self._episode.current_pass_rate
-        self._state.baseline_pass_rate = self._episode.baseline_pass_rate
-        self._state.done = done
-        self._state.regression_detected = self._episode.regression_detected
+            judge_scores = action.judge_feedback.model_dump() if action.judge_feedback is not None else {}
+            if judge_scores:
+                self._episode.judge_scores.append(judge_scores)
+            failure_pattern = get_failure_pattern(post_runs)
+            step_result = {
+                "current_pass_rate": self._episode.current_pass_rate,
+                "regression_detected": self._episode.regression_detected,
+                "action_taken": action.action_type,
+                "done": done,
+                "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
+                "ast_diff": execution.get("ast_diff", {}),
+            }
+            reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
 
-        obs = self._build_observation(reward=reward, done=done)
-        obs.metadata = {
-            **execution,
-            "step_result": step_result,
-            "reward_breakdown": reward_breakdown,
-            "failure_pattern": {
-                "pass_rate": failure_pattern.pass_rate,
-                "most_common_error": failure_pattern.most_common_error,
-                "error_distribution": failure_pattern.error_distribution,
-                "duration_mean": failure_pattern.duration_mean,
-                "duration_std": failure_pattern.duration_std,
-                "flakiness_score": failure_pattern.flakiness_score,
-            },
-            "hypothesis_history": self._episode.hypothesis_history,
-            "final_validation_runs": final_validation_runs,
-        }
-        return obs
+            self._state.current_pass_rate = self._episode.current_pass_rate
+            self._state.baseline_pass_rate = self._episode.baseline_pass_rate
+            self._state.done = done
+            self._state.regression_detected = self._episode.regression_detected
+
+            obs = self._build_observation(reward=reward, done=done)
+            obs.metadata = {
+                **execution,
+                "step_result": step_result,
+                "reward_breakdown": reward_breakdown,
+                "failure_pattern": {
+                    "pass_rate": failure_pattern.pass_rate,
+                    "most_common_error": failure_pattern.most_common_error,
+                    "error_distribution": failure_pattern.error_distribution,
+                    "duration_mean": failure_pattern.duration_mean,
+                    "duration_std": failure_pattern.duration_std,
+                    "flakiness_score": failure_pattern.flakiness_score,
+                },
+                "hypothesis_history": self._episode.hypothesis_history,
+                "final_validation_runs": final_validation_runs,
+            }
+            return obs
+        except Exception as exc:
+            # Keep the session alive and return a structured step failure instead of aborting the websocket.
+            obs = self._build_observation(reward=-1.0, done=False)
+            obs.metadata = {
+                "action": action.action_type,
+                "error": type(exc).__name__,
+                "reason": str(exc),
+            }
+            return obs
 
     @property
     def state(self) -> FlakeForgeState:
@@ -229,8 +239,9 @@ class FlakeForgeEnvironment(Environment):
         test_ast = parse_ast_summary(str(test_path)) if test_path.exists() else None
         source_ast = parse_ast_summary(str(source_path)) if source_path.exists() else None
 
-        test_src = read_file_excerpt(str(test_path), 1, 200) if test_path.exists() else ""
-        src_under_test = read_file_excerpt(str(source_path), 1, 200) if source_path.exists() else ""
+        # read_file_excerpt enforces a max 100-line window.
+        test_src = read_file_excerpt(str(test_path), 1, 100) if test_path.exists() else ""
+        src_under_test = read_file_excerpt(str(source_path), 1, 100) if source_path.exists() else ""
 
         async_markers: List[str] = []
         if test_ast:
