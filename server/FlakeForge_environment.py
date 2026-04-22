@@ -198,6 +198,10 @@ class FlakeForgeEnvironment(Environment):
             return obs
         except Exception as exc:
             # Keep the session alive and return a structured step failure instead of aborting the websocket.
+            import sys
+            import traceback
+            print(f"[SERVER_ERROR] Step exception: {type(exc).__name__}: {exc}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             obs = self._build_observation(reward=-1.0, done=False)
             obs.metadata = {
                 "action": action.action_type,
