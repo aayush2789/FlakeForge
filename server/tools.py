@@ -386,7 +386,12 @@ def _parse_python_ast_summary(source: str) -> ASTSummary:
     threading_primitives: List[str] = []
     external_calls: List[str] = []
 
-    external_modules = {"requests", "boto3", "httpx", "redis", "psycopg2"}
+    external_modules = {
+        "requests", "boto3", "httpx", "redis", "psycopg2",
+        # V2 expansion: missing real-world dependencies
+        "aiohttp", "grpc", "sqlalchemy", "asyncpg", "celery", "pika",
+        "subprocess", "time",
+    }
     primitive_markers = {
         "threading.Lock",
         "threading.Event",
@@ -510,6 +515,15 @@ def _apply_patch_operation(source: str, operation: str, target: Dict[str, Any], 
         if target.get("type") == "function":
             return _apply_insert_in_function(source, target, rendered, operation)
         return _apply_textual_operation_idempotent(source, operation, identifier, rendered)
+    # ── V2 Deep-Action Operations (Bug 2 fix) ──────────────────────────────────
+    if operation == "refactor_concurrency_primitive":
+        return _apply_refactor_concurrency(source, target)
+    if operation == "isolate_boundary_call":
+        return _apply_isolate_boundary(source, target)
+    if operation == "extract_async_scope":
+        return _apply_extract_async_scope(source, target)
+    if operation == "harden_idempotency":
+        return _apply_harden_idempotency(source, target)
     raise ValueError(f"Unsupported operation: {operation}")
 
 
@@ -720,6 +734,106 @@ def _apply_seed_call(source: str, fn_name: str, library: str) -> str:
         transformed = "import random\n" + transformed
     if library in {"numpy", "both"} and "import numpy" not in transformed:
         transformed = "import numpy\n" + transformed
+    return transformed
+
+
+# ── V2 Deep-Action Implementations (Bug 2 fix) ────────────────────────────────────
+
+def _apply_refactor_concurrency(source: str, target: Dict[str, Any]) -> str:
+    """Swap threading primitive for a safer alternative (e.g., Lock → RLock, threading → asyncio)."""
+    from_primitive = str(target.get("from_primitive", "threading.Lock"))
+    to_primitive = str(target.get("to_primitive", "threading.RLock"))
+
+    module = cst.parse_module(source)
+
+    class PrimitiveSwapper(cst.CSTTransformer):
+        def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
+            name = _cst_name(updated_node.func)
+            if from_primitive.split(".")[-1] in name:
+                try:
+                    replacement_expr = cst.parse_expression(to_primitive)
+                    return updated_node.with_changes(func=replacement_expr)
+                except Exception:
+                    pass
+            return updated_node
+
+    return module.visit(PrimitiveSwapper()).code
+
+
+def _apply_isolate_boundary(source: str, target: Dict[str, Any]) -> str:
+    """Wrap external call in circuit-breaker / timeout."""
+    boundary_call = str(target.get("boundary_call", ""))
+    pattern = str(target.get("pattern", "timeout"))
+
+    module = cst.parse_module(source)
+
+    class BoundaryIsolator(cst.CSTTransformer):
+        def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
+            name = _cst_name(updated_node.func)
+            if boundary_call and boundary_call in (name or ""):
+                try:
+                    if pattern == "timeout":
+                        wrapper = cst.parse_expression(f"asyncio.wait_for({name}(), timeout=5.0)")
+                    elif pattern == "circuit_breaker":
+                        wrapper = cst.parse_expression(f"_circuit_breaker({name})")
+                    else:
+                        return updated_node
+                    return wrapper
+                except Exception:
+                    pass
+            return updated_node
+
+    return module.visit(BoundaryIsolator()).code
+
+
+def _apply_extract_async_scope(source: str, target: Dict[str, Any]) -> str:
+    """Move sync code out of async context or vice versa."""
+    fn_name = str(target.get("function_name", ""))
+    direction = str(target.get("direction", "sync_to_async"))
+
+    module = cst.parse_module(source)
+
+    class AsyncScopeExtractor(cst.CSTTransformer):
+        def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
+            if fn_name and fn_name not in original_node.name.value:
+                return updated_node
+            if direction == "sync_to_async" and not original_node.asynchronous:
+                return updated_node.with_changes(asynchronous=True)
+            elif direction == "async_to_sync" and original_node.asynchronous:
+                return updated_node.with_changes(asynchronous=False)
+            return updated_node
+
+    return module.visit(AsyncScopeExtractor()).code
+
+
+def _apply_harden_idempotency(source: str, target: Dict[str, Any]) -> str:
+    """Add idempotency guard to a state-mutating function."""
+    state_target = str(target.get("state_target", ""))
+    key_strategy = str(target.get("key_strategy", "uuid"))
+
+    module = cst.parse_module(source)
+    idempotency_guard = (
+        "\n"
+        "def _ensure_idempotency(key_strategy='uuid'):\n"
+        "    import uuid, hashlib\n"
+        "    if key_strategy == 'uuid':\n"
+        "        return str(uuid.uuid4())\n"
+        "    return hashlib.md5(str(key_strategy).encode()).hexdigest()\n"
+    )
+
+    class IdempotencyHardener(cst.CSTTransformer):
+        def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
+            if state_target and state_target not in original_node.name.value:
+                return updated_node
+            body = list(updated_node.body.body)
+            guard_stmt = cst.parse_statement("_idempotency_key = _ensure_idempotency()\n")
+            if any(getattr(s, "code", "").find("_idempotency_key") >= 0 for s in body):
+                return updated_node
+            return updated_node.with_changes(body=updated_node.body.with_changes(body=[guard_stmt, *body]))
+
+    transformed = module.visit(IdempotencyHardener()).code
+    if "def _ensure_idempotency" not in transformed:
+        transformed = transformed + idempotency_guard
     return transformed
 
 

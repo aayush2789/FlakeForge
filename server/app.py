@@ -13,12 +13,8 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
-try:
-    from ..models import FlakeForgeAction, FlakeForgeObservation
-    from .FlakeForge_environment import FlakeForgeEnvironment
-except ModuleNotFoundError:
-    from models import FlakeForgeAction, FlakeForgeObservation
-    from server.FlakeForge_environment import FlakeForgeEnvironment
+from models import FlakeForgeAction, FlakeForgeObservation
+from server.FlakeForge_environment import FlakeForgeEnvironment
 
 
 app = create_app(FlakeForgeEnvironment, FlakeForgeAction, FlakeForgeObservation)

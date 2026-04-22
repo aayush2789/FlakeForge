@@ -86,7 +86,9 @@ class FixerRole:
         self.adapter = adapter
         self.system_prompt = (
             "You are a senior software engineer repairing a flaky CI test. "
-            "Select exactly one action from the eight allowed actions and return JSON."
+            "Select exactly one action from the allowed actions and return JSON. "
+            "Include 'predicted_pass_rate_after' (float 0-1): your estimate of the "
+            "pass rate after this fix is applied."
         )
 
     def produce_action(
@@ -133,6 +135,12 @@ class FixerRole:
                 action_type=parsed.get("action_type", "GATHER_EVIDENCE"),
                 parameters=dict(parsed.get("parameters", {})),
                 hypothesis=_hypothesis_payload(hypothesis),
+                # Improvement 1: capture model's predicted outcome.
+                predicted_pass_rate_after=(
+                    float(parsed["predicted_pass_rate_after"])
+                    if "predicted_pass_rate_after" in parsed
+                    else None
+                ),
             )
         except Exception:
             return FlakeForgeAction(
@@ -210,7 +218,17 @@ def _compact_observation_payload(observation: FlakeForgeObservation, include_sou
         "current_hypothesis": _hypothesis_payload(observation.current_hypothesis)
         if observation.current_hypothesis
         else None,
+        # Improvement 5: secondary hypothesis gives Fixer a hedging option.
+        "secondary_hypothesis": {
+            "root_cause_category": observation.secondary_hypothesis.root_cause_category,
+            "confidence": observation.secondary_hypothesis.confidence,
+            "suggested_action": observation.secondary_hypothesis.suggested_action,
+        }
+        if observation.secondary_hypothesis
+        else None,
         "log_snippets": observation.log_snippets[-3:],
+        # Improvement 4: duration fingerprint helps Fixer weight timing-race actions.
+        "duration_fingerprint": observation.duration_fingerprint,
     }
     if include_sources:
         payload["test_function_source"] = _first_lines(observation.test_function_source, 50)

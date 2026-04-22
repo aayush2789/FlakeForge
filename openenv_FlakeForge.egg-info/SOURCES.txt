@@ -1,7 +1,12 @@
 README.md
+__init__.py
+client.py
+models.py
 pyproject.toml
+./QUICKSTART.py
 ./__init__.py
 ./client.py
+./inference.py
 ./models.py
 openenv_FlakeForge.egg-info/PKG-INFO
 openenv_FlakeForge.egg-info/SOURCES.txt
@@ -12,7 +17,10 @@ openenv_FlakeForge.egg-info/top_level.txt
 server/FlakeForge_environment.py
 server/__init__.py
 server/app.py
+server/causal_graph.py
+server/chaos_runner.py
 server/docker_runner.py
+server/perf_sentinel.py
 server/reward.py
 server/tools.py
 tests/test_flakeforge_integration.py

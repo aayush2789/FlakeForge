@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import json
+import math
+import statistics
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -84,6 +86,9 @@ class EpisodeState:
     perf_median_ratio: float = 1.0
     infrastructure_sensitive: bool = False
     causal_graph_dict: Optional[Dict[str, Any]] = None
+    # ── Improvements 4 & 5 ────────────────────────────────────────────
+    duration_fingerprint: Optional[Dict[str, float]] = None  # computed at reset
+    secondary_hypothesis: Optional[Hypothesis] = None        # runner-up when confidence < 0.5
 
 
 class FlakeForgeEnvironment(Environment):
@@ -95,7 +100,7 @@ class FlakeForgeEnvironment(Environment):
         test_id: str = "tests/test_flaky.py::test_flaky_case",
         max_steps: int = 14,
         benchmark_test_id: Optional[str] = None,
-        chaos_profile: str = "cpu",
+        chaos_profile: str = "none",
     ):
         self.repo_path = Path(repo_path)
         if not self.repo_path.is_absolute():
@@ -125,10 +130,12 @@ class FlakeForgeEnvironment(Environment):
             test_identifier=self.test_id,
         )
 
-        baseline_runs = self._run_test_n_times(n=10)
+        baseline_runs = self._run_test_n_times(n=5)
         self._episode.run_history = baseline_runs[-10:]
         self._episode.baseline_pass_rate = self._pass_rate(baseline_runs)
         self._episode.current_pass_rate = self._episode.baseline_pass_rate
+        # Improvement 4: compute duration fingerprint from baseline runs.
+        self._episode.duration_fingerprint = _compute_duration_fingerprint(baseline_runs)
 
         # ── V2 Pillar 2: Chaos baseline ───────────────────────────────────────
         if self.chaos_profile != ChaosProfile.NONE:
@@ -206,8 +213,17 @@ class FlakeForgeEnvironment(Environment):
                 obs = self._build_observation(reward=-0.5, done=False)
                 obs.metadata = execution
                 return obs
+        except Exception as exc:
+            obs = self._build_observation(reward=-1.0, done=False)
+            obs.metadata = {"action": action.action_type, "error": str(exc), "no_op": True}
+            return obs
 
-        post_runs = self._run_test_n_times(n=10)
+        import logging as _logging
+        _log = _logging.getLogger(__name__).info
+
+        _log("[ENV.step] start action=%s step=%d", action.action_type, self._episode.step_count + 1)
+        post_runs = self._run_test_n_times(n=5)
+        _log("[ENV.step] tests done: pass_rate=%.2f", self._pass_rate(post_runs))
         self._episode.run_history.extend(post_runs)
         self._episode.run_history = self._episode.run_history[-10:]
         self._episode.current_pass_rate = self._pass_rate(post_runs)
@@ -272,7 +288,16 @@ class FlakeForgeEnvironment(Environment):
         obs = self._build_observation(reward=reward, done=done)
         obs.metadata = {
             **execution,
-            "step_result": step_result,
+            "step_result": {
+                **step_result,
+                # Improvement 1: thread predicted_pass_rate_after into step_result
+                # so reward.py can compute the prediction-error penalty.
+                "predicted_pass_rate_after": (
+                    action.predicted_pass_rate_after
+                    if hasattr(action, "predicted_pass_rate_after")
+                    else None
+                ),
+            },
             "reward_breakdown": reward_breakdown,
             "failure_pattern": {
                 "pass_rate": failure_pattern.pass_rate,
@@ -360,6 +385,9 @@ class FlakeForgeEnvironment(Environment):
                 "regression": self._episode.perf_regression_detected,
                 "median_ratio": self._episode.perf_median_ratio,
             } if self.perf_sentinel.has_baseline else None,
+            # ── Improvements 4 & 5 ───────────────────────────────────────────
+            duration_fingerprint=self._episode.duration_fingerprint,
+            secondary_hypothesis=self._episode.secondary_hypothesis,
         )
 
     def _execute_action(self, action: FlakeForgeAction) -> Dict[str, Any]:
@@ -408,6 +436,50 @@ class FlakeForgeEnvironment(Environment):
                 )
             self._episode.total_diff_lines = max(0, self._episode.total_diff_lines - last_patch.lines_changed)
             return {"action": action.action_type, "reverted": target}
+
+        if action.action_type == "DIAGNOSE_BOUNDARY":
+            boundary_node = action.parameters.get("boundary_node", "")
+            try:
+                test_file_name = self.test_id.split("::", 1)[0]
+                test_func = self.test_id.split("::", 1)[-1] if "::" in self.test_id else ""
+                if test_func:
+                    fresh_graph = self.causal_graph_builder.build(
+                        str(self.repo_path / test_file_name), test_func
+                    )
+                    self._episode.causal_graph_dict = fresh_graph.to_observation_dict()
+                boundary_nodes = [
+                    n for n in (self._episode.causal_graph_dict or {}).get("nodes", [])
+                    if boundary_node in n.get("id", "") or n.get("boundary")
+                ]
+                return {
+                    "action": action.action_type,
+                    "boundary_node": boundary_node,
+                    "found_boundaries": boundary_nodes,
+                    "no_op": False,
+                }
+            except Exception as exc:
+                return {"action": action.action_type, "no_op": True, "reason": str(exc)}
+
+        if action.action_type == "CHAOS_PROBE":
+            profile = ChaosProfile(action.parameters["profile"])
+            n_runs = action.parameters.get("n_runs", 10)
+            chaos_records = self.chaos_runner.run_test_n_times_chaos(
+                self.test_id, n=n_runs, profile=profile
+            )
+            chaos_pass_rate = self._pass_rate(chaos_records)
+            self._episode.chaos_pass_rate = chaos_pass_rate
+            clean_pr = self._episode.current_pass_rate
+            is_sensitive = chaos_pass_rate < (clean_pr - 0.2)
+            self._episode.infrastructure_sensitive = is_sensitive
+            return {
+                "action": action.action_type,
+                "profile": profile.value,
+                "n_runs": n_runs,
+                "chaos_pass_rate": chaos_pass_rate,
+                "clean_pass_rate": clean_pr,
+                "infrastructure_sensitive": is_sensitive,
+                "no_op": False,
+            }
 
         if action.action_type != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
             return {"action": action.action_type, "no_op": True, "reason": "unable_to_ground_evidence"}
@@ -519,51 +591,6 @@ class FlakeForgeEnvironment(Environment):
                 "parameters": {},
             }
         # ── V2 Deep-Action Handlers ────────────────────────────────────────────
-        if action.action_type == "DIAGNOSE_BOUNDARY":
-            boundary_node = action.parameters.get("boundary_node", "")
-            # Rebuild the causal graph and return its dict
-            try:
-                test_file = self.test_id.split("::", 1)[0]
-                test_func = self.test_id.split("::", 1)[-1] if "::" in self.test_id else ""
-                if test_func:
-                    fresh_graph = self.causal_graph_builder.build(
-                        str(self.repo_path / test_file), test_func
-                    )
-                    self._episode.causal_graph_dict = fresh_graph.to_observation_dict()
-                boundary_nodes = [
-                    n for n in (self._episode.causal_graph_dict or {}).get("nodes", [])
-                    if boundary_node in n.get("id", "") or n.get("boundary")
-                ]
-                return {
-                    "action": action.action_type,
-                    "boundary_node": boundary_node,
-                    "found_boundaries": boundary_nodes,
-                    "no_op": False,
-                }
-            except Exception as exc:
-                return {"action": action.action_type, "no_op": True, "reason": str(exc)}
-
-        if action.action_type == "CHAOS_PROBE":
-            profile = ChaosProfile(action.parameters["profile"])
-            n_runs = action.parameters.get("n_runs", 10)
-            chaos_records = self.chaos_runner.run_test_n_times_chaos(
-                self.test_id, n=n_runs, profile=profile
-            )
-            chaos_pass_rate = self._pass_rate(chaos_records)
-            self._episode.chaos_pass_rate = chaos_pass_rate
-            clean_pr = self._episode.current_pass_rate
-            is_sensitive = chaos_pass_rate < (clean_pr - 0.2)
-            self._episode.infrastructure_sensitive = is_sensitive
-            return {
-                "action": action.action_type,
-                "profile": profile.value,
-                "n_runs": n_runs,
-                "chaos_pass_rate": chaos_pass_rate,
-                "clean_pass_rate": clean_pr,
-                "infrastructure_sensitive": is_sensitive,
-                "no_op": False,
-            }
-
         if action.action_type == "REFACTOR_CONCURRENCY":
             return {
                 "operation": "refactor_concurrency_primitive",
@@ -621,29 +648,202 @@ class FlakeForgeEnvironment(Environment):
             return
 
     def _infer_hypothesis(self, runs: List[RunRecord]) -> Hypothesis:
+        """
+        V2 Enhanced: 5-level priority stack for root cause inference.
+        Level 1: Infrastructure sensitivity (chaos profile indicates infrastructure-sensitive)
+        Level 2: Causal graph warnings (async deadlock patterns)
+        Level 3: Boundary nodes (external dependency patterns)
+        Level 4: Error string analysis (timing, connection, assertion, etc.)
+        Level 5: Fallback to NONDETERMINISM
+        """
         error_types = [r.error_type or "" for r in runs if not r.passed]
         top_error = error_types[0] if error_types else ""
-
-        category = "NONDETERMINISM"
-        if "Timeout" in top_error or "TimeoutError" in top_error:
-            category = "TIMING_RACE"
-        elif "Connection" in top_error:
-            category = "EXTERNAL_DEPENDENCY"
-        elif "Assertion" in top_error:
-            category = "ORDER_DEPENDENCY"
-
         pass_rate = self._pass_rate(runs)
         confidence = max(0.3, min(0.95, 1.0 - abs(pass_rate - 0.5)))
+        
+        # ── Level 1: Infrastructure Sensitivity ─────────────────────────────────
+        if getattr(self._episode, "infrastructure_sensitive", False):
+            evidence = [
+                "Infrastructure-sensitive flakiness detected via chaos probe",
+                top_error or "intermittent_failure",
+            ]
+            return Hypothesis(
+                root_cause_category="INFRASTRUCTURE_SENSITIVE",
+                confidence=min(0.95, confidence + 0.2),
+                evidence=evidence,
+                suggested_action="ISOLATE_BOUNDARY" if top_error else "GATHER_EVIDENCE",
+            )
+        
+        # ── Level 2: Causal Graph Warnings (ASYNC_DEADLOCK) ───────────────────
+        causal_graph_dict = getattr(self._episode, "causal_graph_dict", None)
+        if causal_graph_dict:
+            boundary_warnings = causal_graph_dict.get("boundary_warnings", [])
+            for warning in boundary_warnings:
+                if "threading.Lock" in warning and "async" in warning.lower():
+                    evidence = [
+                        f"Causal graph detected: {warning}",
+                        top_error or "intermittent_failure",
+                    ]
+                    return Hypothesis(
+                        root_cause_category="ASYNC_DEADLOCK",
+                        confidence=min(0.95, confidence + 0.15),
+                        evidence=evidence,
+                        suggested_action="EXTRACT_ASYNC_SCOPE",
+                    )
+                if "blocking" in warning.lower() and "async" in warning.lower():
+                    evidence = [
+                        f"Causal graph detected: {warning}",
+                        top_error or "intermittent_failure",
+                    ]
+                    return Hypothesis(
+                        root_cause_category="ASYNC_DEADLOCK",
+                        confidence=min(0.95, confidence + 0.15),
+                        evidence=evidence,
+                        suggested_action="EXTRACT_ASYNC_SCOPE",
+                    )
+        
+        # ── Level 3: Boundary Nodes (External Dependencies) ────────────────────
+        if causal_graph_dict:
+            boundary_nodes = causal_graph_dict.get("boundary_nodes", [])
+            nodes_by_type = {}
+            for node_id in boundary_nodes:
+                # Find the node details
+                for node in causal_graph_dict.get("nodes", []):
+                    if node.get("id") == node_id:
+                        boundary_type = node.get("boundary")
+                        if boundary_type:
+                            nodes_by_type.setdefault(boundary_type, []).append(node_id)
+                        break
+            
+            if "db" in nodes_by_type or "queue" in nodes_by_type:
+                evidence = [
+                    f"Boundary nodes detected: {list(nodes_by_type.keys())}",
+                    top_error or "intermittent_failure",
+                ]
+                return Hypothesis(
+                    root_cause_category="EXTERNAL_DEPENDENCY",
+                    confidence=min(0.95, confidence + 0.1),
+                    evidence=evidence,
+                    suggested_action="MOCK_DEPENDENCY",
+                )
+            if "http" in nodes_by_type or "grpc" in nodes_by_type:
+                evidence = [
+                    f"HTTP/gRPC boundary detected: {list(nodes_by_type.keys())}",
+                    top_error or "intermittent_failure",
+                ]
+                return Hypothesis(
+                    root_cause_category="EXTERNAL_DEPENDENCY",
+                    confidence=min(0.95, confidence + 0.1),
+                    evidence=evidence,
+                    suggested_action="ISOLATE_BOUNDARY",
+                )
+        
+        # ── Level 4: Error String Analysis (V1 pattern matching) ───────────────
+        category = "NONDETERMINISM"
+        suggested_action = "GATHER_EVIDENCE" if confidence < 0.5 else "ADD_TIMING_GUARD"
+
+        if "Timeout" in top_error or "TimeoutError" in top_error:
+            category = "TIMING_RACE"
+            suggested_action = "ADD_TIMING_GUARD"
+        elif "Connection" in top_error or "connection" in top_error.lower():
+            category = "EXTERNAL_DEPENDENCY"
+            suggested_action = "MOCK_DEPENDENCY"
+        elif "Assertion" in top_error:
+            category = "ORDER_DEPENDENCY"
+            suggested_action = "ADD_SYNCHRONIZATION"
+        elif "state" in top_error.lower() or "shared" in top_error.lower():
+            category = "SHARED_STATE"
+            suggested_action = "RESET_STATE"
+        elif "resource" in top_error.lower() or "leak" in top_error.lower():
+            category = "RESOURCE_LEAK"
+            suggested_action = "RESET_STATE"
+
+        # ── Improvement 4: Duration fingerprint confidence boosting ────────────
+        # A high coefficient of variation (cv > 0.3) is near-definitive evidence
+        # of timing nondeterminism. Boost confidence and skip GATHER_EVIDENCE.
+        fp = self._episode.duration_fingerprint
+        if fp and fp.get("cv", 0) > 0.3:
+            timing_boost = min(0.2, fp["cv"] * 0.5)
+            confidence = min(0.95, confidence + timing_boost)
+            if category == "NONDETERMINISM":
+                category = "TIMING_RACE"
+                suggested_action = "ADD_TIMING_GUARD"
+
         evidence = [
             self.test_id.split("::")[-1],
             top_error or "intermittent_failure",
         ]
-        return Hypothesis(
+
+        primary = Hypothesis(
             root_cause_category=category,
             confidence=confidence,
             evidence=evidence,
-            suggested_action="GATHER_EVIDENCE" if confidence < 0.5 else "ADD_TIMING_GUARD",
+            suggested_action=suggested_action,
         )
+
+        # ── Improvement 5: Top-2 hypothesis tracking ───────────────────────────
+        # Generate a runner-up only when the primary is uncertain.
+        if confidence <= 0.5:
+            self._episode.secondary_hypothesis = _make_secondary_hypothesis(
+                primary_category=category,
+                top_error=top_error,
+                pass_rate=pass_rate,
+            )
+        else:
+            self._episode.secondary_hypothesis = None
+
+        return primary
+
+
+def _compute_duration_fingerprint(runs: List[Any]) -> Dict[str, float]:
+    """Compute timing statistics that drive Improvement 4 confidence boosting."""
+    import statistics as _stats
+    durations = [r.duration_ms for r in runs if r.duration_ms is not None]
+    if not durations:
+        return {"mean_ms": 0.0, "std_ms": 0.0, "cv": 0.0, "flakiness_score": 0.0}
+    mean_ms = _stats.mean(durations)
+    std_ms = _stats.stdev(durations) if len(durations) > 1 else 0.0
+    cv = std_ms / mean_ms if mean_ms > 0 else 0.0
+    pass_rate = sum(1 for r in runs if r.passed) / len(runs)
+    flakiness_score = round((1.0 - pass_rate) * 0.6 + min(cv, 1.0) * 0.4, 4)
+    return {
+        "mean_ms": round(mean_ms, 1),
+        "std_ms": round(std_ms, 1),
+        "cv": round(cv, 4),
+        "flakiness_score": flakiness_score,
+    }
+
+
+def _make_secondary_hypothesis(
+    primary_category: str,
+    top_error: str,
+    pass_rate: float,
+) -> Optional[Hypothesis]:
+    """Generate a runner-up hypothesis when primary confidence is low (Improvement 5)."""
+    FALLBACKS: Dict[str, tuple] = {
+        "NONDETERMINISM":           ("SHARED_STATE",        "RESET_STATE"),
+        "SHARED_STATE":             ("TIMING_RACE",         "ADD_TIMING_GUARD"),
+        "TIMING_RACE":              ("ASYNC_DEADLOCK",      "EXTRACT_ASYNC_SCOPE"),
+        "ASYNC_DEADLOCK":           ("TIMING_RACE",         "ADD_TIMING_GUARD"),
+        "ORDER_DEPENDENCY":         ("SHARED_STATE",        "RESET_STATE"),
+        "EXTERNAL_DEPENDENCY":      ("TIMING_RACE",         "ADD_TIMING_GUARD"),
+        "RESOURCE_LEAK":            ("SHARED_STATE",        "RESET_STATE"),
+        "INFRASTRUCTURE_SENSITIVE": ("EXTERNAL_DEPENDENCY", "ISOLATE_BOUNDARY"),
+    }
+    fallback = FALLBACKS.get(primary_category)
+    if not fallback:
+        return None
+    secondary_category, secondary_action = fallback
+    secondary_confidence = max(0.1, min(0.4, (1.0 - pass_rate) * 0.4))
+    try:
+        return Hypothesis(
+            root_cause_category=secondary_category,
+            confidence=secondary_confidence,
+            evidence=[top_error or "intermittent_failure"],
+            suggested_action=secondary_action,
+        )
+    except Exception:
+        return None
 
 
 # Backward compatible alias for template-generated class name.

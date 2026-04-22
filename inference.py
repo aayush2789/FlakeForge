@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""FlakeForge inference script with strict Analyzer -> Fixer execution flow."""
+"""FlakeForge inference script with strict Analyzer -> Fixer execution flow.
+
+Key change from original:
+  - REMOVED the duplicate FrozenJudge / OpenAIJudgeBackend path that was
+    firing two extra LLM calls (128–136 s each) PER STEP.
+  - Judge scores are now ONLY computed by client.py's async _run_judge()
+    which already had a 60-second asyncio.wait_for guard.
+  - Judge scores (including critique + prediction_error) are read from the
+    StepResult returned by env.step(), which the client populates internally.
+"""
 
 from __future__ import annotations
 
@@ -16,15 +25,13 @@ from openai import OpenAI
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover
-    load_dotenv = None
+    load_dotenv = None  # type: ignore[assignment]
 
 try:
-    from .agent.judge import FrozenJudge, JudgeLLMBackend
     from .agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
     from .client import FlakeForgeEnv
     from .models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 except ImportError:
-    from agent.judge import FrozenJudge, JudgeLLMBackend
     from agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
     from client import FlakeForgeEnv
     from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
@@ -77,6 +84,8 @@ class OpenAIModelBackend(ModelBackend):
             {"role": "system", "content": f"{system_prompt}\n{role_hint}\nReturn only JSON."},
             {"role": "user", "content": prompt},
         ]
+        t_start = time.time()
+        _log(f"[LLM] Backend request start: adapter={adapter_name}")
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
@@ -86,43 +95,13 @@ class OpenAIModelBackend(ModelBackend):
                 max_tokens=MAX_TOKENS,
                 timeout=REQUEST_TIMEOUT_S,
             )
+            elapsed = time.time() - t_start
+            _log(f"[LLM] Backend request success: adapter={adapter_name} elapsed={elapsed:.2f}s")
             return completion.choices[0].message.content or "{}"
         except Exception as exc:
-            _log(f"[WARN] model backend failure adapter={adapter_name}: {exc}")
+            elapsed = time.time() - t_start
+            _log(f"[WARN] model backend failure adapter={adapter_name} elapsed={elapsed:.2f}s: {exc}")
             return "{}"
-
-
-class OpenAIJudgeBackend(JudgeLLMBackend):
-    """Judge backend used by FrozenJudge for hypothesis/patch scoring."""
-
-    def __init__(self, model: str, base_url: str, api_key: Optional[str]) -> None:
-        self.model = model
-        self.client = OpenAI(base_url=base_url, api_key=api_key or "")
-
-    def complete(self, prompt: str) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict senior engineer judge. Return only JSON "
-                    "with keys: score (0-5) and reasoning."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-        try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                top_p=0.95,
-                max_tokens=300,
-                timeout=REQUEST_TIMEOUT_S,
-            )
-            return completion.choices[0].message.content or '{"score": 0, "reasoning": "empty"}'
-        except Exception as exc:
-            _log(f"[WARN] judge backend failure: {exc}")
-            return '{"score": 0, "reasoning": "judge_call_failed"}'
 
 
 def _extract_observation(reset_or_step_result: Any) -> FlakeForgeObservation:
@@ -141,7 +120,8 @@ def _attach_hypothesis_to_action(action: FlakeForgeAction, hypothesis: Hypothesi
     return FlakeForgeAction(
         action_type=action.action_type,
         parameters=action.parameters,
-        hypothesis=h_payload
+        hypothesis=h_payload,
+        predicted_pass_rate_after=action.predicted_pass_rate_after,  # Improvement 1
     )
 
 
@@ -161,8 +141,11 @@ async def run_inference() -> Dict[str, Any]:
         raise RuntimeError("Missing API key. Set NVIDIA_API_KEY or OPENAI_API_KEY.")
 
     model_backend = OpenAIModelBackend(MODEL_NAME, API_BASE_URL, NVIDIA_API_KEY)
-    judge_backend = OpenAIJudgeBackend(JUDGE_MODEL, API_BASE_URL, NVIDIA_API_KEY)
-    judge = FrozenJudge(backend=judge_backend)
+
+    # NOTE: No FrozenJudge constructed here. Judging is fully owned by
+    # FlakeForgeEnv.step() (client.py) which runs the two judge calls
+    # concurrently with a 60 s asyncio.wait_for guard. This eliminates
+    # the 256+ s per-step overhead from the duplicate synchronous judge calls.
 
     analyzer = AnalyzerRole(
         backend=model_backend,
@@ -183,6 +166,12 @@ async def run_inference() -> Dict[str, Any]:
 
         _log(f"[START] episode={obs.episode_id} test={obs.test_identifier} max_steps={MAX_STEPS}")
         _log(f"[BASELINE] pass_rate={obs.baseline_pass_rate:.3f}")
+        if obs.duration_fingerprint:
+            fp = obs.duration_fingerprint
+            _log(
+                f"[FINGERPRINT] mean={fp.get('mean_ms', 0):.0f}ms "
+                f"cv={fp.get('cv', 0):.3f} flakiness={fp.get('flakiness_score', 0):.3f}"
+            )
 
         for step_idx in range(1, MAX_STEPS + 1):
             step_t0 = time.time()
@@ -199,13 +188,20 @@ async def run_inference() -> Dict[str, Any]:
             except Exception as exc:
                 _log(f"[ERROR] env.step failed at step={step_idx}: {type(exc).__name__}: {exc}")
                 break
+
             next_obs = _extract_observation(step_result)
             reward = float(getattr(step_result, "reward", next_obs.reward or 0.0))
 
-            metadata = getattr(next_obs, "metadata", {}) or {}
-            patch_diff = str(metadata.get("diff", ""))
-            hypothesis_score = judge.score_hypothesis(obs, hypothesis)
-            patch_score = judge.score_patch(obs, hypothesis, action, patch_diff)
+            # Judge scores now come from client.py's async _run_judge().
+            # They are stored in env._judge_scores[-1] after step() completes.
+            latest_scores = env.get_judge_scores()[-1] if env.get_judge_scores() else {}
+            hypothesis_score = int(latest_scores.get("judge_hypothesis_score", 0))
+            patch_score = int(latest_scores.get("judge_patch_score", 0))
+            critique = str(latest_scores.get("critique", ""))
+            prediction_error = str(latest_scores.get("prediction_error", ""))
+
+            if critique:
+                _log(f"[JUDGE_CRITIQUE] step={step_idx}: {critique}")
 
             rec = {
                 "step": step_idx,
@@ -215,11 +211,20 @@ async def run_inference() -> Dict[str, Any]:
                     "evidence": list(hypothesis.evidence),
                     "suggested_action": hypothesis.suggested_action,
                 },
+                "secondary_hypothesis": {
+                    "root_cause_category": next_obs.secondary_hypothesis.root_cause_category,
+                    "confidence": float(next_obs.secondary_hypothesis.confidence),
+                }
+                if next_obs.secondary_hypothesis
+                else None,
                 "action": action.model_dump(),
+                "predicted_pass_rate_after": action.predicted_pass_rate_after,
                 "reward": reward,
                 "pass_rate": float(next_obs.current_pass_rate),
-                "judge_hypothesis_score": int(hypothesis_score.get("score", 0)),
-                "judge_patch_score": int(patch_score.get("score", 0)),
+                "judge_hypothesis_score": hypothesis_score,
+                "judge_patch_score": patch_score,
+                "judge_critique": critique,
+                "judge_prediction_error": prediction_error,
                 "done": bool(next_obs.done),
                 "duration_s": round(time.time() - step_t0, 3),
             }
@@ -232,8 +237,8 @@ async def run_inference() -> Dict[str, Any]:
                 f"execute={action.action_type} "
                 f"reward={reward:.3f} "
                 f"pass_rate={next_obs.current_pass_rate:.3f} "
-                f"judge_h={rec['judge_hypothesis_score']} "
-                f"judge_p={rec['judge_patch_score']} "
+                f"judge_h={hypothesis_score} "
+                f"judge_p={patch_score} "
                 f"done={str(bool(next_obs.done)).lower()}"
             )
 
@@ -263,6 +268,7 @@ async def run_inference() -> Dict[str, Any]:
             "avg_judge_hypothesis_score": mean_h,
             "avg_judge_patch_score": mean_p,
             "elapsed_s": elapsed_s,
+            "duration_fingerprint": final_obs.duration_fingerprint,
             "steps": steps,
         }
         SUMMARY_FILE.write_text(json.dumps(summary, indent=2), encoding="utf-8")

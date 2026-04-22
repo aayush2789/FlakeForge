@@ -53,6 +53,19 @@ class FlakeForgeAction(Action):
     parameters: Dict[str, Any] = Field(default_factory=dict)
     hypothesis: Optional["HypothesisPayload"] = None
     judge_feedback: Optional["JudgeFeedbackPayload"] = None
+    # Improvement 1: agent's predicted outcome before env evaluates the action.
+    # Penalised by reward shaping when wrong — accelerates credit assignment.
+    predicted_pass_rate_after: Optional[float] = Field(
+        default=None,
+        description="Agent's predicted pass rate after this action (0.0-1.0).",
+    )
+
+    @field_validator("predicted_pass_rate_after", mode="before")
+    @classmethod
+    def _clamp_predicted_pass_rate(cls, v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        return max(0.0, min(1.0, float(v)))
 
     @model_validator(mode="after")
     def _validate_action_payload(self) -> "FlakeForgeAction":
@@ -227,6 +240,9 @@ class HypothesisPayload(BaseModel):
 class JudgeFeedbackPayload(BaseModel):
     judge_hypothesis_score: int = 0
     judge_patch_score: int = 0
+    # Improvement 3 (Reflexion): verbal critique fed back into Fixer's next prompt.
+    critique: str = ""
+    prediction_error: str = ""
 
     @field_validator("judge_hypothesis_score", "judge_patch_score")
     @classmethod
@@ -292,6 +308,17 @@ class FlakeForgeObservation(Observation):
     infrastructure_sensitive: bool = Field(
         default=False,
         description="True when chaos baseline reveals infrastructure-dependent flakiness.",
+    )
+    # Improvement 4: timing statistics from baseline runs, used to boost
+    # initial hypothesis confidence and reduce wasted GATHER_EVIDENCE steps.
+    duration_fingerprint: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="{mean_ms, std_ms, cv, flakiness_score} computed from baseline runs.",
+    )
+    # Improvement 5: competing hypothesis when primary confidence < 0.5.
+    secondary_hypothesis: Optional[Hypothesis] = Field(
+        default=None,
+        description="Runner-up root-cause hypothesis for low-confidence situations.",
     )
 
     @field_validator("run_history")
