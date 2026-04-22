@@ -5,7 +5,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Protocol
 
-from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+try:
+    from ..models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+except ImportError:
+    from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
 
 class JudgeLLMBackend(Protocol):

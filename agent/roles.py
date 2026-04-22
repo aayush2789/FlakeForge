@@ -7,12 +7,18 @@ from typing import Any, Dict, Optional, Protocol
 
 from pydantic import TypeAdapter
 
-from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+try:
+    from ..models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+except ImportError:
+    from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
 try:
-    from server.tools import get_similar_fixes
+    from ..server.tools import get_similar_fixes
 except Exception:  # pragma: no cover
-    get_similar_fixes = None  # type: ignore[assignment]
+    try:
+        from server.tools import get_similar_fixes
+    except Exception:
+        get_similar_fixes = None  # type: ignore[assignment]
 
 
 class ModelBackend(Protocol):

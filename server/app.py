@@ -21,8 +21,7 @@ except ModuleNotFoundError:
     from server.FlakeForge_environment import FlakeForgeEnvironment
 
 
-env = FlakeForgeEnvironment()
-app = create_app(env, FlakeForgeAction, FlakeForgeObservation)
+app = create_app(FlakeForgeEnvironment, FlakeForgeAction, FlakeForgeObservation)
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
