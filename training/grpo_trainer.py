@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from agent.judge import FrozenJudge
-from agent.roles import FlakeForgeAgentPipeline
-from models import FlakeForgeAction, FlakeForgeObservation
-from server.reward import compute_reward
+try:
+    from ..agent.judge import FrozenJudge
+    from ..agent.roles import FlakeForgeAgentPipeline
+    from ..models import FlakeForgeAction, FlakeForgeObservation
+    from ..server.reward import compute_reward
+except ImportError:
+    from agent.judge import FrozenJudge
+    from agent.roles import FlakeForgeAgentPipeline
+    from models import FlakeForgeAction, FlakeForgeObservation
+    from server.reward import compute_reward
 
 
 def run_episode(

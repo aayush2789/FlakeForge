@@ -12,7 +12,10 @@ from typing import Any, Dict, List
 
 import libcst as cst
 
-from models import ASTSummary, FailurePattern, RunRecord
+try:
+    from ..models import ASTSummary, FailurePattern, RunRecord
+except ImportError:
+    from models import ASTSummary, FailurePattern, RunRecord
 
 
 def list_repo_structure(root_path: str) -> List[dict]:

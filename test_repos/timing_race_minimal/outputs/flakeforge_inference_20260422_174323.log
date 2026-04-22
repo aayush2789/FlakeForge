@@ -1,0 +1,11 @@
+[INIT] Using HTTP env: http://localhost:8000
+[START] episode=4cd12f34-268c-486a-ae52-8ab63b3b9555 test=tests/test_flaky.py::test_flaky_simple max_steps=1
+[BASELINE] pass_rate=0.700
+[WARN] model backend failure adapter=analyzer_lora: Error code: 401 - {'status': 401, 'title': 'Unauthorized', 'detail': 'Authentication failed'}
+[WARN] model backend failure adapter=fixer_lora: Error code: 401 - {'status': 401, 'title': 'Unauthorized', 'detail': 'Authentication failed'}
+[WARN] judge backend failure: Error code: 401 - {'status': 401, 'title': 'Unauthorized', 'detail': 'Authentication failed'}
+[WARN] judge backend failure: Error code: 401 - {'status': 401, 'title': 'Unauthorized', 'detail': 'Authentication failed'}
+[STEP] idx=1 analyze=TIMING_RACE:0.10 execute=GATHER_EVIDENCE reward=-17.000 pass_rate=0.500 judge_h=0 judge_p=0 done=false
+[END] steps=1 baseline=0.700 final=0.500 improvement=-0.200 total_reward=-17.000 elapsed=8.47s
+[OUTPUT] summary_file=outputs\flakeforge_summary_20260422_174323.json
+[OUTPUT] log_file=outputs\flakeforge_inference_20260422_174323.log

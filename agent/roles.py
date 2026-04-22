@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Protocol
 
 from pydantic import TypeAdapter
 
-from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+try:
+    from ..models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+except ImportError:
+    from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
 try:
-    from server.tools import get_similar_fixes
+    from ..server.tools import get_similar_fixes
 except Exception:  # pragma: no cover
-    get_similar_fixes = None  # type: ignore[assignment]
+    try:
+        from server.tools import get_similar_fixes
+    except Exception:
+        get_similar_fixes = None  # type: ignore[assignment]
 
 
 class ModelBackend(Protocol):
@@ -212,6 +219,11 @@ def _compact_observation_payload(observation: FlakeForgeObservation, include_sou
 
 
 def _auto_retrieve_examples(observation: FlakeForgeObservation, hypothesis: Hypothesis) -> list[dict[str, str]]:
+    # Retrieval uses sentence-transformers/chromadb and can be expensive/unreliable in local runs.
+    # Keep it opt-in for inference stability.
+    if os.getenv("ENABLE_SIMILAR_FIX_RETRIEVAL", "0").strip().lower() not in {"1", "true", "yes"}:
+        return []
+
     if get_similar_fixes is None:
         return []
     try:

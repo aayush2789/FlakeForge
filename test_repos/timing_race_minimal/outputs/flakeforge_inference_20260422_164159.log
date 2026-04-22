@@ -1,0 +1,5 @@
+[INIT] Using HTTP env: http://localhost:8000
+[START] episode=d973ff54-98a4-47cb-b517-923f436f0c41 test=tests/test_flaky.py::test_flaky_case max_steps=5
+[BASELINE] pass_rate=0.000
+[WARN] model backend failure adapter=analyzer_lora: Error code: 404 - {'status': 404, 'title': 'Not Found', 'detail': "Function '9b96341b-9791-4db9-a00d-4e43aa192a39': Not found for account 'qAsY_DbaWT4YeweuO03gacsPlkHK0zWHYThwl3aokCg'"}
+[WARN] model backend failure adapter=fixer_lora: Error code: 404 - {'status': 404, 'title': 'Not Found', 'detail': "Function '9b96341b-9791-4db9-a00d-4e43aa192a39': Not found for account 'qAsY_DbaWT4YeweuO03gacsPlkHK0zWHYThwl3aokCg'"}

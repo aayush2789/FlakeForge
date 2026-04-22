@@ -98,6 +98,10 @@ class FlakeForgeEnvironment(Environment):
         chaos_profile: str = "cpu",
     ):
         self.repo_path = Path(repo_path)
+        if not self.repo_path.is_absolute():
+            # Assume relative to FlakeForge root
+            self.repo_path = Path(__file__).parent.parent / self.repo_path
+        
         self.test_id = test_id
         self.max_steps = max_steps
         self.benchmark_test_id = benchmark_test_id  # e.g. "tests/test_benchmark.py::test_speed"
@@ -196,11 +200,12 @@ class FlakeForgeEnvironment(Environment):
         self._episode.hypothesis_confidence_at_each_step.append(current_conf)
         self._episode.hypothesis_history.append({"step": self._episode.step_count, "confidence": current_conf})
 
-        execution = self._execute_action(action)
-        if execution.get("no_op"):
-            obs = self._build_observation(reward=-0.5, done=False)
-            obs.metadata = execution
-            return obs
+        try:
+            execution = self._execute_action(action)
+            if execution.get("no_op"):
+                obs = self._build_observation(reward=-0.5, done=False)
+                obs.metadata = execution
+                return obs
 
         post_runs = self._run_test_n_times(n=10)
         self._episode.run_history.extend(post_runs)
@@ -315,8 +320,9 @@ class FlakeForgeEnvironment(Environment):
         test_ast = parse_ast_summary(str(test_path)) if test_path.exists() else None
         source_ast = parse_ast_summary(str(source_path)) if source_path.exists() else None
 
-        test_src = read_file_excerpt(str(test_path), 1, 200) if test_path.exists() else ""
-        src_under_test = read_file_excerpt(str(source_path), 1, 200) if source_path.exists() else ""
+        # read_file_excerpt enforces a max 100-line window.
+        test_src = read_file_excerpt(str(test_path), 1, 100) if test_path.exists() else ""
+        src_under_test = read_file_excerpt(str(source_path), 1, 100) if source_path.exists() else ""
 
         async_markers: List[str] = []
         if test_ast:

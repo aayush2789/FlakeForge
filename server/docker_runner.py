@@ -7,7 +7,10 @@ import time
 from pathlib import Path
 from typing import List
 
-from models import RunRecord
+try:
+    from ..models import RunRecord
+except ImportError:
+    from models import RunRecord
 
 
 class DockerTestRunner:

@@ -1,0 +1,5 @@
+[INIT] Using HTTP env: http://localhost:8000
+[START] episode=493bf5fa-f9d5-495b-a355-59ef7ed2372f test=tests/test_flaky.py::test_flaky_case max_steps=5
+[BASELINE] pass_rate=0.000
+[WARN] model backend failure adapter=analyzer_lora: Error code: 401 - {'status': 401, 'title': 'Unauthorized', 'detail': 'Authentication failed'}
+[WARN] model backend failure adapter=fixer_lora: Error code: 401 - {'status': 401, 'title': 'Unauthorized', 'detail': 'Authentication failed'}
