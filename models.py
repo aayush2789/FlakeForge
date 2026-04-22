@@ -15,14 +15,22 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 ACTION_TYPES = Literal[
+    # ── V1 Actions ────────────────────────────────────────────────────
     "GATHER_EVIDENCE",
     "ADD_TIMING_GUARD",
     "ADD_SYNCHRONIZATION",
     "MOCK_DEPENDENCY",
     "RESET_STATE",
     "ADD_RETRY",
-    "SEED_RANDOMNESS",
     "REVERT_LAST_PATCH",
+    "SEED_RANDOMNESS",
+    # ── V2 Deep-Surgery Actions ───────────────────────────────────────
+    "DIAGNOSE_BOUNDARY",       # Pull source across a detected service/DB boundary
+    "REFACTOR_CONCURRENCY",    # Swap threading primitive for a safer alternative
+    "ISOLATE_BOUNDARY",        # Wrap external call in circuit-breaker / timeout
+    "EXTRACT_ASYNC_SCOPE",     # Move sync code out of async context or vice versa
+    "HARDEN_IDEMPOTENCY",      # Add idempotency guard to a state-mutating function
+    "CHAOS_PROBE",             # Run under chaos profile to gather evidence
 ]
 
 ROOT_CAUSE_TYPES = Literal[
@@ -32,6 +40,9 @@ ROOT_CAUSE_TYPES = Literal[
     "ORDER_DEPENDENCY",
     "RESOURCE_LEAK",
     "NONDETERMINISM",
+    # ── V2 deep categories ────────────────────────────────────────────
+    "ASYNC_DEADLOCK",           # threading.Lock / blocking call inside async event loop
+    "INFRASTRUCTURE_SENSITIVE", # Only reproducible under CPU/memory/network pressure
 ]
 
 
@@ -98,6 +109,62 @@ class FlakeForgeAction(Action):
             self._check_only_allowed(params, allowed)
             if params.get("library") not in {"random", "numpy", "both"}:
                 raise ValueError("SEED_RANDOMNESS.library must be one of random, numpy, both")
+
+        # ── V2 Deep-Action Validators ──────────────────────────────────
+        elif self.action_type == "DIAGNOSE_BOUNDARY":
+            allowed = {"boundary_node"}
+            self._check_only_allowed(params, allowed)
+            if not isinstance(params.get("boundary_node"), str):
+                raise ValueError("DIAGNOSE_BOUNDARY.boundary_node must be a dotted path string")
+
+        elif self.action_type == "REFACTOR_CONCURRENCY":
+            allowed = {"from_primitive", "to_primitive", "target_function"}
+            self._check_only_allowed(params, allowed)
+            valid_from = {"threading.Lock", "threading.RLock", "bare", "asyncio.Lock"}
+            valid_to = {"asyncio.Lock", "threading.RLock", "asyncio.Semaphore", "asyncio.Event"}
+            if params.get("from_primitive") not in valid_from:
+                raise ValueError(f"REFACTOR_CONCURRENCY.from_primitive must be one of {sorted(valid_from)}")
+            if params.get("to_primitive") not in valid_to:
+                raise ValueError(f"REFACTOR_CONCURRENCY.to_primitive must be one of {sorted(valid_to)}")
+            if not isinstance(params.get("target_function"), str):
+                raise ValueError("REFACTOR_CONCURRENCY.target_function must be a string")
+
+        elif self.action_type == "ISOLATE_BOUNDARY":
+            allowed = {"boundary_call", "pattern"}
+            self._check_only_allowed(params, allowed)
+            valid_patterns = {"circuit_breaker", "timeout_wrapper", "bulkhead"}
+            if not isinstance(params.get("boundary_call"), str):
+                raise ValueError("ISOLATE_BOUNDARY.boundary_call must be a dotted path string")
+            if params.get("pattern") not in valid_patterns:
+                raise ValueError(f"ISOLATE_BOUNDARY.pattern must be one of {sorted(valid_patterns)}")
+
+        elif self.action_type == "EXTRACT_ASYNC_SCOPE":
+            allowed = {"target_function", "direction"}
+            self._check_only_allowed(params, allowed)
+            valid_directions = {"make_async", "make_sync", "offload_to_thread"}
+            if not isinstance(params.get("target_function"), str):
+                raise ValueError("EXTRACT_ASYNC_SCOPE.target_function must be a string")
+            if params.get("direction") not in valid_directions:
+                raise ValueError(f"EXTRACT_ASYNC_SCOPE.direction must be one of {valid_directions}")
+
+        elif self.action_type == "HARDEN_IDEMPOTENCY":
+            allowed = {"state_target", "key_strategy"}
+            self._check_only_allowed(params, allowed)
+            valid_strategies = {"uuid", "content_hash", "composite_key"}
+            if not isinstance(params.get("state_target"), str):
+                raise ValueError("HARDEN_IDEMPOTENCY.state_target must be a string")
+            if params.get("key_strategy") not in valid_strategies:
+                raise ValueError(f"HARDEN_IDEMPOTENCY.key_strategy must be one of {valid_strategies}")
+
+        elif self.action_type == "CHAOS_PROBE":
+            allowed = {"profile", "n_runs"}
+            self._check_only_allowed(params, allowed)
+            valid_profiles = {"cpu", "mem", "net", "compound"}
+            if params.get("profile") not in valid_profiles:
+                raise ValueError(f"CHAOS_PROBE.profile must be one of {valid_profiles}")
+            n_runs = params.get("n_runs", 10)
+            if not isinstance(n_runs, int) or not (1 <= n_runs <= 20):
+                raise ValueError("CHAOS_PROBE.n_runs must be an integer between 1 and 20")
 
         return self
 
@@ -205,6 +272,27 @@ class FlakeForgeObservation(Observation):
     total_diff_lines: int = 0
     reward: float = 0.0
     done: bool = False
+    # ── V2 Fields ─────────────────────────────────────────────────────
+    causal_graph: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Cross-repo call graph: nodes, edges, boundary warnings (Pillar 1)",
+    )
+    chaos_pass_rate: Optional[float] = Field(
+        default=None,
+        description="Pass rate under chaos conditions (Pillar 2). None = not yet probed.",
+    )
+    chaos_baseline_pass_rate: Optional[float] = Field(
+        default=None,
+        description="Baseline pass rate under the same chaos profile.",
+    )
+    perf_sentinel_status: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Performance regression sentinel result (Pillar 4): {regression, median_ratio}",
+    )
+    infrastructure_sensitive: bool = Field(
+        default=False,
+        description="True when chaos baseline reveals infrastructure-dependent flakiness.",
+    )
 
     @field_validator("run_history")
     @classmethod
@@ -220,6 +308,12 @@ class FlakeForgeState(State):
     baseline_pass_rate: float = 0.0
     regression_detected: bool = False
     judge_scores: List[Dict[str, Any]] = Field(default_factory=list)
+    # ── V2 Fields ─────────────────────────────────────────────────────
+    chaos_pass_rate: Optional[float] = None
+    chaos_baseline_pass_rate: Optional[float] = None
+    perf_regression_detected: bool = False
+    perf_median_ratio: float = 1.0
+    infrastructure_sensitive: bool = False
 
 
 # Backward compatible aliases for template-generated names.

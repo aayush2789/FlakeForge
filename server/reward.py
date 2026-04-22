@@ -14,6 +14,10 @@ def compute_reward(
     baseline_pass_rate = float(getattr(episode_state, "baseline_pass_rate", 0.0))
 
     r_stability = (current_pass_rate - baseline_pass_rate) * 10.0
+    
+    # v2: Add chaos stability reward
+    chaos_pass_rate = float(step_result.get("chaos_pass_rate", current_pass_rate))
+    r_chaos_stability = (chaos_pass_rate - baseline_pass_rate) * 5.0
 
     judge_hypothesis_score = int(judge_scores.get("judge_hypothesis_score", 0))
     judge_patch_score = int(judge_scores.get("judge_patch_score", 0))
@@ -27,6 +31,9 @@ def compute_reward(
             r_efficiency -= 0.3
 
     p_regression = 15.0 if step_result.get("regression_detected", False) else 0.0
+    
+    # v2: Add performance regression penalty
+    p_perf_regression = 5.0 if step_result.get("perf_regression_detected", False) else 0.0
 
     action_taken = step_result.get("action_taken", "")
     p_retry_abuse = 2.0 if action_taken == "ADD_RETRY" else 0.0
@@ -35,7 +42,7 @@ def compute_reward(
     semantic_footprint = len(ast_diff.get("functions_modified", []))
     r_semantic_efficiency = -0.1 * max(0, semantic_footprint - 1)
 
-    reward = r_stability + r_judge + r_efficiency + r_semantic_efficiency - p_regression - p_retry_abuse
+    reward = r_stability + r_chaos_stability + r_judge + r_efficiency + r_semantic_efficiency - p_regression - p_perf_regression - p_retry_abuse
 
     terminal_bonus = 0.0
     terminal_timeout_penalty = 0.0
@@ -54,10 +61,12 @@ def compute_reward(
 
     breakdown = {
         "r_stability": float(r_stability),
+        "r_chaos_stability": float(r_chaos_stability),
         "r_judge": float(r_judge),
         "r_efficiency": float(r_efficiency),
         "r_semantic_efficiency": float(r_semantic_efficiency),
         "p_regression": float(p_regression),
+        "p_perf_regression": float(p_perf_regression),
         "p_retry_abuse": float(p_retry_abuse),
         "terminal_bonus": float(terminal_bonus),
         "terminal_timeout_penalty": float(terminal_timeout_penalty),
