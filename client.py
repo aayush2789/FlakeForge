@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional
+
+from openai import AsyncOpenAI
 
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
@@ -61,12 +64,12 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         return await super().from_docker_image(image_name, **kwargs)
 
     async def _run_judge(self, observation: FlakeForgeObservation) -> Dict[str, int]:
-        """Placeholder judge call parser; replace with LLM API call in trainer stack."""
+        """Judge call parser utilizing NVIDIA's Minimax API."""
         hypothesis_prompt = self._build_hypothesis_prompt(observation)
         patch_prompt = self._build_patch_prompt(observation)
 
-        hypothesis_response = self._mock_judge_response(hypothesis_prompt)
-        patch_response = self._mock_judge_response(patch_prompt)
+        hypothesis_response = await self._call_nvidia_judge(hypothesis_prompt)
+        patch_response = await self._call_nvidia_judge(patch_prompt)
 
         return {
             "judge_hypothesis_score": self._parse_judge_score(hypothesis_response),
@@ -97,9 +100,33 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         )
 
     @staticmethod
-    def _mock_judge_response(prompt: str) -> str:
-        _ = prompt
-        return '{"score": 3}'
+    async def _call_nvidia_judge(prompt: str) -> str:
+        api_key = os.environ.get("NVIDIA_API_KEY")
+        if not api_key:
+            return '{"score": 0}'
+
+        client = AsyncOpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key
+        )
+
+        messages = [
+            {"role": "system", "content": "You are a senior code reviewer grading a patch/hypothesis. Reply ONLY with JSON containing a single integer key 'score' between 1 and 5. Example: {\"score\": 4}"},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            completion = await client.chat.completions.create(
+                model="minimaxai/minimax-m2.7",
+                messages=messages,
+                temperature=0.2,  # Low temp for more deterministic metric scoring
+                top_p=0.95,
+                max_tokens=256,
+            )
+            return completion.choices[0].message.content or '{"score": 0}'
+        except Exception as e:
+            print(f"Judge API err: {e}")
+            return '{"score": 0}'
 
     @staticmethod
     def _parse_judge_score(response: str) -> int:

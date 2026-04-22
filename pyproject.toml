@@ -25,6 +25,7 @@ dependencies = [
     "tree-sitter-javascript>=0.21.0",
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
+    "openai>=2.32.0",
 ]
 
 [project.optional-dependencies]

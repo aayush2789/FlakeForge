@@ -1,0 +1,2 @@
+[console_scripts]
+server = FlakeForge.server.app:main
