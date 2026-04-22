@@ -1,0 +1,18 @@
+[INIT] Using HTTP env: http://localhost:8000
+[START] episode=918d152a-b499-4425-8a85-c09aab384d41 test=tests/test_flaky.py::test_flaky_case max_steps=5
+[BASELINE] pass_rate=0.000
+[FINGERPRINT] mean=1ms cv=0.373 flakiness=0.749
+[LLM] Backend request start: adapter=analyzer_lora
+[LLM] Backend request success: adapter=analyzer_lora elapsed=24.24s
+[LLM] Backend request start: adapter=fixer_lora
+[LLM] Backend request success: adapter=fixer_lora elapsed=3.46s
+[STEP] idx=1 analyze=unknown:0.30 execute=analyze_logs reward=-1.000 pass_rate=0.000 judge_h=1 judge_p=0 done=false
+[LLM] Backend request start: adapter=analyzer_lora
+[LLM] Backend request success: adapter=analyzer_lora elapsed=4.23s
+[LLM] Backend request start: adapter=fixer_lora
+[LLM] Backend request success: adapter=fixer_lora elapsed=3.19s
+[STEP] idx=2 analyze=unknown:0.30 execute=analyze_logs reward=-1.000 pass_rate=0.000 judge_h=0 judge_p=0 done=false
+[LLM] Backend request start: adapter=analyzer_lora
+[LLM] Backend request success: adapter=analyzer_lora elapsed=6.44s
+[LLM] Backend request start: adapter=fixer_lora
+[LLM] Backend request success: adapter=fixer_lora elapsed=3.30s

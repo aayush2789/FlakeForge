@@ -48,7 +48,25 @@ def compute_reward(
             p_perf_regression = min(25.0, 10.0 * math.log(median_ratio))
 
     action_taken = step_result.get("action_taken", "")
-    p_retry_abuse = 2.0 if action_taken == "ADD_RETRY" else 0.0
+    p_retry_abuse = 2.0 if action_taken in {"ADD_RETRY", "retry_test"} else 0.0
+
+    # Penalize repeating the same action more than twice in a row.
+    p_repeat_action = 0.0
+    repeat_count = int(step_result.get("repeat_action_count", 1))
+    if repeat_count > 2:
+        p_repeat_action = 1.5 * (repeat_count - 2)
+
+    # Penalize large patches that do not improve stability.
+    lines_changed = int(step_result.get("lines_changed", 0))
+    improvement = current_pass_rate - baseline_pass_rate
+    p_large_patch_no_gain = 0.0
+    if lines_changed >= 20 and improvement <= 0:
+        p_large_patch_no_gain = min(6.0, lines_changed * 0.1)
+
+    # Penalize likely false fixes where pass rate worsens significantly.
+    p_false_fix = 0.0
+    if improvement < -0.1:
+        p_false_fix = min(8.0, abs(improvement) * 12.0)
 
     ast_diff = step_result.get("ast_diff", {}) or {}
     semantic_footprint = len(ast_diff.get("functions_modified", []))
@@ -74,6 +92,9 @@ def compute_reward(
         - p_regression
         - p_perf_regression
         - p_retry_abuse
+        - p_repeat_action
+        - p_large_patch_no_gain
+        - p_false_fix
     )
 
     terminal_bonus = 0.0
@@ -92,6 +113,15 @@ def compute_reward(
             reward -= terminal_timeout_penalty
 
     breakdown = {
+        "stability_reward": float(r_stability + r_chaos_stability),
+        "efficiency_penalty": float(max(0.0, -r_efficiency) + p_repeat_action + p_retry_abuse),
+        "regression_penalty": float(p_regression + p_perf_regression),
+        "false_fix_penalty": float(p_false_fix + p_large_patch_no_gain),
+        "judge_score": float(r_judge),
+        "prediction_accuracy": float(r_prediction_accuracy),
+        "semantic_efficiency": float(r_semantic_efficiency),
+        "total_reward": 0.0,
+        # Keep legacy keys for compatibility with existing scripts.
         "r_stability": float(r_stability),
         "r_chaos_stability": float(r_chaos_stability),
         "r_judge": float(r_judge),
@@ -101,7 +131,11 @@ def compute_reward(
         "p_regression": float(p_regression),
         "p_perf_regression": float(p_perf_regression),
         "p_retry_abuse": float(p_retry_abuse),
+        "p_repeat_action": float(p_repeat_action),
+        "p_large_patch_no_gain": float(p_large_patch_no_gain),
+        "p_false_fix": float(p_false_fix),
         "terminal_bonus": float(terminal_bonus),
         "terminal_timeout_penalty": float(terminal_timeout_penalty),
     }
+    breakdown["total_reward"] = float(reward)
     return float(reward), breakdown

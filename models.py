@@ -31,6 +31,15 @@ ACTION_TYPES = Literal[
     "EXTRACT_ASYNC_SCOPE",     # Move sync code out of async context or vice versa
     "HARDEN_IDEMPOTENCY",      # Add idempotency guard to a state-mutating function
     "CHAOS_PROBE",             # Run under chaos profile to gather evidence
+    # ── Finalist alias actions ───────────────────────────────────────
+    "detect_flakiness",
+    "analyze_logs",
+    "add_sleep",
+    "add_lock",
+    "mock_dependency",
+    "isolate_state",
+    "reorder_execution",
+    "retry_test",
 ]
 
 ROOT_CAUSE_TYPES = Literal[
@@ -43,6 +52,13 @@ ROOT_CAUSE_TYPES = Literal[
     # ── V2 deep categories ────────────────────────────────────────────
     "ASYNC_DEADLOCK",           # threading.Lock / blocking call inside async event loop
     "INFRASTRUCTURE_SENSITIVE", # Only reproducible under CPU/memory/network pressure
+    # ── Finalist normalized categories ───────────────────────────────
+    "timing",
+    "race",
+    "shared_state",
+    "network",
+    "order",
+    "unknown",
 ]
 
 
@@ -59,6 +75,10 @@ class FlakeForgeAction(Action):
         default=None,
         description="Agent's predicted pass rate after this action (0.0-1.0).",
     )
+    justification: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    risk_assessment: Optional[str] = None
+    fallback_plan: Optional[str] = None
 
     @field_validator("predicted_pass_rate_after", mode="before")
     @classmethod
@@ -69,68 +89,93 @@ class FlakeForgeAction(Action):
 
     @model_validator(mode="after")
     def _validate_action_payload(self) -> "FlakeForgeAction":
+        alias_action_map = {
+            "detect_flakiness": "GATHER_EVIDENCE",
+            "analyze_logs": "GATHER_EVIDENCE",
+            "add_sleep": "ADD_TIMING_GUARD",
+            "add_lock": "ADD_SYNCHRONIZATION",
+            "mock_dependency": "MOCK_DEPENDENCY",
+            "isolate_state": "RESET_STATE",
+            "reorder_execution": "RESET_STATE",
+            "retry_test": "ADD_RETRY",
+        }
+        canonical_action_type = alias_action_map.get(self.action_type, self.action_type)
+
         params = self.parameters or {}
 
-        if self.action_type == "GATHER_EVIDENCE":
+        if canonical_action_type == "GATHER_EVIDENCE":
             allowed = {"injection_target"}
+            if self.action_type in {"detect_flakiness", "analyze_logs"} and "injection_target" not in params:
+                params["injection_target"] = "test"
             self._check_only_allowed(params, allowed)
             if params.get("injection_target") not in {"test", "source"}:
                 raise ValueError("GATHER_EVIDENCE.injection_target must be 'test' or 'source'")
 
-        elif self.action_type == "ADD_TIMING_GUARD":
+        elif canonical_action_type == "ADD_TIMING_GUARD":
             allowed = {"delay_ms"}
+            if self.action_type == "add_sleep" and "delay_ms" not in params:
+                params["delay_ms"] = 100
             self._check_only_allowed(params, allowed)
             delay = params.get("delay_ms")
             if delay not in {50, 100, 200, 500}:
                 raise ValueError("ADD_TIMING_GUARD.delay_ms must be one of 50, 100, 200, 500")
 
-        elif self.action_type == "ADD_SYNCHRONIZATION":
+        elif canonical_action_type == "ADD_SYNCHRONIZATION":
             allowed = {"primitive"}
+            if self.action_type == "add_lock" and "primitive" not in params:
+                params["primitive"] = "lock"
             self._check_only_allowed(params, allowed)
             if params.get("primitive") not in {"lock", "event", "barrier", "semaphore"}:
                 raise ValueError(
                     "ADD_SYNCHRONIZATION.primitive must be one of lock, event, barrier, semaphore"
                 )
 
-        elif self.action_type == "MOCK_DEPENDENCY":
+        elif canonical_action_type == "MOCK_DEPENDENCY":
             allowed = {"target"}
+            if self.action_type == "mock_dependency" and "target" not in params:
+                params["target"] = "requests.get"
             self._check_only_allowed(params, allowed)
             target = params.get("target")
             if not isinstance(target, str) or "." not in target.strip("."):
                 raise ValueError("MOCK_DEPENDENCY.target must be a dotted import path (e.g. requests.get)")
 
-        elif self.action_type == "RESET_STATE":
+        elif canonical_action_type == "RESET_STATE":
             allowed = {"scope"}
+            if self.action_type in {"isolate_state", "reorder_execution"} and "scope" not in params:
+                params["scope"] = "function"
             self._check_only_allowed(params, allowed)
             if params.get("scope") not in {"function", "class", "module"}:
                 raise ValueError("RESET_STATE.scope must be one of function, class, module")
 
-        elif self.action_type == "ADD_RETRY":
+        elif canonical_action_type == "ADD_RETRY":
             allowed = {"max_attempts", "backoff_ms"}
+            if self.action_type == "retry_test":
+                params.setdefault("max_attempts", 2)
+                params.setdefault("backoff_ms", 100)
             self._check_only_allowed(params, allowed)
             if params.get("max_attempts") not in {2, 3, 5}:
                 raise ValueError("ADD_RETRY.max_attempts must be one of 2, 3, 5")
             if params.get("backoff_ms") not in {100, 500}:
                 raise ValueError("ADD_RETRY.backoff_ms must be one of 100, 500")
 
-        elif self.action_type == "REVERT_LAST_PATCH":
+        elif canonical_action_type == "REVERT_LAST_PATCH":
             if params:
                 raise ValueError("REVERT_LAST_PATCH.parameters must be empty")
 
-        elif self.action_type == "SEED_RANDOMNESS":
+        elif canonical_action_type == "SEED_RANDOMNESS":
             allowed = {"library"}
             self._check_only_allowed(params, allowed)
             if params.get("library") not in {"random", "numpy", "both"}:
                 raise ValueError("SEED_RANDOMNESS.library must be one of random, numpy, both")
 
         # ── V2 Deep-Action Validators ──────────────────────────────────
-        elif self.action_type == "DIAGNOSE_BOUNDARY":
+        elif canonical_action_type == "DIAGNOSE_BOUNDARY":
             allowed = {"boundary_node"}
             self._check_only_allowed(params, allowed)
             if not isinstance(params.get("boundary_node"), str):
                 raise ValueError("DIAGNOSE_BOUNDARY.boundary_node must be a dotted path string")
 
-        elif self.action_type == "REFACTOR_CONCURRENCY":
+        elif canonical_action_type == "REFACTOR_CONCURRENCY":
             allowed = {"from_primitive", "to_primitive", "target_function"}
             self._check_only_allowed(params, allowed)
             valid_from = {"threading.Lock", "threading.RLock", "bare", "asyncio.Lock"}
@@ -142,7 +187,7 @@ class FlakeForgeAction(Action):
             if not isinstance(params.get("target_function"), str):
                 raise ValueError("REFACTOR_CONCURRENCY.target_function must be a string")
 
-        elif self.action_type == "ISOLATE_BOUNDARY":
+        elif canonical_action_type == "ISOLATE_BOUNDARY":
             allowed = {"boundary_call", "pattern"}
             self._check_only_allowed(params, allowed)
             valid_patterns = {"circuit_breaker", "timeout_wrapper", "bulkhead"}
@@ -151,7 +196,7 @@ class FlakeForgeAction(Action):
             if params.get("pattern") not in valid_patterns:
                 raise ValueError(f"ISOLATE_BOUNDARY.pattern must be one of {sorted(valid_patterns)}")
 
-        elif self.action_type == "EXTRACT_ASYNC_SCOPE":
+        elif canonical_action_type == "EXTRACT_ASYNC_SCOPE":
             allowed = {"target_function", "direction"}
             self._check_only_allowed(params, allowed)
             valid_directions = {"make_async", "make_sync", "offload_to_thread"}
@@ -160,7 +205,7 @@ class FlakeForgeAction(Action):
             if params.get("direction") not in valid_directions:
                 raise ValueError(f"EXTRACT_ASYNC_SCOPE.direction must be one of {valid_directions}")
 
-        elif self.action_type == "HARDEN_IDEMPOTENCY":
+        elif canonical_action_type == "HARDEN_IDEMPOTENCY":
             allowed = {"state_target", "key_strategy"}
             self._check_only_allowed(params, allowed)
             valid_strategies = {"uuid", "content_hash", "composite_key"}
@@ -169,7 +214,7 @@ class FlakeForgeAction(Action):
             if params.get("key_strategy") not in valid_strategies:
                 raise ValueError(f"HARDEN_IDEMPOTENCY.key_strategy must be one of {valid_strategies}")
 
-        elif self.action_type == "CHAOS_PROBE":
+        elif canonical_action_type == "CHAOS_PROBE":
             allowed = {"profile", "n_runs"}
             self._check_only_allowed(params, allowed)
             valid_profiles = {"cpu", "mem", "net", "compound"}
@@ -222,6 +267,10 @@ class Hypothesis:
     confidence: float
     evidence: List[str]
     suggested_action: Optional[str] = None
+    reasoning_steps: List[str] = Field(default_factory=list)
+    uncertainty: Optional[str] = None
+    next_best_action: Optional[str] = None
+    predicted_effect: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.confidence <= 1.0):
@@ -235,6 +284,10 @@ class HypothesisPayload(BaseModel):
     confidence: float
     evidence: List[str] = Field(default_factory=list)
     suggested_action: Optional[str] = None
+    reasoning_steps: List[str] = Field(default_factory=list)
+    uncertainty: Optional[str] = None
+    next_best_action: Optional[str] = None
+    predicted_effect: Optional[str] = None
 
 
 class JudgeFeedbackPayload(BaseModel):
@@ -320,6 +373,12 @@ class FlakeForgeObservation(Observation):
         default=None,
         description="Runner-up root-cause hypothesis for low-confidence situations.",
     )
+    last_actions: List[str] = Field(default_factory=list)
+    last_outcomes: List[Dict[str, Any]] = Field(default_factory=list)
+    prediction_error_history: List[float] = Field(default_factory=list)
+    failure_pattern_summary: Optional[Dict[str, Any]] = None
+    causal_hints: List[str] = Field(default_factory=list)
+    reflection: Optional[Dict[str, Any]] = None
 
     @field_validator("run_history")
     @classmethod
@@ -341,6 +400,7 @@ class FlakeForgeState(State):
     perf_regression_detected: bool = False
     perf_median_ratio: float = 1.0
     infrastructure_sensitive: bool = False
+    prediction_error_history: List[float] = Field(default_factory=list)
 
 
 # Backward compatible aliases for template-generated names.

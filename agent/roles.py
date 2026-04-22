@@ -42,9 +42,12 @@ class AnalyzerRole:
         self.backend = backend
         self.adapter = adapter
         self.system_prompt = (
-            "You are a senior software engineer diagnosing a flaky CI test. "
-            "Commit to exactly one root cause category and return only JSON "
-            "matching the Hypothesis schema."
+            "You are a debugging engineer diagnosing flaky CI behavior under uncertainty. "
+            "Return ONLY JSON with fields: "
+            "root_cause_category, confidence, evidence, reasoning_steps, uncertainty, "
+            "next_best_action, predicted_effect. "
+            "Allowed root_cause_category values: timing, race, shared_state, network, order, unknown. "
+            "reasoning_steps must include observed pattern, hypothesis, and why alternatives are unlikely."
         )
 
     def produce_hypothesis(self, observation: FlakeForgeObservation) -> Hypothesis:
@@ -63,18 +66,27 @@ class AnalyzerRole:
 
         parsed = _parse_json(raw)
         try:
+            category = _normalize_root_cause(parsed.get("root_cause_category", "unknown"))
             return Hypothesis(
-                root_cause_category=parsed.get("root_cause_category", "TIMING_RACE"),
+                root_cause_category=category,
                 confidence=float(parsed.get("confidence", 0.1)),
                 evidence=list(parsed.get("evidence", []))[:5],
                 suggested_action=parsed.get("suggested_action"),
+                reasoning_steps=[str(s) for s in parsed.get("reasoning_steps", [])][:3],
+                uncertainty=str(parsed.get("uncertainty", ""))[:240] or None,
+                next_best_action=str(parsed.get("next_best_action", ""))[:120] or None,
+                predicted_effect=str(parsed.get("predicted_effect", ""))[:240] or None,
             )
         except Exception:
             return Hypothesis(
-                root_cause_category="TIMING_RACE",
+                root_cause_category="unknown",
                 confidence=0.1,
                 evidence=[],
                 suggested_action=None,
+                reasoning_steps=[],
+                uncertainty="insufficient evidence",
+                next_best_action="detect_flakiness",
+                predicted_effect=None,
             )
 
 
@@ -85,10 +97,13 @@ class FixerRole:
         self.backend = backend
         self.adapter = adapter
         self.system_prompt = (
-            "You are a senior software engineer repairing a flaky CI test. "
-            "Select exactly one action from the allowed actions and return JSON. "
-            "Include 'predicted_pass_rate_after' (float 0-1): your estimate of the "
-            "pass rate after this fix is applied."
+            "You are a debugging engineer choosing one minimal corrective action under uncertainty. "
+            "Use analyzer hypothesis and prior outcomes. "
+            "Return ONLY JSON with fields: action_type, parameters, justification, expected_outcome, "
+            "predicted_pass_rate_after, risk_assessment, fallback_plan. "
+            "Allowed action_type values: detect_flakiness, analyze_logs, add_sleep, add_lock, "
+            "mock_dependency, isolate_state, reorder_execution, retry_test. "
+            "Predict outcome before acting and avoid random action selection."
         )
 
     def produce_action(
@@ -120,7 +135,10 @@ class FixerRole:
                 ]
             )
 
-        prompt_parts.append("Return JSON only: {action_type, parameters}")
+        prompt_parts.append(
+            "Return JSON only: "
+            "{action_type, parameters, justification, expected_outcome, predicted_pass_rate_after, risk_assessment, fallback_plan}"
+        )
         prompt = "\n".join(prompt_parts)
 
         raw = self.backend.generate(
@@ -131,8 +149,9 @@ class FixerRole:
 
         parsed = _parse_json(raw)
         try:
+            action_type = str(parsed.get("action_type", "analyze_logs"))
             return FlakeForgeAction(
-                action_type=parsed.get("action_type", "GATHER_EVIDENCE"),
+                action_type=action_type,
                 parameters=dict(parsed.get("parameters", {})),
                 hypothesis=_hypothesis_payload(hypothesis),
                 # Improvement 1: capture model's predicted outcome.
@@ -141,12 +160,21 @@ class FixerRole:
                     if "predicted_pass_rate_after" in parsed
                     else None
                 ),
+                justification=str(parsed.get("justification", ""))[:500] or None,
+                expected_outcome=str(parsed.get("expected_outcome", ""))[:240] or None,
+                risk_assessment=str(parsed.get("risk_assessment", ""))[:240] or None,
+                fallback_plan=str(parsed.get("fallback_plan", ""))[:240] or None,
             )
         except Exception:
             return FlakeForgeAction(
-                action_type="GATHER_EVIDENCE",
+                action_type="analyze_logs",
                 parameters={"injection_target": "test"},
                 hypothesis=_hypothesis_payload(hypothesis),
+                justification="Need failure signatures before changing code.",
+                expected_outcome="Richer failure evidence",
+                predicted_pass_rate_after=None,
+                risk_assessment="Low risk; no behavioral changes",
+                fallback_plan="Try detect_flakiness next",
             )
 
 
@@ -194,6 +222,10 @@ def _hypothesis_payload(hypothesis: Hypothesis) -> Dict[str, Any]:
         "confidence": hypothesis.confidence,
         "evidence": list(hypothesis.evidence),
         "suggested_action": hypothesis.suggested_action,
+        "reasoning_steps": list(hypothesis.reasoning_steps),
+        "uncertainty": hypothesis.uncertainty,
+        "next_best_action": hypothesis.next_best_action,
+        "predicted_effect": hypothesis.predicted_effect,
     }
 
 
@@ -229,6 +261,12 @@ def _compact_observation_payload(observation: FlakeForgeObservation, include_sou
         "log_snippets": observation.log_snippets[-3:],
         # Improvement 4: duration fingerprint helps Fixer weight timing-race actions.
         "duration_fingerprint": observation.duration_fingerprint,
+        "last_actions": list(observation.last_actions[-3:]),
+        "last_outcomes": list(observation.last_outcomes[-3:]),
+        "prediction_error_history": list(observation.prediction_error_history[-5:]),
+        "failure_pattern_summary": observation.failure_pattern_summary,
+        "causal_hints": list(observation.causal_hints[-5:]),
+        "reflection": observation.reflection,
     }
     if include_sources:
         payload["test_function_source"] = _first_lines(observation.test_function_source, 50)
@@ -264,3 +302,23 @@ def _first_lines(text: str, line_count: int) -> str:
         return ""
     lines = text.splitlines()
     return "\n".join(lines[:line_count])
+
+
+def _normalize_root_cause(value: Any) -> str:
+    key = str(value or "unknown").strip().lower()
+    mapping = {
+        "timing_race": "timing",
+        "async_deadlock": "race",
+        "shared_state": "shared_state",
+        "external_dependency": "network",
+        "infrastructure_sensitive": "network",
+        "order_dependency": "order",
+        "resource_leak": "shared_state",
+        "nondeterminism": "unknown",
+        "timing": "timing",
+        "race": "race",
+        "network": "network",
+        "order": "order",
+        "unknown": "unknown",
+    }
+    return mapping.get(key, "unknown")

@@ -108,6 +108,45 @@ class CausalGraph:
         }
 
 
+@dataclass
+class EpisodeCausalTrace:
+    """Tracks symptoms, hypotheses and actions over one episode."""
+
+    symptoms: List[str] = field(default_factory=list)
+    hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    actions_taken: List[Dict[str, Any]] = field(default_factory=list)
+    final_cause: str = ""
+    fix_applied: str = ""
+    outcome: str = "failure"
+
+    def add_symptom(self, symptom: str) -> None:
+        if symptom and symptom not in self.symptoms:
+            self.symptoms.append(symptom)
+
+    def add_hypothesis(self, step: int, hypothesis: Dict[str, Any]) -> None:
+        payload = {"step": step, **hypothesis}
+        self.hypotheses.append(payload)
+
+    def add_action(self, step: int, action: Dict[str, Any]) -> None:
+        payload = {"step": step, **action}
+        self.actions_taken.append(payload)
+
+    def finalize(self, final_cause: str, fix_applied: str, success: bool) -> None:
+        self.final_cause = final_cause
+        self.fix_applied = fix_applied
+        self.outcome = "success" if success else "failure"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "symptoms": list(self.symptoms),
+            "hypotheses": list(self.hypotheses),
+            "actions_taken": list(self.actions_taken),
+            "final_cause": self.final_cause,
+            "fix_applied": self.fix_applied,
+            "outcome": self.outcome,
+        }
+
+
 # ── Main builder class ─────────────────────────────────────────────────────────
 
 class CrossRepoGraphBuilder:

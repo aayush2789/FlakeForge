@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import re
 import statistics
 import subprocess
 from dataclasses import dataclass, field
@@ -33,6 +35,8 @@ try:
     from .docker_runner import DockerTestRunner
     from .perf_sentinel import PerformanceSentinel
     from .reward import compute_reward
+    from .logger import FullTraceLogger
+    from .causal_graph import EpisodeCausalTrace
     from .tools import (
         apply_ast_patch,
         get_failure_pattern,
@@ -43,21 +47,40 @@ try:
         resolve_target_from_evidence,
     )
 except ImportError:
-    from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord  # type: ignore
-    from server.causal_graph import CrossRepoGraphBuilder  # type: ignore
-    from server.chaos_runner import ChaosAmplifiedRunner, ChaosProfile  # type: ignore
-    from server.docker_runner import DockerTestRunner  # type: ignore
-    from server.perf_sentinel import PerformanceSentinel  # type: ignore
-    from server.reward import compute_reward  # type: ignore
-    from server.tools import (  # type: ignore
-        apply_ast_patch,
-        get_failure_pattern,
-        inject_logging,
-        list_repo_structure,
-        parse_ast_summary,
-        read_file_excerpt,
-        resolve_target_from_evidence,
-    )
+    try:
+        from FlakeForge.models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord  # type: ignore
+        from FlakeForge.server.causal_graph import CrossRepoGraphBuilder, EpisodeCausalTrace  # type: ignore
+        from FlakeForge.server.chaos_runner import ChaosAmplifiedRunner, ChaosProfile  # type: ignore
+        from FlakeForge.server.docker_runner import DockerTestRunner  # type: ignore
+        from FlakeForge.server.perf_sentinel import PerformanceSentinel  # type: ignore
+        from FlakeForge.server.reward import compute_reward  # type: ignore
+        from FlakeForge.server.logger import FullTraceLogger  # type: ignore
+        from FlakeForge.server.tools import (  # type: ignore
+            apply_ast_patch,
+            get_failure_pattern,
+            inject_logging,
+            list_repo_structure,
+            parse_ast_summary,
+            read_file_excerpt,
+            resolve_target_from_evidence,
+        )
+    except ImportError:
+        from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord  # type: ignore
+        from server.causal_graph import CrossRepoGraphBuilder, EpisodeCausalTrace  # type: ignore
+        from server.chaos_runner import ChaosAmplifiedRunner, ChaosProfile  # type: ignore
+        from server.docker_runner import DockerTestRunner  # type: ignore
+        from server.perf_sentinel import PerformanceSentinel  # type: ignore
+        from server.reward import compute_reward  # type: ignore
+        from server.logger import FullTraceLogger  # type: ignore
+        from server.tools import (  # type: ignore
+            apply_ast_patch,
+            get_failure_pattern,
+            inject_logging,
+            list_repo_structure,
+            parse_ast_summary,
+            read_file_excerpt,
+            resolve_target_from_evidence,
+        )
 
 
 @dataclass
@@ -89,6 +112,10 @@ class EpisodeState:
     # ── Improvements 4 & 5 ────────────────────────────────────────────
     duration_fingerprint: Optional[Dict[str, float]] = None  # computed at reset
     secondary_hypothesis: Optional[Hypothesis] = None        # runner-up when confidence < 0.5
+    last_outcomes: List[Dict[str, Any]] = field(default_factory=list)
+    prediction_error_history: List[float] = field(default_factory=list)
+    failure_pattern_summary: Optional[Dict[str, Any]] = None
+    reflection: Optional[Dict[str, Any]] = None
 
 
 class FlakeForgeEnvironment(Environment):
@@ -103,11 +130,9 @@ class FlakeForgeEnvironment(Environment):
         chaos_profile: str = "none",
     ):
         self.repo_path = Path(repo_path)
-        if not self.repo_path.is_absolute():
-            # Assume relative to FlakeForge root
-            self.repo_path = Path(__file__).parent.parent / self.repo_path
+        self.repo_path = self._resolve_repo_path(self.repo_path)
         
-        self.test_id = test_id
+        self.test_id = self._resolve_test_id(test_id)
         self.max_steps = max_steps
         self.benchmark_test_id = benchmark_test_id  # e.g. "tests/test_benchmark.py::test_speed"
         self.chaos_profile = ChaosProfile(chaos_profile) if chaos_profile != "none" else ChaosProfile.NONE
@@ -121,6 +146,70 @@ class FlakeForgeEnvironment(Environment):
         self.causal_graph_builder = CrossRepoGraphBuilder(str(self.repo_path), max_depth=3)
         self._state = FlakeForgeState(episode_id=str(uuid4()), step_count=0)
         self._episode = EpisodeState(episode_id=self._state.episode_id, max_steps=max_steps, test_identifier=test_id)
+        self.trace_logger = FullTraceLogger()
+        self.causal_trace = EpisodeCausalTrace()
+        self.debug_enabled = os.getenv("ENV_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
+
+    def _resolve_repo_path(self, repo_path: Path) -> Path:
+        root = Path(__file__).resolve().parent.parent
+        candidates: List[Path] = []
+
+        if repo_path.is_absolute() and repo_path.exists():
+            return repo_path
+
+        if not repo_path.is_absolute():
+            candidates.append(root / repo_path)
+        else:
+            # Container-style paths like /app/seed_repos/... should map to the local workspace
+            relative_parts = repo_path.parts[1:] if len(repo_path.parts) > 1 else repo_path.parts
+            candidates.append(root / Path(*relative_parts))
+            if "seed_repos" in repo_path.parts:
+                candidates.append(root / "test_repos" / "timing_race_minimal")
+
+        candidates.append(root / "test_repos" / "timing_race_minimal")
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        # Fall back to the original value so callers see the failure path clearly.
+        return repo_path
+
+    def _resolve_test_id(self, test_id: str) -> str:
+        test_file, _, test_func = test_id.partition("::")
+        candidate_files = [self.repo_path / test_file]
+        if not candidate_files[0].exists():
+            candidate_files.append(self.repo_path / "tests" / "test_flaky.py")
+
+        resolved_file = next((path for path in candidate_files if path.exists()), candidate_files[0])
+        if not resolved_file.exists():
+            return test_id
+
+        if test_func and self._function_exists(resolved_file, test_func):
+            return f"{test_file}::{test_func}"
+
+        fallback_func = self._first_test_function_name(resolved_file)
+        if fallback_func:
+            return f"{test_file if candidate_files[0].exists() else 'tests/test_flaky.py'}::{fallback_func}"
+
+        return test_id
+
+    @staticmethod
+    def _function_exists(path: Path, function_name: str) -> bool:
+        try:
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            return re.search(rf"^def\s+{re.escape(function_name)}\s*\(", source, flags=re.MULTILINE) is not None
+        except Exception:
+            return False
+
+    @staticmethod
+    def _first_test_function_name(path: Path) -> Optional[str]:
+        try:
+            source = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return None
+        match = re.search(r"^def\s+(test_[A-Za-z0-9_]+)\s*\(", source, flags=re.MULTILINE)
+        return match.group(1) if match else None
 
     def reset(self) -> FlakeForgeObservation:
         self._restore_clean_repo()
@@ -129,6 +218,7 @@ class FlakeForgeEnvironment(Environment):
             max_steps=self.max_steps,
             test_identifier=self.test_id,
         )
+        self.causal_trace = EpisodeCausalTrace()
 
         baseline_runs = self._run_test_n_times(n=5)
         self._episode.run_history = baseline_runs[-10:]
@@ -179,6 +269,13 @@ class FlakeForgeEnvironment(Environment):
             baseline_pass_rate=self._episode.baseline_pass_rate,
             regression_detected=False,
             judge_scores=[],
+            prediction_error_history=[],
+        )
+        self.trace_logger.start_episode(
+            episode_id=self._episode.episode_id,
+            test_identifier=self.test_id,
+            max_steps=self.max_steps,
+            baseline_pass_rate=self._episode.baseline_pass_rate,
         )
         return self._build_initial_observation()
 
@@ -189,15 +286,18 @@ class FlakeForgeEnvironment(Environment):
             return obs
 
         self._update_hypothesis_from_action(action)
+        canonical_action = _canonical_action(action.action_type)
 
-        if action.action_type not in {"GATHER_EVIDENCE", "REVERT_LAST_PATCH"}:
+        if canonical_action not in {"GATHER_EVIDENCE", "REVERT_LAST_PATCH", "ADD_RETRY"}:
             if self._episode.current_hypothesis is None:
                 obs = self._build_observation(reward=-1.0, done=False)
                 obs.metadata = {"reason": "action_requires_hypothesis"}
+                self.trace_logger.log_error({"step": self._episode.step_count + 1, "error": "action_requires_hypothesis", "action": action.action_type})
                 return obs
             if self._episode.current_hypothesis.confidence < 0.3:
                 obs = self._build_observation(reward=-1.0, done=False)
                 obs.metadata = {"reason": "hypothesis_confidence_too_low"}
+                self.trace_logger.log_error({"step": self._episode.step_count + 1, "error": "hypothesis_confidence_too_low", "action": action.action_type})
                 return obs
 
         self._episode.step_count += 1
@@ -212,10 +312,12 @@ class FlakeForgeEnvironment(Environment):
             if execution.get("no_op"):
                 obs = self._build_observation(reward=-0.5, done=False)
                 obs.metadata = execution
+                self.trace_logger.log_error({"step": self._episode.step_count, "error": "no_op_action", "details": execution})
                 return obs
         except Exception as exc:
             obs = self._build_observation(reward=-1.0, done=False)
             obs.metadata = {"action": action.action_type, "error": str(exc), "no_op": True}
+            self.trace_logger.log_error({"step": self._episode.step_count, "error": "action_execution_exception", "action": action.action_type, "details": str(exc)})
             return obs
 
         import logging as _logging
@@ -265,13 +367,16 @@ class FlakeForgeEnvironment(Environment):
         if judge_scores:
             self._episode.judge_scores.append(judge_scores)
         failure_pattern = get_failure_pattern(post_runs)
+        repeat_action_count = _repeat_tail_count([_canonical_action(a) for a in self._episode.actions_taken])
         step_result = {
             "current_pass_rate": self._episode.current_pass_rate,
             "regression_detected": self._episode.regression_detected,
-            "action_taken": action.action_type,
+            "action_taken": canonical_action,
             "done": done,
             "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
             "ast_diff": execution.get("ast_diff", {}),
+            "lines_changed": int(execution.get("lines_changed", 0)),
+            "repeat_action_count": repeat_action_count,
             # ── V2 additions ──
             "chaos_pass_rate": self._episode.chaos_pass_rate,
             "chaos_baseline_pass_rate": self._episode.chaos_baseline_pass_rate,
@@ -279,6 +384,36 @@ class FlakeForgeEnvironment(Environment):
             "perf_median_ratio": self._episode.perf_median_ratio,
         }
         reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
+
+        predicted = action.predicted_pass_rate_after
+        prediction_error = (
+            round(float(self._episode.current_pass_rate - predicted), 4)
+            if predicted is not None
+            else None
+        )
+        if prediction_error is not None:
+            self._episode.prediction_error_history.append(prediction_error)
+            self._state.prediction_error_history = self._episode.prediction_error_history[-10:]
+
+        was_hypothesis_correct = bool(self._episode.current_pass_rate >= self._episode.baseline_pass_rate)
+        reflection = {
+            "prediction_error": prediction_error,
+            "was_hypothesis_correct": was_hypothesis_correct,
+            "what_learned": _learning_summary(canonical_action, prediction_error, was_hypothesis_correct),
+            "updated_strategy": _updated_strategy(canonical_action, prediction_error, was_hypothesis_correct),
+        }
+        self._episode.reflection = reflection
+
+        self._episode.last_outcomes.append(
+            {
+                "step": self._episode.step_count,
+                "action": action.action_type,
+                "pass_rate": self._episode.current_pass_rate,
+                "reward": reward,
+                "prediction_error": prediction_error,
+            }
+        )
+        self._episode.last_outcomes = self._episode.last_outcomes[-3:]
 
         self._state.current_pass_rate = self._episode.current_pass_rate
         self._state.baseline_pass_rate = self._episode.baseline_pass_rate
@@ -309,7 +444,122 @@ class FlakeForgeEnvironment(Environment):
             },
             "hypothesis_history": self._episode.hypothesis_history,
             "final_validation_runs": final_validation_runs,
+            "reflection": reflection,
         }
+
+        self._episode.failure_pattern_summary = {
+            "most_common_error": failure_pattern.most_common_error,
+            "error_distribution": failure_pattern.error_distribution,
+            "flakiness_score": failure_pattern.flakiness_score,
+            "duration_mean": failure_pattern.duration_mean,
+            "duration_std": failure_pattern.duration_std,
+        }
+
+        if self._episode.current_hypothesis is not None:
+            self.causal_trace.add_hypothesis(
+                step=self._episode.step_count,
+                hypothesis={
+                    "root_cause_category": self._episode.current_hypothesis.root_cause_category,
+                    "confidence": self._episode.current_hypothesis.confidence,
+                    "evidence": list(self._episode.current_hypothesis.evidence),
+                },
+            )
+        self.causal_trace.add_action(
+            step=self._episode.step_count,
+            action={
+                "action_type": action.action_type,
+                "justification": action.justification,
+                "expected_outcome": action.expected_outcome,
+                "predicted_pass_rate_after": action.predicted_pass_rate_after,
+            },
+        )
+        if failure_pattern.most_common_error:
+            self.causal_trace.add_symptom(failure_pattern.most_common_error)
+
+        self.trace_logger.log_step(
+            {
+                "step": self._episode.step_count,
+                "reasoning": {
+                    "root_cause_category": (
+                        self._episode.current_hypothesis.root_cause_category
+                        if self._episode.current_hypothesis
+                        else None
+                    ),
+                    "confidence": (
+                        self._episode.current_hypothesis.confidence
+                        if self._episode.current_hypothesis
+                        else None
+                    ),
+                    "evidence": (
+                        list(self._episode.current_hypothesis.evidence)
+                        if self._episode.current_hypothesis
+                        else []
+                    ),
+                    "reasoning_steps": (
+                        list(self._episode.current_hypothesis.reasoning_steps)
+                        if self._episode.current_hypothesis
+                        else []
+                    ),
+                    "uncertainty": (
+                        self._episode.current_hypothesis.uncertainty
+                        if self._episode.current_hypothesis
+                        else None
+                    ),
+                },
+                "action": {
+                    "action_type": action.action_type,
+                    "parameters": action.parameters,
+                    "justification": action.justification,
+                    "predicted_pass_rate_after": action.predicted_pass_rate_after,
+                    "expected_outcome": action.expected_outcome,
+                    "risk_assessment": action.risk_assessment,
+                    "fallback_plan": action.fallback_plan,
+                },
+                "execution": {
+                    "pass_rate_before": self._episode.baseline_pass_rate,
+                    "pass_rate_after": self._episode.current_pass_rate,
+                    "runs": len(post_runs),
+                    "failure_types": failure_pattern.error_distribution,
+                },
+                "reward_breakdown": reward_breakdown,
+                "learning_signals": {
+                    "prediction_error": prediction_error,
+                    "was_fix_correct": was_hypothesis_correct,
+                    "did_flakiness_reduce": self._episode.current_pass_rate >= self._episode.baseline_pass_rate,
+                },
+            }
+        )
+
+        if done:
+            root_cause_identified = (
+                self._episode.current_hypothesis.root_cause_category
+                if self._episode.current_hypothesis
+                else "unknown"
+            )
+            fix_summary = (
+                f"{action.action_type} with params {json.dumps(action.parameters, ensure_ascii=True)}"
+            )
+            success = bool(self._episode.current_pass_rate >= 0.95 and not self._episode.regression_detected)
+            self.causal_trace.finalize(
+                final_cause=str(root_cause_identified),
+                fix_applied=fix_summary,
+                success=success,
+            )
+            efficiency_score = round(
+                max(0.0, min(1.0, 1.0 - (self._episode.total_diff_lines / 100.0) - (self._episode.step_count / max(1, self.max_steps * 2)))),
+                4,
+            )
+            self.trace_logger.set_summary(
+                {
+                    "baseline_pass_rate": self._episode.baseline_pass_rate,
+                    "final_pass_rate": self._episode.current_pass_rate,
+                    "steps_taken": self._episode.step_count,
+                    "root_cause_identified": root_cause_identified,
+                    "fix_summary": fix_summary,
+                    "efficiency_score": efficiency_score,
+                    "causal_trace": self.causal_trace.to_dict(),
+                }
+            )
         return obs
 
     @property
@@ -388,6 +638,12 @@ class FlakeForgeEnvironment(Environment):
             # ── Improvements 4 & 5 ───────────────────────────────────────────
             duration_fingerprint=self._episode.duration_fingerprint,
             secondary_hypothesis=self._episode.secondary_hypothesis,
+            last_actions=self._episode.actions_taken[-3:],
+            last_outcomes=self._episode.last_outcomes[-3:],
+            prediction_error_history=self._episode.prediction_error_history[-10:],
+            failure_pattern_summary=self._episode.failure_pattern_summary,
+            causal_hints=((self._episode.causal_graph_dict or {}).get("boundary_warnings", [])[:5]),
+            reflection=self._episode.reflection,
         )
 
     def _execute_action(self, action: FlakeForgeAction) -> Dict[str, Any]:
@@ -397,7 +653,51 @@ class FlakeForgeEnvironment(Environment):
         evidence = self._episode.current_hypothesis.evidence if self._episode.current_hypothesis else []
         resolved_target = resolve_target_from_evidence(target_file, evidence)
 
-        if action.action_type == "GATHER_EVIDENCE":
+        canonical_action = _canonical_action(action.action_type)
+
+        if action.action_type == "detect_flakiness":
+            probe_runs = self._run_test_n_times(n=10)
+            self._episode.run_history.extend(probe_runs)
+            self._episode.run_history = self._episode.run_history[-10:]
+            self._episode.current_pass_rate = self._pass_rate(probe_runs)
+            return {
+                "action": action.action_type,
+                "probe_runs": len(probe_runs),
+                "distribution": {
+                    "passed": sum(1 for r in probe_runs if r.passed),
+                    "failed": sum(1 for r in probe_runs if not r.passed),
+                },
+                "lines_changed": 0,
+            }
+
+        if action.action_type == "analyze_logs":
+            fp = get_failure_pattern(self._episode.run_history[-10:])
+            return {
+                "action": action.action_type,
+                "failure_pattern": {
+                    "pass_rate": fp.pass_rate,
+                    "most_common_error": fp.most_common_error,
+                    "error_distribution": fp.error_distribution,
+                },
+                "lines_changed": 0,
+            }
+
+        if action.action_type == "retry_test":
+            retry_runs = self._run_test_n_times(n=5)
+            self._episode.run_history.extend(retry_runs)
+            self._episode.run_history = self._episode.run_history[-10:]
+            self._episode.current_pass_rate = self._pass_rate(retry_runs)
+            return {
+                "action": action.action_type,
+                "retry_runs": len(retry_runs),
+                "distribution": {
+                    "passed": sum(1 for r in retry_runs if r.passed),
+                    "failed": sum(1 for r in retry_runs if not r.passed),
+                },
+                "lines_changed": 0,
+            }
+
+        if canonical_action == "GATHER_EVIDENCE":
             injection_points = self._injection_points_from_hypothesis(resolved_target)
             patched_source = inject_logging(target_file, injection_points)
             Path(target_file).write_text(patched_source, encoding="utf-8")
@@ -412,7 +712,7 @@ class FlakeForgeEnvironment(Environment):
                 "resolved_target": resolved_target,
             }
 
-        if action.action_type == "REVERT_LAST_PATCH":
+        if canonical_action == "REVERT_LAST_PATCH":
             if not self._episode.patches_applied:
                 return {"action": action.action_type, "no_op": True, "reason": "no_patches_to_revert"}
 
@@ -437,7 +737,7 @@ class FlakeForgeEnvironment(Environment):
             self._episode.total_diff_lines = max(0, self._episode.total_diff_lines - last_patch.lines_changed)
             return {"action": action.action_type, "reverted": target}
 
-        if action.action_type == "DIAGNOSE_BOUNDARY":
+        if canonical_action == "DIAGNOSE_BOUNDARY":
             boundary_node = action.parameters.get("boundary_node", "")
             try:
                 test_file_name = self.test_id.split("::", 1)[0]
@@ -460,7 +760,7 @@ class FlakeForgeEnvironment(Environment):
             except Exception as exc:
                 return {"action": action.action_type, "no_op": True, "reason": str(exc)}
 
-        if action.action_type == "CHAOS_PROBE":
+        if canonical_action == "CHAOS_PROBE":
             profile = ChaosProfile(action.parameters["profile"])
             n_runs = action.parameters.get("n_runs", 10)
             chaos_records = self.chaos_runner.run_test_n_times_chaos(
@@ -481,7 +781,7 @@ class FlakeForgeEnvironment(Environment):
                 "no_op": False,
             }
 
-        if action.action_type != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
+        if canonical_action != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
             return {"action": action.action_type, "no_op": True, "reason": "unable_to_ground_evidence"}
 
         patch_spec = self._build_patch_spec(action, resolved_target)
@@ -538,14 +838,15 @@ class FlakeForgeEnvironment(Environment):
 
     def _build_patch_spec(self, action: FlakeForgeAction, resolved_target: Dict[str, Any]) -> Dict[str, Any]:
         test_node_identifier = "def test_"
-        if action.action_type == "ADD_TIMING_GUARD":
+        canonical_action = _canonical_action(action.action_type)
+        if canonical_action == "ADD_TIMING_GUARD":
             return {
                 "operation": "insert_before",
                 "target": {"type": "call", "identifier": resolved_target.get("identifier", "await")},
                 "code_template": "await asyncio.sleep({delay_ms} / 1000)",
                 "parameters": {"delay_ms": action.parameters["delay_ms"]},
             }
-        if action.action_type == "ADD_SYNCHRONIZATION":
+        if canonical_action == "ADD_SYNCHRONIZATION":
             primitive = action.parameters["primitive"]
             return {
                 "operation": "wrap_with",
@@ -553,14 +854,14 @@ class FlakeForgeEnvironment(Environment):
                 "code_template": "with {lock_var}:\\n    {body}",
                 "parameters": {"lock_var": "_flakeforge_lock", "primitive": primitive},
             }
-        if action.action_type == "MOCK_DEPENDENCY":
+        if canonical_action == "MOCK_DEPENDENCY":
             return {
                 "operation": "add_decorator",
                 "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
                 "code_template": "@unittest.mock.patch('{target}')",
                 "parameters": {"target": action.parameters["target"]},
             }
-        if action.action_type == "RESET_STATE":
+        if canonical_action == "RESET_STATE":
             return {
                 "operation": "ensure_reset_fixture",
                 "target": {
@@ -569,7 +870,7 @@ class FlakeForgeEnvironment(Environment):
                 "code_template": "",
                 "parameters": {},
             }
-        if action.action_type == "ADD_RETRY":
+        if canonical_action == "ADD_RETRY":
             return {
                 "operation": "ensure_retry_wrapper",
                 "target": {
@@ -580,7 +881,7 @@ class FlakeForgeEnvironment(Environment):
                 "code_template": "",
                 "parameters": {},
             }
-        if action.action_type == "SEED_RANDOMNESS":
+        if canonical_action == "SEED_RANDOMNESS":
             return {
                 "operation": "ensure_seed_call",
                 "target": {
@@ -591,7 +892,7 @@ class FlakeForgeEnvironment(Environment):
                 "parameters": {},
             }
         # ── V2 Deep-Action Handlers ────────────────────────────────────────────
-        if action.action_type == "REFACTOR_CONCURRENCY":
+        if canonical_action == "REFACTOR_CONCURRENCY":
             return {
                 "operation": "refactor_concurrency_primitive",
                 "target": {
@@ -603,7 +904,7 @@ class FlakeForgeEnvironment(Environment):
                 "parameters": dict(action.parameters),
             }
 
-        if action.action_type == "ISOLATE_BOUNDARY":
+        if canonical_action == "ISOLATE_BOUNDARY":
             return {
                 "operation": "isolate_boundary_call",
                 "target": {
@@ -614,7 +915,7 @@ class FlakeForgeEnvironment(Environment):
                 "parameters": dict(action.parameters),
             }
 
-        if action.action_type == "EXTRACT_ASYNC_SCOPE":
+        if canonical_action == "EXTRACT_ASYNC_SCOPE":
             return {
                 "operation": "extract_async_scope",
                 "target": {
@@ -625,7 +926,7 @@ class FlakeForgeEnvironment(Environment):
                 "parameters": dict(action.parameters),
             }
 
-        if action.action_type == "HARDEN_IDEMPOTENCY":
+        if canonical_action == "HARDEN_IDEMPOTENCY":
             return {
                 "operation": "harden_idempotency",
                 "target": {
@@ -844,6 +1145,50 @@ def _make_secondary_hypothesis(
         )
     except Exception:
         return None
+
+
+def _canonical_action(action_type: str) -> str:
+    return {
+        "detect_flakiness": "GATHER_EVIDENCE",
+        "analyze_logs": "GATHER_EVIDENCE",
+        "add_sleep": "ADD_TIMING_GUARD",
+        "add_lock": "ADD_SYNCHRONIZATION",
+        "mock_dependency": "MOCK_DEPENDENCY",
+        "isolate_state": "RESET_STATE",
+        "reorder_execution": "RESET_STATE",
+        "retry_test": "ADD_RETRY",
+    }.get(action_type, action_type)
+
+
+def _repeat_tail_count(actions: List[str]) -> int:
+    if not actions:
+        return 0
+    tail = actions[-1]
+    count = 0
+    for action in reversed(actions):
+        if action == tail:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _learning_summary(action: str, prediction_error: Optional[float], was_hypothesis_correct: bool) -> str:
+    if prediction_error is None:
+        return "No explicit outcome prediction provided."
+    if was_hypothesis_correct and abs(prediction_error) <= 0.1:
+        return f"{action} behaved as expected with low prediction error."
+    if not was_hypothesis_correct:
+        return f"{action} did not improve stability; hypothesis needs revision."
+    return f"{action} improved stability but calibration is off by {prediction_error:+.2f}."
+
+
+def _updated_strategy(action: str, prediction_error: Optional[float], was_hypothesis_correct: bool) -> str:
+    if not was_hypothesis_correct:
+        return "Switch to evidence-focused probing before further code changes."
+    if prediction_error is not None and abs(prediction_error) > 0.2:
+        return "Reduce confidence in aggressive fixes and prefer minimal reversible actions."
+    return f"Continue with targeted follow-up action after {action}."
 
 
 # Backward compatible alias for template-generated class name.

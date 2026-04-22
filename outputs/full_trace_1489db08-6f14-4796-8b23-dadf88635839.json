@@ -1,0 +1,19 @@
+{
+  "episode_id": "1489db08-6f14-4796-8b23-dadf88635839",
+  "test_identifier": "tests/test_flaky.py::test_flaky_case",
+  "max_steps": 14,
+  "baseline_pass_rate": 0.0,
+  "started_at": "2026-04-22T19:07:07.808764Z",
+  "steps": [],
+  "errors": [
+    {
+      "step": 1,
+      "error": "action_execution_exception",
+      "action": "analyze_logs",
+      "details": "[Errno 2] No such file or directory: 'D:\\\\app\\\\seed_repos\\\\timing_race\\\\tests\\\\test_flaky.py'"
+    }
+  ],
+  "reward_history": [],
+  "prediction_error_history": [],
+  "summary": {}
+}

@@ -225,6 +225,7 @@ async def run_inference() -> Dict[str, Any]:
                 "judge_patch_score": patch_score,
                 "judge_critique": critique,
                 "judge_prediction_error": prediction_error,
+                "reflection": next_obs.reflection,
                 "done": bool(next_obs.done),
                 "duration_s": round(time.time() - step_t0, 3),
             }
@@ -269,6 +270,20 @@ async def run_inference() -> Dict[str, Any]:
             "avg_judge_patch_score": mean_p,
             "elapsed_s": elapsed_s,
             "duration_fingerprint": final_obs.duration_fingerprint,
+            "root_cause_identified": (
+                final_obs.current_hypothesis.root_cause_category
+                if final_obs.current_hypothesis is not None
+                else "unknown"
+            ),
+            "fix_summary": (
+                f"{steps[-1]['action']['action_type']}"
+                if steps
+                else "no_action_applied"
+            ),
+            "efficiency_score": round(
+                max(0.0, min(1.0, 1.0 - (final_obs.total_diff_lines / 100.0) - (len(steps) / max(1, MAX_STEPS * 2)))),
+                4,
+            ),
             "steps": steps,
         }
         SUMMARY_FILE.write_text(json.dumps(summary, indent=2), encoding="utf-8")

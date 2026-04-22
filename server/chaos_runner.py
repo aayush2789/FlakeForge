@@ -30,11 +30,15 @@ from enum import Enum
 from typing import List, Optional
 
 try:
-    from models import RunRecord
-    from server.docker_runner import DockerTestRunner
+    from ..models import RunRecord
+    from .docker_runner import DockerTestRunner
 except ImportError:
-    from models import RunRecord  # type: ignore
-    from docker_runner import DockerTestRunner  # type: ignore
+    try:
+        from FlakeForge.models import RunRecord  # type: ignore
+        from FlakeForge.server.docker_runner import DockerTestRunner  # type: ignore
+    except ImportError:
+        from models import RunRecord  # type: ignore
+        from server.docker_runner import DockerTestRunner  # type: ignore
 
 logger = logging.getLogger(__name__)
 
