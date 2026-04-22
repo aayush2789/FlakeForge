@@ -8,20 +8,17 @@
 
 from __future__ import annotations
 
-import json
-import os
-import re
 from typing import Any, Dict, List, Optional
 
-from openai import AsyncOpenAI
+from agent.judge import FrozenJudge, NVIDIAJudgeBackend
 
 from openenv.core import EnvClient
 from openenv.core.client_types import StepResult
 
 try:
-    from .models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
+    from .models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis
 except ImportError:
-    from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
+    from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis
 
 
 class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForgeState]):
@@ -29,6 +26,7 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
 
     def __init__(self, base_url: str, **kwargs: Any) -> None:
         super().__init__(base_url=base_url, **kwargs)
+        self._judge = FrozenJudge(NVIDIAJudgeBackend())
         self._judge_scores: List[Dict[str, int]] = []
         self._pending_judge_feedback: Optional[Dict[str, int]] = None
 
@@ -69,87 +67,30 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         return await super().from_docker_image(image_name, **kwargs)
 
     async def _run_judge(self, observation: FlakeForgeObservation) -> Dict[str, int]:
-        """Judge call parser utilizing NVIDIA's Minimax API."""
-        hypothesis_prompt = self._build_hypothesis_prompt(observation)
-        patch_prompt = self._build_patch_prompt(observation)
-
-        hypothesis_response = await self._call_nvidia_judge(hypothesis_prompt)
-        patch_response = await self._call_nvidia_judge(patch_prompt)
+        """Judge call parser utilizing centralized FrozenJudge."""
+        hypothesis_result = await self._judge.score_hypothesis(
+            observation, observation.current_hypothesis
+        ) if observation.current_hypothesis else {"score": 0}
+        
+        patch_result = {"score": 0}
+        if observation.patches_applied:
+            last_patch = observation.patches_applied[-1]
+            last_action = FlakeForgeAction(
+                action_type=last_patch.action_taken,
+                parameters={} # Simplified for grading context
+            )
+            # Use empty diff if not provided in patch record, though ideally we'd pass it
+            patch_result = await self._judge.score_patch(
+                observation, 
+                observation.current_hypothesis or Hypothesis(root_cause_category="TIMING_RACE", confidence=0.1, evidence=[]),
+                last_action,
+                "" 
+            )
 
         return {
-            "judge_hypothesis_score": self._parse_judge_score(hypothesis_response),
-            "judge_patch_score": self._parse_judge_score(patch_response),
+            "judge_hypothesis_score": int(hypothesis_result.get("score", 0)),
+            "judge_patch_score": int(patch_result.get("score", 0)),
         }
-
-    @staticmethod
-    def _build_hypothesis_prompt(observation: FlakeForgeObservation) -> str:
-        if observation.current_hypothesis:
-            hypothesis = {
-                "root_cause_category": observation.current_hypothesis.root_cause_category,
-                "confidence": observation.current_hypothesis.confidence,
-                "evidence": list(observation.current_hypothesis.evidence),
-                "suggested_action": observation.current_hypothesis.suggested_action,
-            }
-        else:
-            hypothesis = None
-        return json.dumps(
-            {
-                "task": "score_hypothesis",
-                "hypothesis": hypothesis,
-                "run_history": [r.__dict__ for r in observation.run_history],
-            }
-        )
-
-    @staticmethod
-    def _build_patch_prompt(observation: FlakeForgeObservation) -> str:
-        patch = observation.patches_applied[-1].__dict__ if observation.patches_applied else None
-        return json.dumps(
-            {
-                "task": "score_patch",
-                "patch": patch,
-                "current_pass_rate": observation.current_pass_rate,
-                "baseline_pass_rate": observation.baseline_pass_rate,
-            }
-        )
-
-    @staticmethod
-    async def _call_nvidia_judge(prompt: str) -> str:
-        api_key = os.environ.get("NVIDIA_API_KEY")
-        if not api_key:
-            return '{"score": 0}'
-
-        client = AsyncOpenAI(
-            base_url="https://integrate.api.nvidia.com/v1",
-            api_key=api_key
-        )
-
-        messages = [
-            {"role": "system", "content": "You are a senior code reviewer grading a patch/hypothesis. Reply ONLY with JSON containing a single integer key 'score' between 1 and 5. Example: {\"score\": 4}"},
-            {"role": "user", "content": prompt}
-        ]
-
-        try:
-            completion = await client.chat.completions.create(
-                model="minimaxai/minimax-m2.7",
-                messages=messages,
-                temperature=0.2,  # Low temp for more deterministic metric scoring
-                top_p=0.95,
-                max_tokens=256,
-            )
-            return completion.choices[0].message.content or '{"score": 0}'
-        except Exception as e:
-            print(f"Judge API err: {e}")
-            return '{"score": 0}'
-
-    @staticmethod
-    def _parse_judge_score(response: str) -> int:
-        try:
-            parsed = json.loads(response)
-            score = int(parsed.get("score", 0))
-            return max(0, min(5, score))
-        except Exception:
-            match = re.search(r"\b([0-5])\b", response)
-            return int(match.group(1)) if match else 0
 
 
 # Backward compatible alias for template-generated class name.

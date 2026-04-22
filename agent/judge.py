@@ -14,8 +14,41 @@ except ImportError:
 class JudgeLLMBackend(Protocol):
     """Backend interface for frozen judge model calls."""
 
-    def complete(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> str:
         ...
+
+
+class NVIDIAJudgeBackend:
+    """Actual NVIDIA Minimax API implementation."""
+
+    def __init__(self, model: str = "minimaxai/minimax-m2.7"):
+        from openai import AsyncOpenAI
+        import os
+        self.model = model
+        self.api_key = os.environ.get("NVIDIA_API_KEY", "")
+        self.client = AsyncOpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=self.api_key
+        )
+
+    async def complete(self, prompt: str) -> str:
+        if not self.api_key:
+            return '{"score": 0, "reasoning": "Missing API Key"}'
+        
+        messages = [
+            {"role": "system", "content": "You are a senior code reviewer grading a patch/hypothesis. Reply ONLY with JSON containing 'score' (1-5) and 'reasoning'. Example: {\"score\": 4, \"reasoning\": \"Minimal fix\"}"},
+            {"role": "user", "content": prompt}
+        ]
+        try:
+            completion = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=256,
+            )
+            return completion.choices[0].message.content or '{"score": 0}'
+        except Exception as e:
+            return json.dumps({"score": 0, "reasoning": f"API Error: {str(e)}"})
 
 
 @dataclass
@@ -24,7 +57,7 @@ class FrozenJudge:
 
     backend: JudgeLLMBackend
 
-    def score_hypothesis(self, observation: FlakeForgeObservation, hypothesis: Hypothesis) -> Dict[str, Any]:
+    async def score_hypothesis(self, observation: FlakeForgeObservation, hypothesis: Hypothesis) -> Dict[str, Any]:
         compact_observation = self._compact_observation(observation)
         prompt = (
             "You are a senior software engineer reviewing a diagnosis of a flaky test.\n"
@@ -36,10 +69,10 @@ class FrozenJudge:
             f"Observation: {json.dumps(compact_observation)}\n"
             f"Hypothesis: {self._hypothesis_json(hypothesis)}"
         )
-        raw = self.backend.complete(prompt)
+        raw = await self.backend.complete(prompt)
         return self._parse_score(raw)
 
-    def score_patch(
+    async def score_patch(
         self,
         observation: FlakeForgeObservation,
         hypothesis: Hypothesis,
@@ -59,7 +92,7 @@ class FrozenJudge:
             f"Action: {action.model_dump_json()}\n"
             f"Diff:\n{patch_diff}"
         )
-        raw = self.backend.complete(prompt)
+        raw = await self.backend.complete(prompt)
         return self._parse_score(raw)
 
     @staticmethod
