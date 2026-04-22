@@ -76,8 +76,12 @@ class EpisodeState:
 class FlakeForgeEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
-    def __init__(self, repo_path: str = "/app/seed_repos/timing_race", test_id: str = "tests/test_flaky.py::test_flaky_case", max_steps: int = 14):
+    def __init__(self, repo_path: str = "test_repos/timing_race_minimal", test_id: str = "tests/test_flaky.py::test_flaky_simple", max_steps: int = 14):
         self.repo_path = Path(repo_path)
+        if not self.repo_path.is_absolute():
+            # Assume relative to FlakeForge root
+            self.repo_path = Path(__file__).parent.parent / self.repo_path
+        
         self.test_id = test_id
         self.max_steps = max_steps
         self.runner = DockerTestRunner(str(self.repo_path))

@@ -130,14 +130,17 @@ def _extract_observation(reset_or_step_result: Any) -> FlakeForgeObservation:
 
 
 def _attach_hypothesis_to_action(action: FlakeForgeAction, hypothesis: Hypothesis) -> FlakeForgeAction:
-    params = dict(action.parameters or {})
-    params["hypothesis"] = {
+    h_payload = {
         "root_cause_category": hypothesis.root_cause_category,
         "confidence": float(hypothesis.confidence),
         "evidence": list(hypothesis.evidence),
         "suggested_action": hypothesis.suggested_action,
     }
-    return FlakeForgeAction(action_type=action.action_type, parameters=params)
+    return FlakeForgeAction(
+        action_type=action.action_type,
+        parameters=action.parameters,
+        hypothesis=h_payload
+    )
 
 
 async def _build_env() -> FlakeForgeEnv:

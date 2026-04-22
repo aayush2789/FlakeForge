@@ -13,6 +13,7 @@ Usage:
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -113,8 +114,12 @@ def validate_config() -> bool:
     if not all_ok:
         print("ERROR: Required configuration is missing!")
         print("\nSet environment variables:")
-        print("  export NVIDIA_API_KEY='your-key-here'")
-        print("  export INFERENCE_MAX_STEPS=5  # for quick testing")
+        print("  PowerShell:")
+        print("    $env:NVIDIA_API_KEY='your-key-here'")
+        print("    $env:INFERENCE_MAX_STEPS='5'  # for quick testing")
+        print("  Bash:")
+        print("    export NVIDIA_API_KEY='your-key-here'")
+        print("    export INFERENCE_MAX_STEPS=5  # for quick testing")
         return False
     
     return True
@@ -139,7 +144,7 @@ async def run_inference() -> dict[str, Any] | None:
     })
     
     # Find the inference script
-    flakeforge_root = TEST_REPO_ROOT.parent.parent.parent  # Go up from test_repos/timing_race_minimal
+    flakeforge_root = TEST_REPO_ROOT.parent.parent  # Go up from test_repos/timing_race_minimal -> FlakeForge
     inference_script = flakeforge_root / "inference.py"
     
     if not inference_script.exists():
@@ -153,22 +158,31 @@ async def run_inference() -> dict[str, Any] | None:
     print(f"  Judge model: {JUDGE_MODEL}\n")
     
     try:
-        # For now, just show the command that would be run
-        # In a real test with running environment, we could use:
-        # result = subprocess.run(
-        #     [sys.executable, str(inference_script)],
-        #     env=env,
-        #     capture_output=True,
-        #     text=True,
-        # )
+        # Run the actual inference script
+        result = subprocess.run(
+            [sys.executable, str(inference_script)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
         
-        print("NOTE: Inference requires a running FlakeForge environment server.")
-        print("In production, this would connect to the environment and run.")
-        print("\nTo set up a real test:")
-        print("  1. Start the FlakeForge server: uv run server")
-        print("  2. Point ENV_BASE_URL to the server: export ENV_BASE_URL='http://localhost:8000'")
-        print("  3. Ensure test repo is initialized in the server")
-        print("  4. Run this script again\n")
+        # Print inference output
+        print(result.stdout)
+        if result.stderr:
+            print("STDERR:", result.stderr)
+        
+        if result.returncode != 0:
+            print(f"\nERROR: Inference failed with exit code {result.returncode}")
+            return None
+        
+        # Try to parse the JSON summary from stdout (last JSON object)
+        lines = result.stdout.strip().split('\n')
+        for line in reversed(lines):
+            if line.strip().startswith('{'):
+                try:
+                    return json.loads(line)
+                except:
+                    pass
         
         return None
     except Exception as e:
