@@ -26,7 +26,10 @@ try:
         PatchRecord,
         RunRecord,
     )
+    from .causal_graph import CrossRepoGraphBuilder
+    from .chaos_runner import ChaosAmplifiedRunner, ChaosProfile
     from .docker_runner import DockerTestRunner
+    from .perf_sentinel import PerformanceSentinel
     from .reward import compute_reward
     from .tools import (
         apply_ast_patch,
@@ -38,10 +41,13 @@ try:
         resolve_target_from_evidence,
     )
 except ImportError:
-    from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord
-    from server.docker_runner import DockerTestRunner
-    from server.reward import compute_reward
-    from server.tools import (
+    from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord  # type: ignore
+    from server.causal_graph import CrossRepoGraphBuilder  # type: ignore
+    from server.chaos_runner import ChaosAmplifiedRunner, ChaosProfile  # type: ignore
+    from server.docker_runner import DockerTestRunner  # type: ignore
+    from server.perf_sentinel import PerformanceSentinel  # type: ignore
+    from server.reward import compute_reward  # type: ignore
+    from server.tools import (  # type: ignore
         apply_ast_patch,
         get_failure_pattern,
         inject_logging,
@@ -71,16 +77,39 @@ class EpisodeState:
     actions_taken: List[str] = field(default_factory=list)
     hypothesis_confidence_at_each_step: List[float] = field(default_factory=list)
     hypothesis_history: List[Dict[str, Any]] = field(default_factory=list)
+    # ── V2 fields ─────────────────────────────────────────────────────
+    chaos_pass_rate: Optional[float] = None
+    chaos_baseline_pass_rate: Optional[float] = None
+    perf_regression_detected: bool = False
+    perf_median_ratio: float = 1.0
+    infrastructure_sensitive: bool = False
+    causal_graph_dict: Optional[Dict[str, Any]] = None
 
 
 class FlakeForgeEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
-    def __init__(self, repo_path: str = "/app/seed_repos/timing_race", test_id: str = "tests/test_flaky.py::test_flaky_case", max_steps: int = 14):
+    def __init__(
+        self,
+        repo_path: str = "/app/seed_repos/timing_race",
+        test_id: str = "tests/test_flaky.py::test_flaky_case",
+        max_steps: int = 14,
+        benchmark_test_id: Optional[str] = None,
+        chaos_profile: str = "cpu",
+    ):
         self.repo_path = Path(repo_path)
         self.test_id = test_id
         self.max_steps = max_steps
+        self.benchmark_test_id = benchmark_test_id  # e.g. "tests/test_benchmark.py::test_speed"
+        self.chaos_profile = ChaosProfile(chaos_profile) if chaos_profile != "none" else ChaosProfile.NONE
+        # V1: standard runner for regression checks
         self.runner = DockerTestRunner(str(self.repo_path))
+        # V2 Pillar 2: chaos-capable runner
+        self.chaos_runner = ChaosAmplifiedRunner(str(self.repo_path))
+        # V2 Pillar 4: performance sentinel
+        self.perf_sentinel = PerformanceSentinel()
+        # V2 Pillar 1: causal graph builder
+        self.causal_graph_builder = CrossRepoGraphBuilder(str(self.repo_path), max_depth=3)
         self._state = FlakeForgeState(episode_id=str(uuid4()), step_count=0)
         self._episode = EpisodeState(episode_id=self._state.episode_id, max_steps=max_steps, test_identifier=test_id)
 
@@ -96,6 +125,40 @@ class FlakeForgeEnvironment(Environment):
         self._episode.run_history = baseline_runs[-10:]
         self._episode.baseline_pass_rate = self._pass_rate(baseline_runs)
         self._episode.current_pass_rate = self._episode.baseline_pass_rate
+
+        # ── V2 Pillar 2: Chaos baseline ───────────────────────────────────────
+        if self.chaos_profile != ChaosProfile.NONE:
+            is_sensitive, chaos_baseline = self.chaos_runner.is_infrastructure_sensitive(
+                test_id=self.test_id,
+                clean_pass_rate=self._episode.baseline_pass_rate,
+                profile=self.chaos_profile,
+                n=10,
+            )
+            self._episode.chaos_baseline_pass_rate = chaos_baseline
+            self._episode.infrastructure_sensitive = is_sensitive
+        else:
+            self._episode.chaos_baseline_pass_rate = None
+            self._episode.infrastructure_sensitive = False
+
+        # ── V2 Pillar 4: Performance baseline ─────────────────────────────────
+        if self.benchmark_test_id:
+            try:
+                self.perf_sentinel.capture_baseline(self.runner, self.benchmark_test_id)
+            except Exception:
+                pass  # Graceful degradation: no benchmark test available
+
+        # ── V2 Pillar 1: Build causal graph ─────────────────────────────────
+        try:
+            test_file = self.test_id.split("::", 1)[0]
+            test_func = self.test_id.split("::", 1)[-1] if "::" in self.test_id else ""
+            if test_func:
+                causal_graph = self.causal_graph_builder.build(
+                    entry_file=str(self.repo_path / test_file),
+                    entry_function=test_func,
+                )
+                self._episode.causal_graph_dict = causal_graph.to_observation_dict()
+        except Exception:
+            self._episode.causal_graph_dict = None  # Graceful degradation
 
         self._state = FlakeForgeState(
             episode_id=self._episode.episode_id,
@@ -145,7 +208,29 @@ class FlakeForgeEnvironment(Environment):
         self._episode.current_pass_rate = self._pass_rate(post_runs)
         self._episode.regression_detected = self.runner.check_regressions(exclude_test_id=self.test_id, timeout_seconds=30)
 
-        done = self._episode.regression_detected or self._episode.step_count >= self.max_steps or self._episode.current_pass_rate >= 1.0
+        # ── V2 Pillar 2: Chaos verification after each patch ─────────────────────
+        if self.chaos_profile != ChaosProfile.NONE and action.action_type != "CHAOS_PROBE":
+            chaos_records = self.chaos_runner.run_test_n_times_chaos(
+                self.test_id, n=10, profile=self.chaos_profile
+            )
+            self._episode.chaos_pass_rate = self._pass_rate(chaos_records)
+        elif action.action_type == "CHAOS_PROBE":
+            # CHAOS_PROBE is handled in _execute_action; result already on episode
+            pass
+
+        # ── V2 Pillar 4: Performance sentinel ─────────────────────────────────
+        if self.perf_sentinel.has_baseline and action.action_type not in {
+            "GATHER_EVIDENCE", "CHAOS_PROBE", "DIAGNOSE_BOUNDARY"
+        }:
+            sentinel_result = self.perf_sentinel.check_regression(self.runner)
+            self._episode.perf_regression_detected = sentinel_result.is_regression
+            self._episode.perf_median_ratio = sentinel_result.median_ratio
+
+        done = (
+            self._episode.regression_detected
+            or self._episode.step_count >= self.max_steps
+            or self._episode.current_pass_rate >= 1.0
+        )
         final_validation_runs = 0
         if done and not self._episode.regression_detected:
             terminal_runs = self._run_test_n_times(n=50)
@@ -166,6 +251,11 @@ class FlakeForgeEnvironment(Environment):
             "done": done,
             "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
             "ast_diff": execution.get("ast_diff", {}),
+            # ── V2 additions ──
+            "chaos_pass_rate": self._episode.chaos_pass_rate,
+            "chaos_baseline_pass_rate": self._episode.chaos_baseline_pass_rate,
+            "perf_regression_detected": self._episode.perf_regression_detected,
+            "perf_median_ratio": self._episode.perf_median_ratio,
         }
         reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
 
@@ -255,6 +345,15 @@ class FlakeForgeEnvironment(Environment):
             total_diff_lines=self._episode.total_diff_lines,
             reward=reward,
             done=done,
+            # ── V2 new fields ────────────────────────────────────────────────────
+            causal_graph=self._episode.causal_graph_dict,
+            chaos_pass_rate=self._episode.chaos_pass_rate,
+            chaos_baseline_pass_rate=self._episode.chaos_baseline_pass_rate,
+            infrastructure_sensitive=self._episode.infrastructure_sensitive,
+            perf_sentinel_status={
+                "regression": self._episode.perf_regression_detected,
+                "median_ratio": self._episode.perf_median_ratio,
+            } if self.perf_sentinel.has_baseline else None,
         )
 
     def _execute_action(self, action: FlakeForgeAction) -> Dict[str, Any]:
@@ -413,6 +512,97 @@ class FlakeForgeEnvironment(Environment):
                 "code_template": "",
                 "parameters": {},
             }
+        # ── V2 Deep-Action Handlers ────────────────────────────────────────────
+        if action.action_type == "DIAGNOSE_BOUNDARY":
+            boundary_node = action.parameters.get("boundary_node", "")
+            # Rebuild the causal graph and return its dict
+            try:
+                test_file = self.test_id.split("::", 1)[0]
+                test_func = self.test_id.split("::", 1)[-1] if "::" in self.test_id else ""
+                if test_func:
+                    fresh_graph = self.causal_graph_builder.build(
+                        str(self.repo_path / test_file), test_func
+                    )
+                    self._episode.causal_graph_dict = fresh_graph.to_observation_dict()
+                boundary_nodes = [
+                    n for n in (self._episode.causal_graph_dict or {}).get("nodes", [])
+                    if boundary_node in n.get("id", "") or n.get("boundary")
+                ]
+                return {
+                    "action": action.action_type,
+                    "boundary_node": boundary_node,
+                    "found_boundaries": boundary_nodes,
+                    "no_op": False,
+                }
+            except Exception as exc:
+                return {"action": action.action_type, "no_op": True, "reason": str(exc)}
+
+        if action.action_type == "CHAOS_PROBE":
+            profile = ChaosProfile(action.parameters["profile"])
+            n_runs = action.parameters.get("n_runs", 10)
+            chaos_records = self.chaos_runner.run_test_n_times_chaos(
+                self.test_id, n=n_runs, profile=profile
+            )
+            chaos_pass_rate = self._pass_rate(chaos_records)
+            self._episode.chaos_pass_rate = chaos_pass_rate
+            clean_pr = self._episode.current_pass_rate
+            is_sensitive = chaos_pass_rate < (clean_pr - 0.2)
+            self._episode.infrastructure_sensitive = is_sensitive
+            return {
+                "action": action.action_type,
+                "profile": profile.value,
+                "n_runs": n_runs,
+                "chaos_pass_rate": chaos_pass_rate,
+                "clean_pass_rate": clean_pr,
+                "infrastructure_sensitive": is_sensitive,
+                "no_op": False,
+            }
+
+        if action.action_type == "REFACTOR_CONCURRENCY":
+            return {
+                "operation": "refactor_concurrency_primitive",
+                "target": {
+                    "function_name": action.parameters["target_function"],
+                    "from_primitive": action.parameters["from_primitive"],
+                    "to_primitive": action.parameters["to_primitive"],
+                },
+                "code_template": "",
+                "parameters": dict(action.parameters),
+            }
+
+        if action.action_type == "ISOLATE_BOUNDARY":
+            return {
+                "operation": "isolate_boundary_call",
+                "target": {
+                    "boundary_call": action.parameters["boundary_call"],
+                    "pattern": action.parameters["pattern"],
+                },
+                "code_template": "",
+                "parameters": dict(action.parameters),
+            }
+
+        if action.action_type == "EXTRACT_ASYNC_SCOPE":
+            return {
+                "operation": "extract_async_scope",
+                "target": {
+                    "function_name": action.parameters["target_function"],
+                    "direction": action.parameters["direction"],
+                },
+                "code_template": "",
+                "parameters": dict(action.parameters),
+            }
+
+        if action.action_type == "HARDEN_IDEMPOTENCY":
+            return {
+                "operation": "harden_idempotency",
+                "target": {
+                    "state_target": action.parameters["state_target"],
+                    "key_strategy": action.parameters["key_strategy"],
+                },
+                "code_template": "",
+                "parameters": dict(action.parameters),
+            }
+
         raise ValueError(f"Unsupported action type for patching: {action.action_type}")
 
     def _update_hypothesis_from_action(self, action: FlakeForgeAction) -> None:
