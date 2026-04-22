@@ -163,7 +163,7 @@ def apply_ast_patch(path: str, patch_spec: Dict[str, Any]) -> Dict[str, Any]:
         rendered = template.format(**params)
 
         if rendered and rendered in original and operation in {"insert_before", "insert_after", "add_decorator"}:
-            diff_data = compute_diff(str(p), original)
+            diff_data = compute_diff_from_sources(str(p), original, original)
             return {
                 "success": True,
                 "diff": diff_data["unified_diff"],
@@ -174,7 +174,7 @@ def apply_ast_patch(path: str, patch_spec: Dict[str, Any]) -> Dict[str, Any]:
         updated = _apply_patch_operation(original, operation, target, identifier, rendered)
         p.write_text(updated, encoding="utf-8")
 
-        diff_data = compute_diff(str(p), updated)
+        diff_data = compute_diff_from_sources(str(p), original, updated)
         return {
             "success": True,
             "diff": diff_data["unified_diff"],
@@ -193,11 +193,15 @@ def apply_ast_patch(path: str, patch_spec: Dict[str, Any]) -> Dict[str, Any]:
 
 def compute_diff(original_path: str, patched_source: str) -> Dict[str, Any]:
     original = Path(original_path).read_text(encoding="utf-8", errors="ignore")
-    unified_diff = _make_unified_diff(original, patched_source, original_path)
+    return compute_diff_from_sources(original_path, original, patched_source)
+
+
+def compute_diff_from_sources(path: str, before_source: str, after_source: str) -> Dict[str, Any]:
+    unified_diff = _make_unified_diff(before_source, after_source, path)
     lines_changed = _count_diff_lines(unified_diff)
 
-    before = _safe_summary_from_source(original)
-    after = _safe_summary_from_source(patched_source)
+    before = _safe_summary_from_source(before_source)
+    after = _safe_summary_from_source(after_source)
 
     before_funcs = {f["name"] for f in before.functions}
     after_funcs = {f["name"] for f in after.functions}
@@ -252,7 +256,7 @@ def get_failure_pattern(run_records: List[RunRecord]) -> FailurePattern:
     )
 
 
-def get_similar_fixes(root_cause_category: str, test_source: str, embedding_model: Any) -> List[Dict[str, str]]:
+def get_similar_fixes(root_cause_category: str, test_source: str, embedding_model: Any = None) -> List[Dict[str, str]]:
     try:
         import chromadb
         from sentence_transformers import SentenceTransformer
@@ -277,9 +281,11 @@ def get_similar_fixes(root_cause_category: str, test_source: str, embedding_mode
             payload = json.loads(doc)
             out.append(
                 {
+                    "root_cause": md.get("root_cause_category", root_cause_category),
                     "original": payload.get("original", ""),
                     "fixed": payload.get("fixed", ""),
                     "diff": payload.get("diff", ""),
+                    "action": md.get("action", ""),
                     "repo": md.get("repo", "unknown"),
                 }
             )
@@ -311,6 +317,16 @@ def _seed_collection_from_seed_repos(collection: Any) -> None:
         "compound_timing_shared": "TIMING_RACE",
         "compound_external_nondeterminism": "EXTERNAL_DEPENDENCY",
     }
+    action_mapping = {
+        "timing_race": "ADD_TIMING_GUARD",
+        "shared_state": "RESET_STATE",
+        "external_dependency": "MOCK_DEPENDENCY",
+        "order_dependency": "ADD_SYNCHRONIZATION",
+        "resource_leak": "RESET_STATE",
+        "nondeterminism": "SEED_RANDOMNESS",
+        "compound_timing_shared": "ADD_TIMING_GUARD",
+        "compound_external_nondeterminism": "MOCK_DEPENDENCY",
+    }
 
     docs = []
     embeddings = []
@@ -330,7 +346,13 @@ def _seed_collection_from_seed_repos(collection: Any) -> None:
         payload = json.dumps({"original": original, "fixed": fixed, "diff": diff})
         docs.append(payload)
         ids.append(repo_dir.name)
-        metadatas.append({"repo": repo_dir.name, "root_cause_category": mapping.get(repo_dir.name, "NONDETERMINISM")})
+        metadatas.append(
+            {
+                "repo": repo_dir.name,
+                "root_cause_category": mapping.get(repo_dir.name, "NONDETERMINISM"),
+                "action": action_mapping.get(repo_dir.name, "GATHER_EVIDENCE"),
+            }
+        )
 
         if model is not None:
             embeddings.append(model.encode(original).tolist())
@@ -463,6 +485,18 @@ def _line_of_text(source: str, text: str) -> int:
 
 
 def _apply_patch_operation(source: str, operation: str, target: Dict[str, Any], identifier: str, rendered: str) -> str:
+    if operation == "ensure_reset_fixture":
+        scope = str(target.get("scope", "function"))
+        return _apply_reset_fixture(source, scope)
+    if operation == "ensure_retry_wrapper":
+        max_attempts = int(target.get("max_attempts", 2))
+        backoff_ms = int(target.get("backoff_ms", 100))
+        fn_name = str(target.get("function_name", "test"))
+        return _apply_retry_wrapper(source, fn_name, max_attempts, backoff_ms)
+    if operation == "ensure_seed_call":
+        library = str(target.get("library", "random"))
+        fn_name = str(target.get("function_name", "test"))
+        return _apply_seed_call(source, fn_name, library)
     if operation == "add_decorator":
         return _apply_add_decorator(source, target, rendered)
     if operation == "replace_call":
@@ -575,6 +609,115 @@ def _cst_name(node: cst.CSTNode) -> str:
         left = _cst_name(node.value)
         return f"{left}.{node.attr.value}" if left else node.attr.value
     return ""
+
+
+def _apply_reset_fixture(source: str, scope: str) -> str:
+    fixture_name = "_flakeforge_reset_state"
+    if f"def {fixture_name}(" in source:
+        return source
+
+    module = cst.parse_module(source)
+    fixture_code = (
+        f"@pytest.fixture(autouse=True, scope='{scope}')\n"
+        f"def {fixture_name}():\n"
+        "    for _key, _value in list(globals().items()):\n"
+        "        if _key.startswith('_') or _key in {'pytest', 'copy', '_flakeforge_reset_state'}:\n"
+        "            continue\n"
+        "        if isinstance(_value, dict):\n"
+        "            _value.clear()\n"
+        "        elif isinstance(_value, list):\n"
+        "            _value.clear()\n"
+        "        elif isinstance(_value, set):\n"
+        "            _value.clear()\n"
+        "    yield\n"
+    )
+
+    try:
+        fixture_stmt = cst.parse_statement(fixture_code)
+        if not isinstance(fixture_stmt, cst.FunctionDef):
+            return source
+    except Exception:
+        return source
+
+    updated_source = source
+    if "import pytest" not in source:
+        updated_source = "import pytest\n" + updated_source
+
+    updated_module = cst.parse_module(updated_source)
+    body = list(updated_module.body)
+    body.insert(0, fixture_stmt)
+    return updated_module.with_changes(body=body).code
+
+
+def _apply_retry_wrapper(source: str, fn_name: str, max_attempts: int, backoff_ms: int) -> str:
+    helper_name = "_flakeforge_retry"
+    module = cst.parse_module(source)
+
+    class RetryDecoratorAdder(cst.CSTTransformer):
+        def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
+            if fn_name and fn_name not in original_node.name.value and fn_name != "test":
+                return updated_node
+            decorator_expr = cst.parse_expression(
+                f"{helper_name}(max_attempts={max_attempts}, backoff_ms={backoff_ms})"
+            )
+            existing = [d.decorator.code for d in updated_node.decorators]
+            if any(helper_name in value for value in existing):
+                return updated_node
+            return updated_node.with_changes(decorators=[*updated_node.decorators, cst.Decorator(decorator_expr)])
+
+    transformed = module.visit(RetryDecoratorAdder()).code
+    if f"def {helper_name}(" in transformed:
+        return transformed
+
+    helper_code = (
+        "\n"
+        "def _flakeforge_retry(max_attempts: int = 2, backoff_ms: int = 100):\n"
+        "    def _decorator(fn):\n"
+        "        def _wrapped(*args, **kwargs):\n"
+        "            _last_exc = None\n"
+        "            for _attempt in range(max_attempts):\n"
+        "                try:\n"
+        "                    return fn(*args, **kwargs)\n"
+        "                except Exception as _exc:\n"
+        "                    _last_exc = _exc\n"
+        "                    time.sleep(backoff_ms / 1000.0)\n"
+        "            raise _last_exc\n"
+        "        return _wrapped\n"
+        "    return _decorator\n"
+    )
+    if "import time" not in transformed:
+        transformed = "import time\n" + transformed
+    return transformed + helper_code
+
+
+def _apply_seed_call(source: str, fn_name: str, library: str) -> str:
+    module = cst.parse_module(source)
+    seed_statements: List[cst.BaseStatement] = []
+    if library in {"random", "both"}:
+        seed_statements.append(cst.parse_statement("random.seed(42)\n"))
+    if library in {"numpy", "both"}:
+        seed_statements.append(cst.parse_statement("numpy.random.seed(42)\n"))
+
+    class SeedInserter(cst.CSTTransformer):
+        def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
+            if fn_name and fn_name not in original_node.name.value and fn_name != "test":
+                return updated_node
+            body = list(updated_node.body.body)
+            existing_codes = [stmt.code for stmt in body]
+            to_insert: List[cst.BaseStatement] = []
+            for stmt in seed_statements:
+                if stmt.code not in existing_codes:
+                    to_insert.append(stmt)
+            if not to_insert:
+                return updated_node
+            return updated_node.with_changes(body=updated_node.body.with_changes(body=[*to_insert, *body]))
+
+    transformed = module.visit(SeedInserter()).code
+    if library in {"random", "both"} and "import random" not in transformed:
+        transformed = "import random\n" + transformed
+    if library in {"numpy", "both"} and "import numpy" not in transformed:
+        transformed = "import numpy\n" + transformed
+    return transformed
 
 
 def _parse_js_ts_summary(path: Path) -> ASTSummary:

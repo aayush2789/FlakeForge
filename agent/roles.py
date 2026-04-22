@@ -9,6 +9,11 @@ from pydantic import TypeAdapter
 
 from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
+try:
+    from server.tools import get_similar_fixes
+except Exception:  # pragma: no cover
+    get_similar_fixes = None  # type: ignore[assignment]
+
 
 class ModelBackend(Protocol):
     """Backend interface for shared-base model with switchable LoRA adapters."""
@@ -39,7 +44,7 @@ class AnalyzerRole:
         prompt = "\n".join(
             [
                 "Observation:",
-                observation.model_dump_json(indent=2),
+                json.dumps(_compact_observation_payload(observation, include_sources=True), indent=2),
                 "Return JSON only.",
             ]
         )
@@ -74,7 +79,7 @@ class FixerRole:
         self.adapter = adapter
         self.system_prompt = (
             "You are a senior software engineer repairing a flaky CI test. "
-            "Select exactly one action from the seven allowed actions and return JSON."
+            "Select exactly one action from the eight allowed actions and return JSON."
         )
 
     def produce_action(
@@ -83,14 +88,18 @@ class FixerRole:
         hypothesis: Hypothesis,
         few_shot_examples: Optional[list[dict[str, str]]] = None,
     ) -> FlakeForgeAction:
+        examples = few_shot_examples
+        if examples is None:
+            examples = _auto_retrieve_examples(observation, hypothesis)
+
         prompt_parts = [
             "Observation:",
-            observation.model_dump_json(indent=2),
+            json.dumps(_compact_observation_payload(observation, include_sources=True), indent=2),
             "Hypothesis:",
             _hypothesis_json(hypothesis),
         ]
 
-        for example in few_shot_examples or []:
+        for example in examples or []:
             prompt_parts.extend(
                 [
                     "<example>",
@@ -116,11 +125,13 @@ class FixerRole:
             return FlakeForgeAction(
                 action_type=parsed.get("action_type", "GATHER_EVIDENCE"),
                 parameters=dict(parsed.get("parameters", {})),
+                hypothesis=_hypothesis_payload(hypothesis),
             )
         except Exception:
             return FlakeForgeAction(
                 action_type="GATHER_EVIDENCE",
                 parameters={"injection_target": "test"},
+                hypothesis=_hypothesis_payload(hypothesis),
             )
 
 
@@ -160,3 +171,66 @@ def _parse_json(text: str) -> Dict[str, Any]:
 
 def _hypothesis_json(hypothesis: Hypothesis) -> str:
     return TypeAdapter(Hypothesis).dump_json(hypothesis, indent=2).decode("utf-8")
+
+
+def _hypothesis_payload(hypothesis: Hypothesis) -> Dict[str, Any]:
+    return {
+        "root_cause_category": hypothesis.root_cause_category,
+        "confidence": hypothesis.confidence,
+        "evidence": list(hypothesis.evidence),
+        "suggested_action": hypothesis.suggested_action,
+    }
+
+
+def _compact_observation_payload(observation: FlakeForgeObservation, include_sources: bool) -> Dict[str, Any]:
+    run_history = [
+        {
+            "passed": r.passed,
+            "error_type": r.error_type,
+            "duration_ms": r.duration_ms,
+        }
+        for r in observation.run_history[-5:]
+    ]
+    payload: Dict[str, Any] = {
+        "episode_id": observation.episode_id,
+        "test_identifier": observation.test_identifier,
+        "step": observation.step,
+        "steps_remaining": observation.steps_remaining,
+        "current_pass_rate": observation.current_pass_rate,
+        "baseline_pass_rate": observation.baseline_pass_rate,
+        "async_markers": observation.async_markers[:20],
+        "run_history": run_history,
+        "current_hypothesis": _hypothesis_payload(observation.current_hypothesis)
+        if observation.current_hypothesis
+        else None,
+        "log_snippets": observation.log_snippets[-3:],
+    }
+    if include_sources:
+        payload["test_function_source"] = _first_lines(observation.test_function_source, 50)
+        payload["source_under_test"] = _first_lines(observation.source_under_test, 50)
+    return payload
+
+
+def _auto_retrieve_examples(observation: FlakeForgeObservation, hypothesis: Hypothesis) -> list[dict[str, str]]:
+    if get_similar_fixes is None:
+        return []
+    try:
+        examples = get_similar_fixes(hypothesis.root_cause_category, observation.test_function_source)
+    except Exception:
+        return []
+    return [
+        {
+            "root_cause": str(ex.get("root_cause", hypothesis.root_cause_category)),
+            "original": _first_lines(str(ex.get("original", "")), 40),
+            "action": str(ex.get("action", "")),
+            "diff": _first_lines(str(ex.get("diff", "")), 40),
+        }
+        for ex in examples[:3]
+    ]
+
+
+def _first_lines(text: str, line_count: int) -> str:
+    if not text:
+        return ""
+    lines = text.splitlines()
+    return "\n".join(lines[:line_count])

@@ -22,6 +22,7 @@ class FrozenJudge:
     backend: JudgeLLMBackend
 
     def score_hypothesis(self, observation: FlakeForgeObservation, hypothesis: Hypothesis) -> Dict[str, Any]:
+        compact_observation = self._compact_observation(observation)
         prompt = (
             "You are a senior software engineer reviewing a diagnosis of a flaky test.\n"
             "Given the test code, failure logs, and the agent's hypothesis, score the\n"
@@ -29,7 +30,7 @@ class FrozenJudge:
             "confidence is well-calibrated, and the evidence cited directly supports the\n"
             "hypothesis. Score 0 if the category is wrong or the evidence is irrelevant.\n"
             "Return only a JSON object: {\"score\": <int 0-5>, \"reasoning\": \"<max 50 words>\"}\n\n"
-            f"Observation: {observation.model_dump_json()}\n"
+            f"Observation: {json.dumps(compact_observation)}\n"
             f"Hypothesis: {self._hypothesis_json(hypothesis)}"
         )
         raw = self.backend.complete(prompt)
@@ -42,6 +43,7 @@ class FrozenJudge:
         action: FlakeForgeAction,
         patch_diff: str,
     ) -> Dict[str, Any]:
+        compact_observation = self._compact_observation(observation)
         prompt = (
             "You are a senior engineer doing code review. Given the original test, the\n"
             "diagnosed root cause, and the proposed patch diff, score the patch from 0 to 5.\n"
@@ -49,7 +51,7 @@ class FrozenJudge:
             "cause, and would be accepted in a real PR. Penalize if the patch uses retry\n"
             "logic to mask a bug, or changes more than the minimum necessary.\n"
             "Return only JSON: {\"score\": <int 0-5>, \"reasoning\": \"<max 50 words>\"}\n\n"
-            f"Observation: {observation.model_dump_json()}\n"
+            f"Observation: {json.dumps(compact_observation)}\n"
             f"Hypothesis: {self._hypothesis_json(hypothesis)}\n"
             f"Action: {action.model_dump_json()}\n"
             f"Diff:\n{patch_diff}"
@@ -79,3 +81,27 @@ class FrozenJudge:
                 "suggested_action": hypothesis.suggested_action,
             }
         )
+
+    @staticmethod
+    def _compact_observation(observation: FlakeForgeObservation) -> Dict[str, Any]:
+        return {
+            "test_identifier": observation.test_identifier,
+            "step": observation.step,
+            "current_pass_rate": observation.current_pass_rate,
+            "baseline_pass_rate": observation.baseline_pass_rate,
+            "test_function_source": "\n".join(observation.test_function_source.splitlines()[:50]),
+            "run_history": [
+                {
+                    "passed": record.passed,
+                    "error_type": record.error_type,
+                }
+                for record in observation.run_history[-5:]
+            ],
+            "current_hypothesis": {
+                "root_cause_category": observation.current_hypothesis.root_cause_category,
+                "confidence": observation.current_hypothesis.confidence,
+                "evidence": observation.current_hypothesis.evidence,
+            }
+            if observation.current_hypothesis
+            else None,
+        }

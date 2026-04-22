@@ -21,6 +21,7 @@ ACTION_TYPES = Literal[
     "MOCK_DEPENDENCY",
     "RESET_STATE",
     "ADD_RETRY",
+    "SEED_RANDOMNESS",
     "REVERT_LAST_PATCH",
 ]
 
@@ -39,6 +40,8 @@ class FlakeForgeAction(Action):
 
     action_type: ACTION_TYPES
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    hypothesis: Optional["HypothesisPayload"] = None
+    judge_feedback: Optional["JudgeFeedbackPayload"] = None
 
     @model_validator(mode="after")
     def _validate_action_payload(self) -> "FlakeForgeAction":
@@ -89,6 +92,12 @@ class FlakeForgeAction(Action):
         elif self.action_type == "REVERT_LAST_PATCH":
             if params:
                 raise ValueError("REVERT_LAST_PATCH.parameters must be empty")
+
+        elif self.action_type == "SEED_RANDOMNESS":
+            allowed = {"library"}
+            self._check_only_allowed(params, allowed)
+            if params.get("library") not in {"random", "numpy", "both"}:
+                raise ValueError("SEED_RANDOMNESS.library must be one of random, numpy, both")
 
         return self
 
@@ -141,6 +150,23 @@ class Hypothesis:
             raise ValueError("Hypothesis.evidence can contain at most 5 entries")
 
 
+class HypothesisPayload(BaseModel):
+    root_cause_category: ROOT_CAUSE_TYPES
+    confidence: float
+    evidence: List[str] = Field(default_factory=list)
+    suggested_action: Optional[str] = None
+
+
+class JudgeFeedbackPayload(BaseModel):
+    judge_hypothesis_score: int = 0
+    judge_patch_score: int = 0
+
+    @field_validator("judge_hypothesis_score", "judge_patch_score")
+    @classmethod
+    def _clamp_scores(cls, value: int) -> int:
+        return max(0, min(5, int(value)))
+
+
 @dataclass
 class PatchRecord:
     action_taken: str
@@ -177,6 +203,8 @@ class FlakeForgeObservation(Observation):
     current_pass_rate: float = 0.0
     baseline_pass_rate: float = 0.0
     total_diff_lines: int = 0
+    reward: float = 0.0
+    done: bool = False
 
     @field_validator("run_history")
     @classmethod

@@ -20,9 +20,12 @@ def run_episode(
     obs: FlakeForgeObservation = obs_result if isinstance(obs_result, FlakeForgeObservation) else obs_result.observation
 
     trajectory: List[Dict[str, Any]] = []
+    pending_judge_scores: Dict[str, int] = {}
 
     for _ in range(max_steps):
         hypothesis, action = agent_pipeline.run_step(obs)
+        if pending_judge_scores:
+            action.judge_feedback = dict(pending_judge_scores)
 
         step_result = env.step(action)
         next_obs: FlakeForgeObservation = step_result if isinstance(step_result, FlakeForgeObservation) else step_result.observation
@@ -37,6 +40,7 @@ def run_episode(
             "judge_hypothesis_score": int(hyp_score.get("score", 0)),
             "judge_patch_score": int(patch_score.get("score", 0)),
         }
+        pending_judge_scores = dict(judge_scores)
 
         reward_input = step_info.get("step_result", {
             "current_pass_rate": next_obs.current_pass_rate,
