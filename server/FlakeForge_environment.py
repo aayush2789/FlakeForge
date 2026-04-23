@@ -136,6 +136,8 @@ class FlakeForgeEnvironment(Environment):
         self.trace_logger = FullTraceLogger()
         self.causal_trace = EpisodeCausalTrace()
         self.debug_enabled = os.getenv("ENV_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
+        # ── RLVR Hybrid: Oracle loaded once per repo ────────────────────────
+        self._manifest_oracle: Dict[str, Any] = self._load_manifest()
 
     def _resolve_repo_path(self, repo_path: Path) -> Path:
         root = Path(__file__).resolve().parent.parent
@@ -350,15 +352,15 @@ class FlakeForgeEnvironment(Environment):
             self._episode.run_history = self._episode.run_history[-10:]
         self._episode.done = done
 
-        judge_scores = action.judge_feedback.model_dump() if action.judge_feedback is not None else {}
-        if judge_scores:
-            self._episode.judge_scores.append(judge_scores)
+        # ── RLVR Hybrid: judge_feedback on action is accepted but intentionally
+        # ignored server-side — the inline Judge LLM has been removed.
         failure_pattern = get_failure_pattern(post_runs)
         repeat_action_count = _repeat_tail_count([canonical_action(a) for a in self._episode.actions_taken])
         step_result = {
             "current_pass_rate": self._episode.current_pass_rate,
             "regression_detected": self._episode.regression_detected,
             "action_taken": canonical_action_var,
+            "action_parameters": action.parameters or {},
             "done": done,
             "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
             "ast_diff": execution.get("ast_diff", {}),
@@ -369,8 +371,28 @@ class FlakeForgeEnvironment(Environment):
             "chaos_baseline_pass_rate": self._episode.chaos_baseline_pass_rate,
             "perf_regression_detected": self._episode.perf_regression_detected,
             "perf_median_ratio": self._episode.perf_median_ratio,
+            # ── RLVR Hybrid ──
+            "predicted_pass_rate_after": action.predicted_pass_rate_after,
         }
-        reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
+        # ── Accumulate CoT trajectory for Teacher Judge ───────────────────────
+        self._episode.cot_trajectory.append({
+            "step": self._episode.step_count,
+            "action_type": action.action_type,
+            "justification": action.justification or "",
+            "reasoning_steps": list(
+                (self._episode.current_hypothesis.reasoning_steps
+                 if self._episode.current_hypothesis else [])
+            ),
+            "hypothesis_category": (
+                self._episode.current_hypothesis.root_cause_category
+                if self._episode.current_hypothesis else None
+            ),
+            "predicted_pass_rate_after": action.predicted_pass_rate_after,
+            "actual_pass_rate": self._episode.current_pass_rate,
+        })
+        reward, reward_breakdown = compute_reward(
+            self._episode, step_result, self._manifest_oracle
+        )
 
         predicted = action.predicted_pass_rate_after
         prediction_error = (
@@ -536,6 +558,14 @@ class FlakeForgeEnvironment(Environment):
                 max(0.0, min(1.0, 1.0 - (self._episode.total_diff_lines / 100.0) - (self._episode.step_count / max(1, self.max_steps * 2)))),
                 4,
             )
+            # ── RLVR Hybrid: End-of-Episode Teacher Judge ─────────────────────
+            # One LLM call with full trajectory + Oracle; updates reward in-place.
+            teacher_reward_delta = self._finalize_episode()
+            reward += teacher_reward_delta
+            reward_breakdown["r_teacher_judge"] = float(teacher_reward_delta)
+            reward_breakdown["total_reward"] = float(reward)
+            obs.reward = reward  # propagate updated reward to observation
+
             self.trace_logger.set_summary(
                 {
                     "baseline_pass_rate": self._episode.baseline_pass_rate,
@@ -545,8 +575,15 @@ class FlakeForgeEnvironment(Environment):
                     "fix_summary": fix_summary,
                     "efficiency_score": efficiency_score,
                     "causal_trace": self.causal_trace.to_dict(),
+                    "teacher_judge_score": self._episode.teacher_judge_score,
+                    "teacher_judge_critique": self._episode.teacher_judge_critique,
                 }
             )
+            # Surface teacher judge info in obs metadata
+            obs.metadata["teacher_judge"] = {
+                "score": self._episode.teacher_judge_score,
+                "critique": self._episode.teacher_judge_critique,
+            }
         return obs
 
     @property
@@ -803,6 +840,145 @@ class FlakeForgeEnvironment(Environment):
         except Exception:
             # Ignore malformed hypotheses and keep previous valid hypothesis.
             return
+
+    # ── RLVR Hybrid helpers ───────────────────────────────────────────────────
+
+    def _load_manifest(self) -> Dict[str, Any]:
+        """Load flake_manifest.json from the repo root. Returns {} on failure."""
+        manifest_path = self.repo_path / "flake_manifest.json"
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:
+                pass
+        return {}
+
+    def _finalize_episode(self) -> float:
+        """Call Teacher Judge LLM once at episode end.
+
+        Returns the reward delta from the teacher score so the caller can
+        add it to the step reward before returning the final observation.
+        """
+        import asyncio as _asyncio
+        import os as _os
+
+        teacher_context = self._manifest_oracle.get("teacher_judge_context", {})
+        # Build the prompt payload (no LLM if API key absent)
+        api_key = (
+            _os.environ.get("NVIDIA_API_KEY")
+            or _os.environ.get("OPENAI_API_KEY")
+            or ""
+        ).strip()
+
+        score: float = 0.0
+        critique: str = ""
+
+        if api_key:
+            prompt_payload = json.dumps(
+                {
+                    "task": "grade_reasoning_trajectory",
+                    "manifest_oracle": {
+                        "flake_category": self._manifest_oracle.get("flake_category"),
+                        "correct_actions": self._manifest_oracle.get("correct_actions"),
+                        "correct_primitives": self._manifest_oracle.get("correct_primitives"),
+                        "root_cause_file": self._manifest_oracle.get("root_cause_file"),
+                        "root_cause_function": self._manifest_oracle.get("root_cause_function"),
+                        "expected_reasoning_steps": teacher_context.get("expected_reasoning_steps", []),
+                        "anti_patterns": teacher_context.get("anti_patterns", []),
+                    },
+                    "agent_trajectory": self._episode.cot_trajectory,
+                    "final_pass_rate": self._episode.current_pass_rate,
+                    "expected_pass_rate_after_fix": self._manifest_oracle.get("expected_pass_rate_after_fix"),
+                    "agent_predicted_final_pass_rate": (
+                        self._episode.cot_trajectory[-1].get("predicted_pass_rate_after")
+                        if self._episode.cot_trajectory else None
+                    ),
+                },
+                ensure_ascii=False,
+            )
+            try:
+                # Run async call in a sync context
+                loop = None
+                try:
+                    loop = _asyncio.get_event_loop()
+                except RuntimeError:
+                    pass
+                if loop and loop.is_running():
+                    # We're inside an event loop (e.g. pytest-asyncio); use run_in_executor
+                    import concurrent.futures as _cf
+                    with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(
+                            _asyncio.run, self._call_teacher_judge(prompt_payload, api_key)
+                        )
+                        score, critique = future.result(timeout=90)
+                else:
+                    score, critique = _asyncio.run(
+                        self._call_teacher_judge(prompt_payload, api_key)
+                    )
+            except Exception as exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "[TEACHER_JUDGE] Failed: %s", exc
+                )
+
+        self._episode.teacher_judge_score = score
+        self._episode.teacher_judge_critique = critique
+
+        # Compute reward delta using the same formula as reward.py
+        r_teacher = 0.0
+        if score > 0.0:
+            r_teacher = (score / 10.0) * 4.0
+            if score < 4.0:
+                r_teacher -= (4.0 - score) * 0.5
+        return r_teacher
+
+    @staticmethod
+    async def _call_teacher_judge(prompt: str, api_key: str) -> tuple:
+        """Single async call to the Judge LLM.  Returns (score: float, critique: str)."""
+        import logging as _logging
+        from openai import AsyncOpenAI
+
+        judge_model = os.getenv("JUDGE_MODEL", "minimaxai/minimax-m2.7").strip()
+        judge_timeout = float(os.getenv("REQUEST_TIMEOUT_S", "60"))
+
+        client = AsyncOpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key,
+            timeout=judge_timeout,
+        )
+        system_msg = (
+            "You are an Omniscient Teacher grading an AI agent's reasoning trajectory for debugging a flaky test. "
+            "You have been given the GROUND TRUTH answer key (manifest_oracle). "
+            "Score the agent's chain-of-thought on a scale of 0-10: "
+            "10 = perfect causal reasoning that correctly identified the root cause step-by-step; "
+            "0 = no reasoning or completely wrong diagnosis even if the correct action was stumbled upon. "
+            'Reply ONLY with JSON: {"score": <0-10>, "critique": "<one actionable sentence>"}'
+        )
+        try:
+            completion = await client.chat.completions.create(
+                model=judge_model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=300,
+                timeout=judge_timeout,
+            )
+            raw = completion.choices[0].message.content or ""
+            _logging.getLogger(__name__).info("[TEACHER_JUDGE] raw=%s", raw[:200])
+            # Extract JSON
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start != -1 and end > start:
+                parsed = json.loads(raw[start : end + 1])
+                score = float(max(0.0, min(10.0, parsed.get("score", 0))))
+                critique = str(parsed.get("critique", ""))[:400]
+                return score, critique
+        except Exception as exc:
+            _logging.getLogger(__name__).warning("[TEACHER_JUDGE] API error: %s", exc)
+        return 0.0, ""
 
 
 
