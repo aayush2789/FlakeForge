@@ -97,8 +97,11 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
 
         # --- Async judge (60 s hard cap) ---
         try:
-            scores = await asyncio.wait_for(self._run_judge(result.observation), timeout=60.0)
-        except Exception:
+            scores = await asyncio.wait_for(self._run_judge(result.observation), timeout=120.0)
+        except Exception as judge_exc:
+            import traceback
+            print(f"[WARN] Failed to run judge: {judge_exc!r}", flush=True)
+            traceback.print_exc()
             scores = {
                 "judge_hypothesis_score": 0,
                 "judge_patch_score": 0,
@@ -129,10 +132,8 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         hypothesis_prompt = self._build_hypothesis_prompt(observation)
         patch_prompt = self._build_patch_prompt(observation)
 
-        hypothesis_response, patch_response = await asyncio.gather(
-            self._call_nvidia_judge(hypothesis_prompt),
-            self._call_nvidia_judge(patch_prompt),
-        )
+        hypothesis_response = await self._call_nvidia_judge(hypothesis_prompt)
+        patch_response = await self._call_nvidia_judge(patch_prompt)
 
         h_parsed = self._parse_judge_response(hypothesis_response)
         p_parsed = self._parse_judge_response(patch_response)
@@ -187,7 +188,7 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
 
     @staticmethod
     async def _call_nvidia_judge(prompt: str) -> str:
-        api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+        api_key = (os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
         if not api_key:
             return '{"score": 0, "reasoning": "no_api_key", "critique": "", "prediction_error": ""}'
 
@@ -219,7 +220,7 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
                 messages=messages,
                 temperature=0.2,
                 top_p=0.95,
-                max_tokens=300,
+                max_tokens=1200,
                 timeout=judge_timeout,
             )
             return completion.choices[0].message.content or '{"score": 0}'
@@ -229,8 +230,16 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
 
     @staticmethod
     def _parse_judge_response(response: str) -> Dict[str, Any]:
+        print(f"[DEBUG_JUDGE] response={response!r}", flush=True)
         try:
-            parsed = json.loads(response)
+            # Extract JSON block even if prefaced by <think> block
+            json_str = response
+            start_idx = json_str.find("{")
+            end_idx = json_str.rfind("}")
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = json_str[start_idx:end_idx+1]
+                
+            parsed = json.loads(json_str)
             score = max(0, min(5, int(parsed.get("score", 0))))
             return {
                 "score": score,

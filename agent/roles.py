@@ -14,6 +14,11 @@ except ImportError:
     from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
 try:
+    from .observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+except ImportError:
+    from observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+
+try:
     from ..server.tools import get_similar_fixes
 except Exception:  # pragma: no cover
     try:
@@ -46,7 +51,13 @@ class AnalyzerRole:
             "Return ONLY JSON with fields: "
             "root_cause_category, confidence, evidence, reasoning_steps, uncertainty, "
             "next_best_action, predicted_effect. "
-            "Allowed root_cause_category values: timing, race, shared_state, network, order, unknown. "
+            "Allowed root_cause_category values with descriptions: \n"
+            "- timing: Operation takes varying time, missing wait steps.\n"
+            "- race: Two parallel paths depend on order, e.g. async event loop blocking.\n"
+            "- shared_state: Global variables or DB state polluted by other tests.\n"
+            "- network: External API latency or connectivity issues.\n"
+            "- order: Test depends on previous test side-effects.\n"
+            "- unknown: Insufficient evidence.\n"
             "reasoning_steps must include observed pattern, hypothesis, and why alternatives are unlikely."
         )
 
@@ -54,7 +65,7 @@ class AnalyzerRole:
         prompt = "\n".join(
             [
                 "Observation:",
-                json.dumps(_compact_observation_payload(observation, include_sources=True), indent=2),
+                json.dumps(build_compact_observation(observation, include_sources=True), indent=2),
                 "Return JSON only.",
             ]
         )
@@ -99,11 +110,19 @@ class FixerRole:
         self.system_prompt = (
             "You are a debugging engineer choosing one minimal corrective action under uncertainty. "
             "Use analyzer hypothesis and prior outcomes. "
-            "Return ONLY JSON with fields: action_type, parameters, justification, expected_outcome, "
-            "predicted_pass_rate_after, risk_assessment, fallback_plan. "
-            "Allowed action_type values: detect_flakiness, analyze_logs, add_sleep, add_lock, "
-            "mock_dependency, isolate_state, reorder_execution, retry_test. "
-            "Predict outcome before acting and avoid random action selection."
+            "Predicted outcome before acting. Action definitions:\n"
+            "- detect_flakiness (GATHER_EVIDENCE): Run test multiple times to get baseline stats.\n"
+            "- analyze_logs (GATHER_EVIDENCE): Inject print/logging to trace internal state.\n"
+            "- add_sleep (ADD_TIMING_GUARD): Add fixed delay to wait for async operations.\n"
+            "- add_lock (ADD_SYNCHRONIZATION): Use threading/asyncio locks for shared resources.\n"
+            "- mock_dependency (MOCK_DEPENDENCY): Replace external API/DB with stable mock.\n"
+            "- isolate_state (RESET_STATE): Clear DB/cache before/after test.\n"
+            "- reorder_execution: Change sequence of setup steps.\n"
+            "- retry_test (ADD_RETRY): Add flaky-test retry decorator.\n"
+            "- REFACTOR_CONCURRENCY: Swap threading for asyncio or vice versa.\n"
+            "- ISOLATE_BOUNDARY: Add timeouts/circuit-breakers to external calls.\n"
+            "- EXTRACT_ASYNC_SCOPE: Move blocking code out of event loop.\n"
+            "- CHAOS_PROBE: Run under CPU/Network stress to confirm sensitivity."
         )
 
     def produce_action(
@@ -118,7 +137,7 @@ class FixerRole:
 
         prompt_parts = [
             "Observation:",
-            json.dumps(_compact_observation_payload(observation, include_sources=True), indent=2),
+            json.dumps(build_compact_observation(observation, include_sources=True), indent=2),
             "Hypothesis:",
             _hypothesis_json(hypothesis),
         ]
@@ -166,15 +185,24 @@ class FixerRole:
                 fallback_plan=str(parsed.get("fallback_plan", ""))[:240] or None,
             )
         except Exception:
+            # Smart fallback based on category
+            fallback_type = "analyze_logs"
+            if hypothesis.root_cause_category in {"race", "timing"}:
+                fallback_type = "add_sleep"
+            elif hypothesis.root_cause_category == "shared_state":
+                fallback_type = "add_lock"
+            elif hypothesis.root_cause_category == "network":
+                fallback_type = "mock_dependency"
+
             return FlakeForgeAction(
-                action_type="analyze_logs",
-                parameters={"injection_target": "test"},
+                action_type=fallback_type,
+                parameters={},
                 hypothesis=_hypothesis_payload(hypothesis),
-                justification="Need failure signatures before changing code.",
-                expected_outcome="Richer failure evidence",
+                justification=f"JSON parsing failed; falling back to heuristic {fallback_type}",
+                expected_outcome="Fallback recovery",
                 predicted_pass_rate_after=None,
-                risk_assessment="Low risk; no behavioral changes",
-                fallback_plan="Try detect_flakiness next",
+                risk_assessment="Low risk",
+                fallback_plan="Retry with different prompt",
             )
 
 
@@ -216,62 +244,7 @@ def _hypothesis_json(hypothesis: Hypothesis) -> str:
     return TypeAdapter(Hypothesis).dump_json(hypothesis, indent=2).decode("utf-8")
 
 
-def _hypothesis_payload(hypothesis: Hypothesis) -> Dict[str, Any]:
-    return {
-        "root_cause_category": hypothesis.root_cause_category,
-        "confidence": hypothesis.confidence,
-        "evidence": list(hypothesis.evidence),
-        "suggested_action": hypothesis.suggested_action,
-        "reasoning_steps": list(hypothesis.reasoning_steps),
-        "uncertainty": hypothesis.uncertainty,
-        "next_best_action": hypothesis.next_best_action,
-        "predicted_effect": hypothesis.predicted_effect,
-    }
 
-
-def _compact_observation_payload(observation: FlakeForgeObservation, include_sources: bool) -> Dict[str, Any]:
-    run_history = [
-        {
-            "passed": r.passed,
-            "error_type": r.error_type,
-            "duration_ms": r.duration_ms,
-        }
-        for r in observation.run_history[-5:]
-    ]
-    payload: Dict[str, Any] = {
-        "episode_id": observation.episode_id,
-        "test_identifier": observation.test_identifier,
-        "step": observation.step,
-        "steps_remaining": observation.steps_remaining,
-        "current_pass_rate": observation.current_pass_rate,
-        "baseline_pass_rate": observation.baseline_pass_rate,
-        "async_markers": observation.async_markers[:20],
-        "run_history": run_history,
-        "current_hypothesis": _hypothesis_payload(observation.current_hypothesis)
-        if observation.current_hypothesis
-        else None,
-        # Improvement 5: secondary hypothesis gives Fixer a hedging option.
-        "secondary_hypothesis": {
-            "root_cause_category": observation.secondary_hypothesis.root_cause_category,
-            "confidence": observation.secondary_hypothesis.confidence,
-            "suggested_action": observation.secondary_hypothesis.suggested_action,
-        }
-        if observation.secondary_hypothesis
-        else None,
-        "log_snippets": observation.log_snippets[-3:],
-        # Improvement 4: duration fingerprint helps Fixer weight timing-race actions.
-        "duration_fingerprint": observation.duration_fingerprint,
-        "last_actions": list(observation.last_actions[-3:]),
-        "last_outcomes": list(observation.last_outcomes[-3:]),
-        "prediction_error_history": list(observation.prediction_error_history[-5:]),
-        "failure_pattern_summary": observation.failure_pattern_summary,
-        "causal_hints": list(observation.causal_hints[-5:]),
-        "reflection": observation.reflection,
-    }
-    if include_sources:
-        payload["test_function_source"] = _first_lines(observation.test_function_source, 50)
-        payload["source_under_test"] = _first_lines(observation.source_under_test, 50)
-    return payload
 
 
 def _auto_retrieve_examples(observation: FlakeForgeObservation, hypothesis: Hypothesis) -> list[dict[str, str]]:
@@ -297,11 +270,7 @@ def _auto_retrieve_examples(observation: FlakeForgeObservation, hypothesis: Hypo
     ]
 
 
-def _first_lines(text: str, line_count: int) -> str:
-    if not text:
-        return ""
-    lines = text.splitlines()
-    return "\n".join(lines[:line_count])
+
 
 
 def _normalize_root_cause(value: Any) -> str:

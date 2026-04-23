@@ -1,10 +1,10 @@
 {
-  "episode_id": "ac443d7f-1c9b-48ac-97aa-ac9b7036b49d",
+  "episode_id": "2360eb37-1442-4707-8d02-f9d8b8cad877",
   "test_identifier": "tests/test_flaky.py::test_fetch_should_complete",
   "model": "qwen/qwen2.5-coder-32b-instruct",
   "judge_model": "minimaxai/minimax-m2.7",
-  "environment": "http://localhost:8000",
-  "max_steps": 5,
+  "environment": "http://localhost:5000",
+  "max_steps": 14,
   "steps_executed": 0,
   "done": false,
   "baseline_pass_rate": 0.0,
@@ -13,12 +13,12 @@
   "total_reward": 0,
   "avg_judge_hypothesis_score": 0.0,
   "avg_judge_patch_score": 0.0,
-  "elapsed_s": 14.188,
+  "elapsed_s": 63.4,
   "duration_fingerprint": {
-    "mean_ms": 603.6,
-    "std_ms": 93.7,
-    "cv": 0.1552,
-    "flakiness_score": 0.6621
+    "mean_ms": 4899.4,
+    "std_ms": 500.0,
+    "cv": 0.1021,
+    "flakiness_score": 0.6408
   },
   "root_cause_identified": "unknown",
   "fix_summary": "no_action_applied",

@@ -17,8 +17,10 @@ def compute_reward(
     r_stability = (current_pass_rate - baseline_pass_rate) * 10.0
     
     # v2: Add chaos stability reward - compare against chaos_baseline, not clean_baseline
-    chaos_pass_rate = float(step_result.get("chaos_pass_rate", current_pass_rate))
-    chaos_baseline_pass_rate = float(getattr(episode_state, "chaos_baseline_pass_rate", None) or 0.0)
+    v_chaos = step_result.get("chaos_pass_rate")
+    chaos_pass_rate = float(v_chaos if v_chaos is not None else current_pass_rate)
+    v_chaos_bl = getattr(episode_state, "chaos_baseline_pass_rate", None)
+    chaos_baseline_pass_rate = float(v_chaos_bl if v_chaos_bl is not None else 0.0)
     
     # When chaos hasn't been run yet, return 0.0 instead of defaulting to current_pass_rate
     if chaos_baseline_pass_rate == 0.0 and chaos_pass_rate == current_pass_rate:
@@ -43,7 +45,8 @@ def compute_reward(
     # If perf_regression_detected is True, use 10 × log(median_ratio)
     p_perf_regression = 0.0
     if step_result.get("perf_regression_detected", False):
-        median_ratio = float(step_result.get("perf_median_ratio", 1.0))
+        v_ratio = step_result.get("perf_median_ratio")
+        median_ratio = float(v_ratio if v_ratio is not None else 1.0)
         if median_ratio > 1.0:
             p_perf_regression = min(25.0, 10.0 * math.log(median_ratio))
 

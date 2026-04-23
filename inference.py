@@ -55,6 +55,7 @@ TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
 REQUEST_TIMEOUT_S = float(os.getenv("REQUEST_TIMEOUT_S", "45"))
 ENV_MESSAGE_TIMEOUT_S = float(os.getenv("ENV_MESSAGE_TIMEOUT_S", "180"))
+VERBOSE_PROMPTS = os.getenv("VERBOSE_PROMPTS", "0").strip().lower() in {"1", "true", "yes"}
 
 OUTPUT_DIR = Path("outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -86,6 +87,8 @@ class OpenAIModelBackend(ModelBackend):
         ]
         t_start = time.time()
         _log(f"[LLM] Backend request start: adapter={adapter_name}")
+        if VERBOSE_PROMPTS:
+            _log(f"[LLM_PROMPT] adapter={adapter_name}\n{'='*40}\n{prompt}\n{'='*40}")
         try:
             completion = self.client.chat.completions.create(
                 model=self.model,
@@ -95,9 +98,12 @@ class OpenAIModelBackend(ModelBackend):
                 max_tokens=MAX_TOKENS,
                 timeout=REQUEST_TIMEOUT_S,
             )
+            raw_content = completion.choices[0].message.content or "{}"
+            if VERBOSE_PROMPTS:
+                _log(f"[LLM_RAW_RESPONSE] adapter={adapter_name}\n{'-'*40}\n{raw_content}\n{'-'*40}")
             elapsed = time.time() - t_start
             _log(f"[LLM] Backend request success: adapter={adapter_name} elapsed={elapsed:.2f}s")
-            return completion.choices[0].message.content or "{}"
+            return raw_content
         except Exception as exc:
             elapsed = time.time() - t_start
             _log(f"[WARN] model backend failure adapter={adapter_name} elapsed={elapsed:.2f}s: {exc}")
@@ -116,12 +122,16 @@ def _attach_hypothesis_to_action(action: FlakeForgeAction, hypothesis: Hypothesi
         "confidence": float(hypothesis.confidence),
         "evidence": list(hypothesis.evidence),
         "suggested_action": hypothesis.suggested_action,
+        "reasoning_steps": list(hypothesis.reasoning_steps),
+        "uncertainty": hypothesis.uncertainty,
+        "next_best_action": hypothesis.next_best_action,
+        "predicted_effect": hypothesis.predicted_effect,
     }
     return FlakeForgeAction(
         action_type=action.action_type,
         parameters=action.parameters,
         hypothesis=h_payload,
-        predicted_pass_rate_after=action.predicted_pass_rate_after,  # Improvement 1
+        predicted_pass_rate_after=action.predicted_pass_rate_after,
     )
 
 
@@ -134,6 +144,16 @@ async def _build_env() -> FlakeForgeEnv:
         )
     _log(f"[INIT] Using HTTP env: {ENV_BASE_URL}")
     return FlakeForgeEnv(base_url=ENV_BASE_URL, message_timeout_s=ENV_MESSAGE_TIMEOUT_S)
+
+
+def _log_run_history(obs: FlakeForgeObservation) -> None:
+    if not obs.run_history:
+        return
+    history = []
+    for r in obs.run_history:
+        status = "PASS" if r.passed else f"FAIL ({r.error_type})"
+        history.append(f"{status} [{r.duration_ms}ms]")
+    _log(f"[RUN_HISTORY] {', '.join(history)}")
 
 
 async def run_inference() -> Dict[str, Any]:
@@ -202,6 +222,16 @@ async def run_inference() -> Dict[str, Any]:
 
             if critique:
                 _log(f"[JUDGE_CRITIQUE] step={step_idx}: {critique}")
+            if hypothesis.uncertainty:
+                _log(f"[ANALYSIS_UNCERTAINTY] step={step_idx}: {hypothesis.uncertainty}")
+
+            _log(f"[ACTION_JUSTIFICATION] step={step_idx}: {action.justification}")
+            if action.expected_outcome:
+                _log(f"[EXPECTED_OUTCOME] {action.expected_outcome}")
+            if action.risk_assessment:
+                _log(f"[RISK_ASSESSMENT] {action.risk_assessment}")
+
+            _log_run_history(next_obs)
 
             rec = {
                 "step": step_idx,
@@ -210,6 +240,10 @@ async def run_inference() -> Dict[str, Any]:
                     "confidence": float(hypothesis.confidence),
                     "evidence": list(hypothesis.evidence),
                     "suggested_action": hypothesis.suggested_action,
+                    "reasoning_steps": list(hypothesis.reasoning_steps),
+                    "uncertainty": hypothesis.uncertainty,
+                    "next_best_action": hypothesis.next_best_action,
+                    "predicted_effect": hypothesis.predicted_effect,
                 },
                 "secondary_hypothesis": {
                     "root_cause_category": next_obs.secondary_hypothesis.root_cause_category,

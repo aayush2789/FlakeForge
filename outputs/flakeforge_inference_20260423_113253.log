@@ -1,0 +1,12 @@
+[INIT] Using HTTP env: http://localhost:5000
+[START] episode=2360eb37-1442-4707-8d02-f9d8b8cad877 test=tests/test_flaky.py::test_fetch_should_complete max_steps=14
+[BASELINE] pass_rate=0.000
+[FINGERPRINT] mean=4899ms cv=0.102 flakiness=0.641
+[LLM] Backend request start: adapter=analyzer_lora
+[LLM] Backend request success: adapter=analyzer_lora elapsed=12.97s
+[LLM] Backend request start: adapter=fixer_lora
+[LLM] Backend request success: adapter=fixer_lora elapsed=38.95s
+[ERROR] env.step failed at step=1: ConnectionClosedError: no close frame received or sent
+[END] steps=0 baseline=0.000 final=0.000 improvement=+0.000 total_reward=0.000 elapsed=63.40s
+[OUTPUT] summary_file=outputs\flakeforge_summary_20260423_113253.json
+[OUTPUT] log_file=outputs\flakeforge_inference_20260423_113253.log

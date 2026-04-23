@@ -82,40 +82,27 @@ except ImportError:
             resolve_target_from_evidence,
         )
 
+try:
+    from .state import EpisodeState
+    from .hypothesis_engine import compute_duration_fingerprint, infer_hypothesis
+    from .action_executor import (
+        canonical_action,
+        injection_points_from_hypothesis,
+        extract_log_snippets,
+        build_patch_spec,
+    )
+except ImportError:
+    from server.state import EpisodeState
+    from server.hypothesis_engine import compute_duration_fingerprint, infer_hypothesis
+    from server.action_executor import (
+        canonical_action,
+        injection_points_from_hypothesis,
+        extract_log_snippets,
+        build_patch_spec,
+    )
 
-@dataclass
-class EpisodeState:
-    episode_id: str
-    step_count: int = 0
-    max_steps: int = 14
-    done: bool = False
-    test_identifier: str = ""
-    current_pass_rate: float = 0.0
-    baseline_pass_rate: float = 0.0
-    regression_detected: bool = False
-    run_history: List[RunRecord] = field(default_factory=list)
-    patches_applied: List[PatchRecord] = field(default_factory=list)
-    log_snippets: List[str] = field(default_factory=list)
-    current_hypothesis: Optional[Hypothesis] = None
-    judge_scores: List[Dict[str, Any]] = field(default_factory=list)
-    total_diff_lines: int = 0
-    actions_taken: List[str] = field(default_factory=list)
-    hypothesis_confidence_at_each_step: List[float] = field(default_factory=list)
-    hypothesis_history: List[Dict[str, Any]] = field(default_factory=list)
-    # ── V2 fields ─────────────────────────────────────────────────────
-    chaos_pass_rate: Optional[float] = None
-    chaos_baseline_pass_rate: Optional[float] = None
-    perf_regression_detected: bool = False
-    perf_median_ratio: float = 1.0
-    infrastructure_sensitive: bool = False
-    causal_graph_dict: Optional[Dict[str, Any]] = None
-    # ── Improvements 4 & 5 ────────────────────────────────────────────
-    duration_fingerprint: Optional[Dict[str, float]] = None  # computed at reset
-    secondary_hypothesis: Optional[Hypothesis] = None        # runner-up when confidence < 0.5
-    last_outcomes: List[Dict[str, Any]] = field(default_factory=list)
-    prediction_error_history: List[float] = field(default_factory=list)
-    failure_pattern_summary: Optional[Dict[str, Any]] = None
-    reflection: Optional[Dict[str, Any]] = None
+
+
 
 
 class FlakeForgeEnvironment(Environment):
@@ -225,7 +212,7 @@ class FlakeForgeEnvironment(Environment):
         self._episode.baseline_pass_rate = self._pass_rate(baseline_runs)
         self._episode.current_pass_rate = self._episode.baseline_pass_rate
         # Improvement 4: compute duration fingerprint from baseline runs.
-        self._episode.duration_fingerprint = _compute_duration_fingerprint(baseline_runs)
+        self._episode.duration_fingerprint = compute_duration_fingerprint(baseline_runs)
 
         # ── V2 Pillar 2: Chaos baseline ───────────────────────────────────────
         if self.chaos_profile != ChaosProfile.NONE:
@@ -286,9 +273,9 @@ class FlakeForgeEnvironment(Environment):
             return obs
 
         self._update_hypothesis_from_action(action)
-        canonical_action = _canonical_action(action.action_type)
+        canonical_action_var = canonical_action(action.action_type)
 
-        if canonical_action not in {"GATHER_EVIDENCE", "REVERT_LAST_PATCH", "ADD_RETRY"}:
+        if canonical_action_var not in {"GATHER_EVIDENCE", "REVERT_LAST_PATCH", "ADD_RETRY"}:
             if self._episode.current_hypothesis is None:
                 obs = self._build_observation(reward=-1.0, done=False)
                 obs.metadata = {"reason": "action_requires_hypothesis"}
@@ -367,11 +354,11 @@ class FlakeForgeEnvironment(Environment):
         if judge_scores:
             self._episode.judge_scores.append(judge_scores)
         failure_pattern = get_failure_pattern(post_runs)
-        repeat_action_count = _repeat_tail_count([_canonical_action(a) for a in self._episode.actions_taken])
+        repeat_action_count = _repeat_tail_count([canonical_action(a) for a in self._episode.actions_taken])
         step_result = {
             "current_pass_rate": self._episode.current_pass_rate,
             "regression_detected": self._episode.regression_detected,
-            "action_taken": canonical_action,
+            "action_taken": canonical_action_var,
             "done": done,
             "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
             "ast_diff": execution.get("ast_diff", {}),
@@ -399,8 +386,8 @@ class FlakeForgeEnvironment(Environment):
         reflection = {
             "prediction_error": prediction_error,
             "was_hypothesis_correct": was_hypothesis_correct,
-            "what_learned": _learning_summary(canonical_action, prediction_error, was_hypothesis_correct),
-            "updated_strategy": _updated_strategy(canonical_action, prediction_error, was_hypothesis_correct),
+            "what_learned": _learning_summary(canonical_action_var, prediction_error, was_hypothesis_correct),
+            "updated_strategy": _updated_strategy(canonical_action_var, prediction_error, was_hypothesis_correct),
         }
         self._episode.reflection = reflection
 
@@ -653,7 +640,7 @@ class FlakeForgeEnvironment(Environment):
         evidence = self._episode.current_hypothesis.evidence if self._episode.current_hypothesis else []
         resolved_target = resolve_target_from_evidence(target_file, evidence)
 
-        canonical_action = _canonical_action(action.action_type)
+        canonical_action_val = canonical_action(action.action_type)
 
         if action.action_type == "detect_flakiness":
             probe_runs = self._run_test_n_times(n=10)
@@ -697,14 +684,14 @@ class FlakeForgeEnvironment(Environment):
                 "lines_changed": 0,
             }
 
-        if canonical_action == "GATHER_EVIDENCE":
-            injection_points = self._injection_points_from_hypothesis(resolved_target)
+        if canonical_action_val == "GATHER_EVIDENCE":
+            injection_points = injection_points_from_hypothesis(self._episode.current_hypothesis, resolved_target)
             patched_source = inject_logging(target_file, injection_points)
             Path(target_file).write_text(patched_source, encoding="utf-8")
             evidence_runs = self._run_test_n_times(n=5)
-            self._episode.log_snippets.extend(self._extract_log_snippets(evidence_runs))
+            self._episode.log_snippets.extend(extract_log_snippets(evidence_runs))
             self._episode.log_snippets = self._episode.log_snippets[-3:]
-            self._episode.current_hypothesis = self._infer_hypothesis(evidence_runs)
+            self._episode.current_hypothesis = infer_hypothesis(self._episode, evidence_runs, self.test_id)
             subprocess.run(["git", "checkout", "--", test_file], cwd=self.repo_path, check=False, capture_output=True, text=True)
             return {
                 "action": action.action_type,
@@ -712,7 +699,7 @@ class FlakeForgeEnvironment(Environment):
                 "resolved_target": resolved_target,
             }
 
-        if canonical_action == "REVERT_LAST_PATCH":
+        if canonical_action_val == "REVERT_LAST_PATCH":
             if not self._episode.patches_applied:
                 return {"action": action.action_type, "no_op": True, "reason": "no_patches_to_revert"}
 
@@ -737,7 +724,7 @@ class FlakeForgeEnvironment(Environment):
             self._episode.total_diff_lines = max(0, self._episode.total_diff_lines - last_patch.lines_changed)
             return {"action": action.action_type, "reverted": target}
 
-        if canonical_action == "DIAGNOSE_BOUNDARY":
+        if canonical_action_val == "DIAGNOSE_BOUNDARY":
             boundary_node = action.parameters.get("boundary_node", "")
             try:
                 test_file_name = self.test_id.split("::", 1)[0]
@@ -760,7 +747,7 @@ class FlakeForgeEnvironment(Environment):
             except Exception as exc:
                 return {"action": action.action_type, "no_op": True, "reason": str(exc)}
 
-        if canonical_action == "CHAOS_PROBE":
+        if canonical_action_val == "CHAOS_PROBE":
             profile = ChaosProfile(action.parameters["profile"])
             n_runs = action.parameters.get("n_runs", 10)
             chaos_records = self.chaos_runner.run_test_n_times_chaos(
@@ -781,10 +768,10 @@ class FlakeForgeEnvironment(Environment):
                 "no_op": False,
             }
 
-        if canonical_action != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
+        if canonical_action_val != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
             return {"action": action.action_type, "no_op": True, "reason": "unable_to_ground_evidence"}
 
-        patch_spec = self._build_patch_spec(action, resolved_target)
+        patch_spec = build_patch_spec(action, resolved_target)
         result = apply_ast_patch(target_file, patch_spec)
         if not result.get("success"):
             return {"action": action.action_type, "patch_error": result.get("error", "patch_failed")}
@@ -806,138 +793,7 @@ class FlakeForgeEnvironment(Environment):
             "resolved_target": resolved_target,
         }
 
-    def _injection_points_from_hypothesis(self, resolved_target: Dict[str, Any]) -> List[Dict[str, str]]:
-        if resolved_target.get("type") == "function":
-            return [{"function_name": resolved_target.get("identifier", "test_flaky_case"), "position": "entry"}]
-        if not self._episode.current_hypothesis:
-            return [{"function_name": "test_flaky_case", "position": "entry"}]
-        points: List[Dict[str, str]] = []
-        for evidence in self._episode.current_hypothesis.evidence:
-            fn = evidence.split(":", 1)[0].strip() if ":" in evidence else evidence.strip()
-            if fn:
-                points.append({"function_name": fn, "position": "entry"})
-        return points or [{"function_name": "test_flaky_case", "position": "entry"}]
 
-    def _extract_log_snippets(self, runs: List[RunRecord]) -> List[str]:
-        snippets: List[str] = []
-        for run in runs:
-            if run.stderr_excerpt:
-                for line in run.stderr_excerpt.splitlines():
-                    line = line.strip()
-                    if line.startswith("{") and line.endswith("}"):
-                        snippets.append(line)
-            payload = {
-                "passed": run.passed,
-                "duration_ms": run.duration_ms,
-                "error_type": run.error_type,
-                "error_message": run.error_message,
-            }
-            snippets.append(json.dumps(payload))
-        # Keep a short, high-signal window.
-        return snippets[:3]
-
-    def _build_patch_spec(self, action: FlakeForgeAction, resolved_target: Dict[str, Any]) -> Dict[str, Any]:
-        test_node_identifier = "def test_"
-        canonical_action = _canonical_action(action.action_type)
-        if canonical_action == "ADD_TIMING_GUARD":
-            return {
-                "operation": "insert_before",
-                "target": {"type": "call", "identifier": resolved_target.get("identifier", "await")},
-                "code_template": "await asyncio.sleep({delay_ms} / 1000)",
-                "parameters": {"delay_ms": action.parameters["delay_ms"]},
-            }
-        if canonical_action == "ADD_SYNCHRONIZATION":
-            primitive = action.parameters["primitive"]
-            return {
-                "operation": "wrap_with",
-                "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
-                "code_template": "with {lock_var}:\\n    {body}",
-                "parameters": {"lock_var": "_flakeforge_lock", "primitive": primitive},
-            }
-        if canonical_action == "MOCK_DEPENDENCY":
-            return {
-                "operation": "add_decorator",
-                "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
-                "code_template": "@unittest.mock.patch('{target}')",
-                "parameters": {"target": action.parameters["target"]},
-            }
-        if canonical_action == "RESET_STATE":
-            return {
-                "operation": "ensure_reset_fixture",
-                "target": {
-                    "scope": action.parameters["scope"],
-                },
-                "code_template": "",
-                "parameters": {},
-            }
-        if canonical_action == "ADD_RETRY":
-            return {
-                "operation": "ensure_retry_wrapper",
-                "target": {
-                    "function_name": resolved_target.get("identifier", "test"),
-                    "max_attempts": action.parameters["max_attempts"],
-                    "backoff_ms": action.parameters["backoff_ms"],
-                },
-                "code_template": "",
-                "parameters": {},
-            }
-        if canonical_action == "SEED_RANDOMNESS":
-            return {
-                "operation": "ensure_seed_call",
-                "target": {
-                    "function_name": resolved_target.get("identifier", "test"),
-                    "library": action.parameters["library"],
-                },
-                "code_template": "",
-                "parameters": {},
-            }
-        # ── V2 Deep-Action Handlers ────────────────────────────────────────────
-        if canonical_action == "REFACTOR_CONCURRENCY":
-            return {
-                "operation": "refactor_concurrency_primitive",
-                "target": {
-                    "function_name": action.parameters["target_function"],
-                    "from_primitive": action.parameters["from_primitive"],
-                    "to_primitive": action.parameters["to_primitive"],
-                },
-                "code_template": "",
-                "parameters": dict(action.parameters),
-            }
-
-        if canonical_action == "ISOLATE_BOUNDARY":
-            return {
-                "operation": "isolate_boundary_call",
-                "target": {
-                    "boundary_call": action.parameters["boundary_call"],
-                    "pattern": action.parameters["pattern"],
-                },
-                "code_template": "",
-                "parameters": dict(action.parameters),
-            }
-
-        if canonical_action == "EXTRACT_ASYNC_SCOPE":
-            return {
-                "operation": "extract_async_scope",
-                "target": {
-                    "function_name": action.parameters["target_function"],
-                    "direction": action.parameters["direction"],
-                },
-                "code_template": "",
-                "parameters": dict(action.parameters),
-            }
-
-        if canonical_action == "HARDEN_IDEMPOTENCY":
-            return {
-                "operation": "harden_idempotency",
-                "target": {
-                    "state_target": action.parameters["state_target"],
-                    "key_strategy": action.parameters["key_strategy"],
-                },
-                "code_template": "",
-                "parameters": dict(action.parameters),
-            }
-
-        raise ValueError(f"Unsupported action type for patching: {action.action_type}")
 
     def _update_hypothesis_from_action(self, action: FlakeForgeAction) -> None:
         if action.hypothesis is None:
@@ -948,216 +804,7 @@ class FlakeForgeEnvironment(Environment):
             # Ignore malformed hypotheses and keep previous valid hypothesis.
             return
 
-    def _infer_hypothesis(self, runs: List[RunRecord]) -> Hypothesis:
-        """
-        V2 Enhanced: 5-level priority stack for root cause inference.
-        Level 1: Infrastructure sensitivity (chaos profile indicates infrastructure-sensitive)
-        Level 2: Causal graph warnings (async deadlock patterns)
-        Level 3: Boundary nodes (external dependency patterns)
-        Level 4: Error string analysis (timing, connection, assertion, etc.)
-        Level 5: Fallback to NONDETERMINISM
-        """
-        error_types = [r.error_type or "" for r in runs if not r.passed]
-        top_error = error_types[0] if error_types else ""
-        pass_rate = self._pass_rate(runs)
-        confidence = max(0.3, min(0.95, 1.0 - abs(pass_rate - 0.5)))
-        
-        # ── Level 1: Infrastructure Sensitivity ─────────────────────────────────
-        if getattr(self._episode, "infrastructure_sensitive", False):
-            evidence = [
-                "Infrastructure-sensitive flakiness detected via chaos probe",
-                top_error or "intermittent_failure",
-            ]
-            return Hypothesis(
-                root_cause_category="INFRASTRUCTURE_SENSITIVE",
-                confidence=min(0.95, confidence + 0.2),
-                evidence=evidence,
-                suggested_action="ISOLATE_BOUNDARY" if top_error else "GATHER_EVIDENCE",
-            )
-        
-        # ── Level 2: Causal Graph Warnings (ASYNC_DEADLOCK) ───────────────────
-        causal_graph_dict = getattr(self._episode, "causal_graph_dict", None)
-        if causal_graph_dict:
-            boundary_warnings = causal_graph_dict.get("boundary_warnings", [])
-            for warning in boundary_warnings:
-                if "threading.Lock" in warning and "async" in warning.lower():
-                    evidence = [
-                        f"Causal graph detected: {warning}",
-                        top_error or "intermittent_failure",
-                    ]
-                    return Hypothesis(
-                        root_cause_category="ASYNC_DEADLOCK",
-                        confidence=min(0.95, confidence + 0.15),
-                        evidence=evidence,
-                        suggested_action="EXTRACT_ASYNC_SCOPE",
-                    )
-                if "blocking" in warning.lower() and "async" in warning.lower():
-                    evidence = [
-                        f"Causal graph detected: {warning}",
-                        top_error or "intermittent_failure",
-                    ]
-                    return Hypothesis(
-                        root_cause_category="ASYNC_DEADLOCK",
-                        confidence=min(0.95, confidence + 0.15),
-                        evidence=evidence,
-                        suggested_action="EXTRACT_ASYNC_SCOPE",
-                    )
-        
-        # ── Level 3: Boundary Nodes (External Dependencies) ────────────────────
-        if causal_graph_dict:
-            boundary_nodes = causal_graph_dict.get("boundary_nodes", [])
-            nodes_by_type = {}
-            for node_id in boundary_nodes:
-                # Find the node details
-                for node in causal_graph_dict.get("nodes", []):
-                    if node.get("id") == node_id:
-                        boundary_type = node.get("boundary")
-                        if boundary_type:
-                            nodes_by_type.setdefault(boundary_type, []).append(node_id)
-                        break
-            
-            if "db" in nodes_by_type or "queue" in nodes_by_type:
-                evidence = [
-                    f"Boundary nodes detected: {list(nodes_by_type.keys())}",
-                    top_error or "intermittent_failure",
-                ]
-                return Hypothesis(
-                    root_cause_category="EXTERNAL_DEPENDENCY",
-                    confidence=min(0.95, confidence + 0.1),
-                    evidence=evidence,
-                    suggested_action="MOCK_DEPENDENCY",
-                )
-            if "http" in nodes_by_type or "grpc" in nodes_by_type:
-                evidence = [
-                    f"HTTP/gRPC boundary detected: {list(nodes_by_type.keys())}",
-                    top_error or "intermittent_failure",
-                ]
-                return Hypothesis(
-                    root_cause_category="EXTERNAL_DEPENDENCY",
-                    confidence=min(0.95, confidence + 0.1),
-                    evidence=evidence,
-                    suggested_action="ISOLATE_BOUNDARY",
-                )
-        
-        # ── Level 4: Error String Analysis (V1 pattern matching) ───────────────
-        category = "NONDETERMINISM"
-        suggested_action = "GATHER_EVIDENCE" if confidence < 0.5 else "ADD_TIMING_GUARD"
 
-        if "Timeout" in top_error or "TimeoutError" in top_error:
-            category = "TIMING_RACE"
-            suggested_action = "ADD_TIMING_GUARD"
-        elif "Connection" in top_error or "connection" in top_error.lower():
-            category = "EXTERNAL_DEPENDENCY"
-            suggested_action = "MOCK_DEPENDENCY"
-        elif "Assertion" in top_error:
-            category = "ORDER_DEPENDENCY"
-            suggested_action = "ADD_SYNCHRONIZATION"
-        elif "state" in top_error.lower() or "shared" in top_error.lower():
-            category = "SHARED_STATE"
-            suggested_action = "RESET_STATE"
-        elif "resource" in top_error.lower() or "leak" in top_error.lower():
-            category = "RESOURCE_LEAK"
-            suggested_action = "RESET_STATE"
-
-        # ── Improvement 4: Duration fingerprint confidence boosting ────────────
-        # A high coefficient of variation (cv > 0.3) is near-definitive evidence
-        # of timing nondeterminism. Boost confidence and skip GATHER_EVIDENCE.
-        fp = self._episode.duration_fingerprint
-        if fp and fp.get("cv", 0) > 0.3:
-            timing_boost = min(0.2, fp["cv"] * 0.5)
-            confidence = min(0.95, confidence + timing_boost)
-            if category == "NONDETERMINISM":
-                category = "TIMING_RACE"
-                suggested_action = "ADD_TIMING_GUARD"
-
-        evidence = [
-            self.test_id.split("::")[-1],
-            top_error or "intermittent_failure",
-        ]
-
-        primary = Hypothesis(
-            root_cause_category=category,
-            confidence=confidence,
-            evidence=evidence,
-            suggested_action=suggested_action,
-        )
-
-        # ── Improvement 5: Top-2 hypothesis tracking ───────────────────────────
-        # Generate a runner-up only when the primary is uncertain.
-        if confidence <= 0.5:
-            self._episode.secondary_hypothesis = _make_secondary_hypothesis(
-                primary_category=category,
-                top_error=top_error,
-                pass_rate=pass_rate,
-            )
-        else:
-            self._episode.secondary_hypothesis = None
-
-        return primary
-
-
-def _compute_duration_fingerprint(runs: List[Any]) -> Dict[str, float]:
-    """Compute timing statistics that drive Improvement 4 confidence boosting."""
-    import statistics as _stats
-    durations = [r.duration_ms for r in runs if r.duration_ms is not None]
-    if not durations:
-        return {"mean_ms": 0.0, "std_ms": 0.0, "cv": 0.0, "flakiness_score": 0.0}
-    mean_ms = _stats.mean(durations)
-    std_ms = _stats.stdev(durations) if len(durations) > 1 else 0.0
-    cv = std_ms / mean_ms if mean_ms > 0 else 0.0
-    pass_rate = sum(1 for r in runs if r.passed) / len(runs)
-    flakiness_score = round((1.0 - pass_rate) * 0.6 + min(cv, 1.0) * 0.4, 4)
-    return {
-        "mean_ms": round(mean_ms, 1),
-        "std_ms": round(std_ms, 1),
-        "cv": round(cv, 4),
-        "flakiness_score": flakiness_score,
-    }
-
-
-def _make_secondary_hypothesis(
-    primary_category: str,
-    top_error: str,
-    pass_rate: float,
-) -> Optional[Hypothesis]:
-    """Generate a runner-up hypothesis when primary confidence is low (Improvement 5)."""
-    FALLBACKS: Dict[str, tuple] = {
-        "NONDETERMINISM":           ("SHARED_STATE",        "RESET_STATE"),
-        "SHARED_STATE":             ("TIMING_RACE",         "ADD_TIMING_GUARD"),
-        "TIMING_RACE":              ("ASYNC_DEADLOCK",      "EXTRACT_ASYNC_SCOPE"),
-        "ASYNC_DEADLOCK":           ("TIMING_RACE",         "ADD_TIMING_GUARD"),
-        "ORDER_DEPENDENCY":         ("SHARED_STATE",        "RESET_STATE"),
-        "EXTERNAL_DEPENDENCY":      ("TIMING_RACE",         "ADD_TIMING_GUARD"),
-        "RESOURCE_LEAK":            ("SHARED_STATE",        "RESET_STATE"),
-        "INFRASTRUCTURE_SENSITIVE": ("EXTERNAL_DEPENDENCY", "ISOLATE_BOUNDARY"),
-    }
-    fallback = FALLBACKS.get(primary_category)
-    if not fallback:
-        return None
-    secondary_category, secondary_action = fallback
-    secondary_confidence = max(0.1, min(0.4, (1.0 - pass_rate) * 0.4))
-    try:
-        return Hypothesis(
-            root_cause_category=secondary_category,
-            confidence=secondary_confidence,
-            evidence=[top_error or "intermittent_failure"],
-            suggested_action=secondary_action,
-        )
-    except Exception:
-        return None
-
-
-def _canonical_action(action_type: str) -> str:
-    return {
-        "detect_flakiness": "GATHER_EVIDENCE",
-        "analyze_logs": "GATHER_EVIDENCE",
-        "add_sleep": "ADD_TIMING_GUARD",
-        "add_lock": "ADD_SYNCHRONIZATION",
-        "mock_dependency": "MOCK_DEPENDENCY",
-        "isolate_state": "RESET_STATE",
-        "reorder_execution": "RESET_STATE",
-        "retry_test": "ADD_RETRY",
-    }.get(action_type, action_type)
 
 
 def _repeat_tail_count(actions: List[str]) -> int:
