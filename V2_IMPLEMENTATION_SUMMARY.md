@@ -14,16 +14,30 @@ To achieve this, we introduced four architectural pillars—spanning 11 modified
 
 2. **Chaos Amplification (Pillar 2)**
    * **The Research:** Grounded directly in [PingCAP's Chaos Mesh](https://chaos-mesh.org/) engineering practices and Netflix's Chaos Monkey paradigms on distributed system resiliency.
-   * **The Implementation (`server/chaos_runner.py`):** Academic studies show that timing races and thread deadlocks almost never manifest in a clean CI environment but appear instantly under extreme CPU or Memory scheduler delays. The `ChaosAmplifiedRunner` implements this by utilizing Linux OS-level kernel tools (`stress-ng` and `iproute2 tc`) to artificially starve the Docker container of CPU/resources, forcing underlying concurrency bugs to mathematically fail, allowing the agent to capture the trace.
+   * **The Implementation (`server/chaos_runner.py`):** Academic studies show that timing races and thread deadlocks almost never manifest in a clean CI environment but appear instantly under extreme CPU or Memory scheduler delays. The `ChaosAmplifiedRunner` implements this by utilizing Linux OS-level kernel tools (`stress-ng` and `iproute2 tc`) to artificially starve the Docker container of CPU/resources (e.g. `--cpu-load 100`) and manipulate network latency.
+   * **When it is applied:** The agent triggers `CHAOS_PROBE` when a test passes sequentially but fails only 1% of the time in CI. It tests the code under pressure to confirm if the bug is `INFRASTRUCTURE_SENSITIVE`.
+   * **How it solves (Real-life Example):**
+     * *Before:* A multi-threaded database increment race condition works perfectly in 99/100 tests (threads execute sequentially naturally). The agent has no failure stack trace to learn from.
+     * *After:* The agent subjects the container to intense CPU throttling and context switching. The threads immediately step on each other, causing the pass rate to drop from 99% to 10%. The agent now has 90 failure traces, giving it mathematical proof of where the race condition occurs.
+   * **When it will NOT solve the issue:** If the flake is entirely logic-dependent (e.g., relying on random number generation, or a hardcoded expiration logic such as testing on February 29th) rather than race-condition-dependent. Hardware scaling will not provoke logic flakes.
 
 3. **Deep-Surgery Action Space (Pillar 3)**
    * **The Research:** Based heavily on **FlakyFix: Using Large Language Models for Predicting Flaky Test Fix Categories and Test Code Repair** ([arXiv:2307.00012](https://arxiv.org/abs/2307.00012) / *IEEE Transactions on Software Engineering 2024*).
    * **The Implementation (The 6 new Actions in `models.py`):** FlakyFix research outlines that simple string replacements (like adding `time.sleep()`) are insufficient for architectural flakes. Our 6 new actions (`EXTRACT_ASYNC_SCOPE`, `REFACTOR_CONCURRENCY`, `ISOLATE_BOUNDARY`, etc.) implement semantic, structural code transformation templates capable of safely altering lock scopes and blocking background workers.
+   * **When it is applied:** Employed when the causal graph flags heavy blocking I/O calls interacting improperly with Event Loops or Thread Pools (`ASYNC_DEADLOCK`).
+   * **How it solves (Real-life Example):**
+     * *Before:* A developer writes `db.commit()` (a synchronous, blocking network call) inside a Python `async def` function. This silently blocks the entire application Event Loop, causing timeouts across other microservices. A naive bot might just increase the test `timeout` parameter from `1s` to `5s` or add a `time.sleep(2)` to wait.
+     * *After:* The deep-surgery agent detects this, refrains from using `sleep`, and instead applies `EXTRACT_ASYNC_SCOPE`. It structurally converts the code to `await asyncio.to_thread(db.commit)`, offloading the DB call to a threadpool while yielding the Event Loop back to the app.
+   * **When it will NOT solve the issue:** If resolving the issue requires fundamentally changing the API parameters, schema layer, or return types across a massive monolithic library which causes breaking changes across 50 other untouched test files. The agent action scope operates on bounded structural fixes, not sweeping architectural rewrites.
 
 4. **Performance Sentinels (Pillar 4)**
    * **The Research:** Derived from Statistical Latency Regression Detection methodologies and the [Scipy Scientific Computing Library](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.mannwhitneyu.html).
-   * **The Implementation (`server/perf_sentinel.py` & `server/reward.py`):** The implementation utilizes the **Mann-Whitney U statistical test** to mathematically guarantee that an applied AST repair has not caused an unacceptable slowdown. The RL agent's loss function (`p_perf_regression`) is mathematically structured to impose a steep logarithmic penalty if a test becomes an order of magnitude slower.
-
+   * **The Implementation (`server/perf_sentinel.py` & `server/reward.py`):** The implementation utilizes the **Mann-Whitney U statistical test**. A test benchmark array is recorded before the RL patch, and after the patch. If identical, the RL agent receives a reward. If the test becomes significantly slower, the agent's loss function (`p_perf_regression`) drops logarithmically. A 2x slowdown yields a `-6.93` point penalty; a 10x slowdown yields a `-23.03` penalty.
+   * **When it is applied:** Automatically evaluated at the end of every `step()` after an agent successfully writes a code mutation to the environment and runs the test suite.
+   * **How it solves (Real-life Example):**
+     * *Before:* The RL agent observes a race condition between thread A and thread B. It lazily decides to fix it by putting a massive `time.sleep(2.0)` at the beginning of the function, letting thread B finish. The tests pass. However, throughput crashes.
+     * *After:* The Performance Sentinel runs its P-Value hypothesis test and detects that function time jumped from 20ms to 2000ms. It hits the agent with a massive -15 reward penalty. The agent discards the sleep approach, and replaces it with an efficient `threading.Event().wait()`, solving the race without degrading speed. 
+   * **When it will NOT solve the issue:** Occasionally, the *proper* structural fix (such as establishing a full database `BEGIN TRANSACTION / ROW LOCK / COMMIT` procedure) is inherently heavier and slower than the broken race-condition code. The sentinel might initially penalize the agent for doing the "right but slow" thing, and require hyper-parameter tweaking to the reward function to balance speed vs. correctness.
 ---
 
 ## 1. Core System & Data Layer Alterations

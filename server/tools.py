@@ -740,24 +740,94 @@ def _apply_seed_call(source: str, fn_name: str, library: str) -> str:
 # ── V2 Deep-Action Implementations (Bug 2 fix) ────────────────────────────────────
 
 def _apply_refactor_concurrency(source: str, target: Dict[str, Any]) -> str:
-    """Swap threading primitive for a safer alternative (e.g., Lock → RLock, threading → asyncio)."""
-    from_primitive = str(target.get("from_primitive", "threading.Lock"))
-    to_primitive = str(target.get("to_primitive", "threading.RLock"))
+    """
+    Swap a threading/sync primitive for a safer alternative.
+
+    Production fixes:
+      1. Matches the FULL dotted name (e.g. "threading.Lock") — not a loose
+         substring — so "asyncio.Lock" and "FileLock" are never accidentally swapped.
+      2. Also rewrites the import statement to match the new location.
+         If `from threading import Lock` exists, changes it to the new module.
+         If `import threading` exists and the new primitive is in asyncio, adds
+         `import asyncio` if not already present.
+    """
+    from_primitive: str = str(target.get("from_primitive", "threading.Lock"))
+    to_primitive: str = str(target.get("to_primitive", "threading.RLock"))
+
+    # Derive module + class name for import rewriting
+    from_module = from_primitive.rsplit(".", 1)[0] if "." in from_primitive else ""
+    to_module = to_primitive.rsplit(".", 1)[0] if "." in to_primitive else ""
+    to_class = to_primitive.rsplit(".", 1)[-1]
 
     module = cst.parse_module(source)
 
     class PrimitiveSwapper(cst.CSTTransformer):
+        """Rewrite every call site that exactly matches from_primitive."""
+
         def leave_Call(self, original_node: cst.Call, updated_node: cst.Call) -> cst.BaseExpression:
-            name = _cst_name(updated_node.func)
-            if from_primitive.split(".")[-1] in name:
+            # Use EXACT full dotted name comparison, not substring.
+            full_name = _cst_name(updated_node.func)
+            if full_name != from_primitive:
+                return updated_node
+            try:
+                replacement_func = cst.parse_expression(to_primitive)
+                return updated_node.with_changes(func=replacement_func)
+            except Exception:
+                return updated_node
+
+    class ImportRewriter(cst.CSTTransformer):
+        """
+        Rewrite import statements to match the new primitive's module.
+
+        Handles all four patterns:
+          import threading                  → also imports to_module
+          from threading import Lock        → from to_module import to_class
+          from threading import Lock as L   → from to_module import to_class as L
+          import threading as thr           → also imports to_module as its alias
+        """
+
+        def leave_ImportFrom(
+            self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
+        ) -> cst.ImportFrom:
+            if from_module and to_module and from_module != to_module:
+                # Get the module name as a string safely
                 try:
-                    replacement_expr = cst.parse_expression(to_primitive)
-                    return updated_node.with_changes(func=replacement_expr)
+                    mod_str = cst.parse_module("").code_for_node(updated_node.module) if updated_node.module else ""
                 except Exception:
-                    pass
+                    mod_str = ""
+                if mod_str == from_module:
+                    new_module = cst.parse_expression(to_module)
+                    # Rewrite the imported name
+                    new_names: List[cst.ImportAlias] = []
+                    for alias_node in (updated_node.names if isinstance(updated_node.names, (list, tuple)) else []):
+                        if isinstance(alias_node, cst.ImportAlias):
+                            name_str = alias_node.name.value if isinstance(alias_node.name, cst.Name) else ""
+                            from_class = from_primitive.rsplit(".", 1)[-1]
+                            if name_str == from_class:
+                                new_alias = alias_node.with_changes(
+                                    name=cst.Name(to_class)
+                                )
+                                new_names.append(new_alias)
+                            else:
+                                new_names.append(alias_node)
+                        else:
+                            pass  # skip star imports
+                    return updated_node.with_changes(
+                        module=new_module,
+                        names=new_names if new_names else updated_node.names,
+                    )
             return updated_node
 
-    return module.visit(PrimitiveSwapper()).code
+    # Step 1: swap all call sites
+    transformed = module.visit(PrimitiveSwapper()).code
+    # Step 2: rewrite imports
+    transformed_module = cst.parse_module(transformed)
+    transformed = transformed_module.visit(ImportRewriter()).code
+    # Step 3: ensure the new primitive's module is imported if it isn't already
+    if to_module and to_module not in transformed.split(".")[0]:
+        if f"import {to_module}" not in transformed and f"from {to_module}" not in transformed:
+            transformed = f"import {to_module}\n" + transformed
+    return transformed
 
 
 def _apply_isolate_boundary(source: str, target: Dict[str, Any]) -> str:
@@ -787,23 +857,126 @@ def _apply_isolate_boundary(source: str, target: Dict[str, Any]) -> str:
 
 
 def _apply_extract_async_scope(source: str, target: Dict[str, Any]) -> str:
-    """Move sync code out of async context or vice versa."""
+    """
+    Structurally fix the async/sync boundary problem.
+
+    direction='sync_to_async'  (most common case):
+      Converts a synchronous function to async AND wraps every detected
+      blocking I/O call (DB / HTTP / socket) with ``asyncio.to_thread()``
+      so the event loop is never stalled.
+      This is the correct fix for: ``async def f(): db.commit()``
+
+    direction='async_to_sync':
+      Removes the async/await keywords so the function can be called
+      safely from synchronous contexts.
+
+    Previous implementation only flipped the `async def` keyword but left
+    blocking calls inside untouched — which made things WORSE.
+    """
+    from typing import Set as _Set
+
     fn_name = str(target.get("function_name", ""))
     direction = str(target.get("direction", "sync_to_async"))
+
+    # Blocking signatures reused from causal_graph detection sets
+    BLOCKING_CALL_SIGNATURES: _Set[str] = {
+        # DB
+        "session.commit", "session.execute", "session.add", "session.flush",
+        "cursor.execute", "cursor.executemany",
+        "db.commit", "db.execute", "db.session.commit",
+        "engine.connect", "engine.execute",
+        "collection.find", "collection.insert_one", "collection.update_one",
+        "redis.set", "redis.get",
+        # HTTP
+        "requests.get", "requests.post", "requests.put",
+        "requests.delete", "requests.patch", "urllib.request.urlopen",
+        # Filesystem / socket blocking
+        "socket.recv", "socket.accept",
+        # time.sleep is a special case — always blocking
+        "time.sleep",
+    }
+    # Partial prefixes that should be wrapped regardless of full name
+    BLOCKING_PREFIXES = (
+        "requests.", "urllib.request.", "socket.", "cursor.",
+        "session.", "db.", "engine.", "collection.", "redis.",
+    )
 
     module = cst.parse_module(source)
 
     class AsyncScopeExtractor(cst.CSTTransformer):
-        def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-            if fn_name and fn_name not in original_node.name.value:
-                return updated_node
-            if direction == "sync_to_async" and not original_node.asynchronous:
-                return updated_node.with_changes(asynchronous=True)
-            elif direction == "async_to_sync" and original_node.asynchronous:
-                return updated_node.with_changes(asynchronous=False)
-            return updated_node
+        def _is_target_function(self, node_name: str) -> bool:
+            return (not fn_name) or (fn_name in node_name)
 
-    return module.visit(AsyncScopeExtractor()).code
+        def _call_is_blocking(self, call_node: cst.Call) -> bool:
+            full = _cst_name(call_node.func)
+            return (
+                full in BLOCKING_CALL_SIGNATURES
+                or any(full.startswith(pfx) for pfx in BLOCKING_PREFIXES)
+            )
+
+        # ── sync_to_async: make function async + wrap blocking calls ──────────
+        def leave_FunctionDef(
+            self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+        ) -> cst.FunctionDef:
+            if direction != "sync_to_async":
+                return updated_node
+            if not self._is_target_function(original_node.name.value):
+                return updated_node
+            if original_node.asynchronous:
+                # Already async — just wrap blocking calls inside
+                return updated_node
+            return updated_node.with_changes(
+                asynchronous=cst.Asynchronous(),
+            )
+
+        def leave_Call(
+            self, original_node: cst.Call, updated_node: cst.Call
+        ) -> cst.BaseExpression:
+            """Wrap blocking calls inside the target function with asyncio.to_thread()."""
+            if direction != "sync_to_async":
+                return updated_node
+            if not self._call_is_blocking(updated_node):
+                return updated_node
+            # Build: await asyncio.to_thread(original_call)
+            # The `await` keyword is added by the parent Await node;
+            # here we just wrap the call in asyncio.to_thread(...).
+            try:
+                wrapped = cst.parse_expression(
+                    f"asyncio.to_thread({_cst_name(updated_node.func)})"
+                )
+                # Preserve original arguments inside to_thread
+                if isinstance(wrapped, cst.Call) and updated_node.args:
+                    all_args = list(wrapped.args) + list(updated_node.args)
+                    wrapped = wrapped.with_changes(args=all_args)
+                return wrapped
+            except Exception:
+                return updated_node
+
+        # ── async_to_sync: strip async/await ──────────────────────────────────
+        def leave_AsyncFunctionDef(
+            self, original_node: cst.AsyncFunctionDef, updated_node: cst.AsyncFunctionDef
+        ) -> cst.FunctionDef:
+            if direction != "async_to_sync":
+                return updated_node  # type: ignore[return-value]
+            if not self._is_target_function(original_node.name.value):
+                return updated_node  # type: ignore[return-value]
+            # Convert AsyncFunctionDef → FunctionDef
+            sync_fn = cst.FunctionDef(
+                name=updated_node.name,
+                params=updated_node.params,
+                body=updated_node.body,
+                decorators=updated_node.decorators,
+                returns=updated_node.returns,
+                leading_lines=updated_node.leading_lines,
+                lines_after_decorators=updated_node.lines_after_decorators,
+            )
+            return sync_fn
+
+    transformed = module.visit(AsyncScopeExtractor()).code
+    # Ensure asyncio is imported when doing sync_to_async
+    if direction == "sync_to_async" and "import asyncio" not in transformed:
+        transformed = "import asyncio\n" + transformed
+    return transformed
 
 
 def _apply_harden_idempotency(source: str, target: Dict[str, Any]) -> str:

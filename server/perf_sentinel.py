@@ -132,11 +132,13 @@ class PerformanceSentinel:
         self,
         slowdown_threshold: float = 1.5,
         p_value_cutoff: float = 0.05,
-        n_benchmark_runs: int = 10,
+        n_benchmark_runs: int = 20,     # raised from 10 — Mann-Whitney U needs ≥20 per group
+        max_adaptive_samples: int = 50, # hard cap when re-sampling in inconclusive p-value zone
     ) -> None:
         self.slowdown_threshold = slowdown_threshold
         self.p_value_cutoff = p_value_cutoff
         self.n_benchmark_runs = n_benchmark_runs
+        self.max_adaptive_samples = max_adaptive_samples
         self._baseline: Optional[PerformanceBaseline] = None
 
     @property
@@ -222,6 +224,37 @@ class PerformanceSentinel:
                     alternative="less",   # H1: baseline < post (i.e. post is slower)
                 )
                 stat_significant = p_value < self.p_value_cutoff
+
+                # ── Adaptive re-sampling ─────────────────────────────────────────
+                # If p-value is in the inconclusive zone (0.05 – 0.15), gather up
+                # to max_adaptive_samples total observations and re-test.
+                # This prevents false-negatives on subtle 1.5x regressions.
+                _INCONCLUSIVE_UPPER = 0.15
+                adaptive_timings = list(post_timings)
+                while (
+                    self.p_value_cutoff <= p_value <= _INCONCLUSIVE_UPPER
+                    and len(adaptive_timings) < self.max_adaptive_samples
+                ):
+                    extra_needed = min(
+                        10,
+                        self.max_adaptive_samples - len(adaptive_timings),
+                    )
+                    try:
+                        extra_records = runner.run_test_n_times(test_id, n=extra_needed)
+                        adaptive_timings.extend([float(r.duration_ms) for r in extra_records])
+                        _, p_value = _scipy_stats.mannwhitneyu(
+                            self._baseline.timing_distribution_ms,
+                            adaptive_timings,
+                            alternative="less",
+                        )
+                        stat_significant = p_value < self.p_value_cutoff
+                        post_p50 = sorted(adaptive_timings)[len(adaptive_timings) // 2]
+                        median_ratio = (post_p50 / baseline_p50) if baseline_p50 > 0 else 1.0
+                    except Exception as _exc:
+                        logger.debug("perf_sentinel: adaptive sampling error: %s", _exc)
+                        break
+                # ────────────────────────────────────────────────────────────────
+
             except Exception as exc:
                 logger.debug("perf_sentinel: scipy test error: %s", exc)
 

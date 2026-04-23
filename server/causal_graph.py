@@ -76,6 +76,7 @@ class CausalGraph:
     boundary_warnings: List[str]
     entry_node_id: str
     max_depth_reached: int
+    unresolved_imports: List[str] = field(default_factory=list)  # chains the tracer couldn't follow
 
     def to_observation_dict(self) -> Dict[str, Any]:
         """Render a compact, token-efficient summary for the LLM."""
@@ -105,6 +106,8 @@ class CausalGraph:
             ],
             "boundary_warnings": self.boundary_warnings,
             "boundary_nodes": [n.node_id for n in self.nodes if n.is_external_boundary],
+            # Tells the agent which import chains were cut off (can't be traced on disk)
+            "unresolved_imports": self.unresolved_imports,
         }
 
 
@@ -156,6 +159,10 @@ class CrossRepoGraphBuilder:
     ``max_depth`` hops.
     """
 
+    # Common alternative source layout roots to search when resolving imports.
+    # Covers: flat layout, src-layout, app-layout (FastAPI/Django conventions).
+    _LAYOUT_ROOTS = [".", "src", "app", "lib"]
+
     def __init__(self, repo_root: str, max_depth: int = 3) -> None:
         self.repo_root = Path(repo_root)
         self.max_depth = max_depth
@@ -163,6 +170,7 @@ class CrossRepoGraphBuilder:
         self._nodes: List[CausalNode] = []
         self._edges: List[CausalEdge] = []
         self._boundary_warnings: List[str] = []
+        self._unresolved_imports: Set[str] = set()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -190,6 +198,7 @@ class CrossRepoGraphBuilder:
             boundary_warnings=self._boundary_warnings,
             entry_node_id=entry_id,
             max_depth_reached=max((n.depth for n in self._nodes), default=0),
+            unresolved_imports=list(self._unresolved_imports),
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────────
@@ -252,6 +261,23 @@ class CrossRepoGraphBuilder:
         if depth < self.max_depth:
             self._follow_calls(func_node, file_path, node_id, depth, tree)
 
+    @staticmethod
+    def _build_parent_map(
+        func_node: "ast.FunctionDef | ast.AsyncFunctionDef",
+    ) -> Dict[int, ast.AST]:
+        """
+        Build a {id(child): parent} mapping for every node inside func_node.
+
+        ast.walk() is a flat BFS iterator with no parent information.
+        The only reliable way to know a node's parent is a dedicated pre-pass.
+        This is the standard pattern used by astroid, pyflakes, and mypy.
+        """
+        parent_map: Dict[int, ast.AST] = {}
+        for parent in ast.walk(func_node):
+            for child in ast.iter_child_nodes(parent):
+                parent_map[id(child)] = parent
+        return parent_map
+
     def _follow_calls(
         self,
         func_node: "ast.FunctionDef | ast.AsyncFunctionDef",
@@ -263,6 +289,10 @@ class CrossRepoGraphBuilder:
         """Walk the body of a function to find outgoing calls and follow them."""
         import_map = self._build_import_map(tree, current_file)
 
+        # Pre-pass: build parent map so we can correctly classify each call's context.
+        # Without this, ast.walk() gives no parent info and call_type is always 'direct'.
+        parent_map = self._build_parent_map(func_node)
+
         for node in ast.walk(func_node):
             if not isinstance(node, ast.Call):
                 continue
@@ -271,17 +301,20 @@ class CrossRepoGraphBuilder:
             if not call_name:
                 continue
 
-            # Determine call type (async_await / thread / direct)
+            # Correctly determine call type using the parent map.
             call_type = "direct"
-            for parent in ast.walk(func_node):
-                if isinstance(parent, ast.Await) and parent.value is node:
-                    call_type = "async_await"
-                    break
-                if isinstance(parent, ast.Call):
-                    pname = self._call_name(parent)
-                    if pname in {"threading.Thread", "concurrent.futures.ThreadPoolExecutor"}:
-                        call_type = "thread"
-                        break
+            parent = parent_map.get(id(node))
+            if isinstance(parent, ast.Await):
+                call_type = "async_await"
+            elif isinstance(parent, ast.Call):
+                parent_name = self._call_name(parent) or ""
+                if parent_name in {
+                    "threading.Thread",
+                    "concurrent.futures.ThreadPoolExecutor",
+                    "asyncio.to_thread",
+                    "loop.run_in_executor",
+                }:
+                    call_type = "thread"
 
             # Resolve the file from import map
             target_file = import_map.get(call_name.split(".")[0])
@@ -302,32 +335,117 @@ class CrossRepoGraphBuilder:
                 call_type=call_type,
             )
 
+    def _resolve_module_path(self, module_dotted: str) -> Optional[Path]:
+        """
+        Resolve a dotted module name to a physical file path.
+
+        Searches multiple layout roots so we handle:
+          - Flat layout:   repo_root/billing.py
+          - src-layout:    repo_root/src/mypackage/billing.py
+          - app-layout:    repo_root/app/billing.py
+          - Namespace pkg: repo_root/billing/ (no __init__.py, Python 3.3+)
+
+        If a module resolves to an __init__.py, we also scan its body for
+        re-exported names (``from .billing import charge``) so the tracer
+        can follow through package facades.
+        """
+        module_rel = Path(module_dotted.replace(".", "/"))
+        for layout_root in self._LAYOUT_ROOTS:
+            base = self.repo_root / layout_root
+            candidates = [
+                base / f"{module_rel}.py",
+                base / module_rel / "__init__.py",
+                # Namespace packages — directory with no __init__.py
+                base / module_rel,
+            ]
+            for candidate in candidates:
+                if candidate.is_file():
+                    return candidate
+                if candidate.is_dir():
+                    # Treat directory as namespace package — return None
+                    # (caller will handle individual name resolution)
+                    return None
+        return None
+
+    def _resolve_reexported_name(
+        self, init_path: Path, name: str
+    ) -> Optional[Path]:
+        """
+        If `init_path` is an __init__.py that re-exports `name` via
+        ``from .submodule import name``, resolve to the submodule's file.
+        """
+        try:
+            source = init_path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(source)
+        except Exception:
+            return None
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.level == 0:  # absolute import — not a re-export
+                continue
+            for alias in (node.names or []):
+                exported_name = alias.asname or alias.name
+                if exported_name == name and node.module:
+                    # Resolve the relative sub-module
+                    sub_rel = node.module.replace(".", "/")
+                    sub_candidate = init_path.parent / f"{sub_rel}.py"
+                    if sub_candidate.exists():
+                        return sub_candidate
+        return None
+
     def _build_import_map(self, tree: ast.Module, current_file: str) -> Dict[str, str]:
-        """Maps imported names to their resolved file paths within the repo."""
+        """
+        Maps every imported name to its resolved file path within the repo.
+
+        Handles:
+          * ``from package import name`` (including re-exports via __init__.py)
+          * ``import module`` / ``import module as alias``
+          * src-layout, app-layout, flat layout
+          * Namespace packages
+
+        Names that cannot be resolved are logged to ``_unresolved_imports``
+        so the observation dict tells the agent where the trace was cut off.
+        """
         mapping: Dict[str, str] = {}
+
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
-                module_rel = node.module.replace(".", "/")
-                candidates = [
-                    self.repo_root / f"{module_rel}.py",
-                    self.repo_root / module_rel / "__init__.py",
-                ]
-                for candidate in candidates:
-                    if candidate.exists():
-                        for alias in (node.names or []):
-                            mapping[alias.asname or alias.name] = str(candidate)
-                        break
+                resolved = self._resolve_module_path(node.module)
+                for alias in (node.names or []):
+                    exported = alias.asname or alias.name
+                    if resolved is not None and resolved.suffix == ".py":
+                        # Direct module file resolved
+                        mapping[exported] = str(resolved)
+                    elif resolved is not None and resolved.name == "__init__.py":
+                        # Package __init__.py — check for re-exports
+                        reexported = self._resolve_reexported_name(resolved, alias.name)
+                        mapping[exported] = str(reexported if reexported else resolved)
+                    else:
+                        # Could not resolve — record for the agent's observation
+                        self._unresolved_imports.add(f"{node.module}.{alias.name}")
+                        logger.debug(
+                            "causal_graph: unresolved import '%s.%s' — "
+                            "chain truncated here.",
+                            node.module,
+                            alias.name,
+                        )
+
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    module_rel = alias.name.replace(".", "/")
-                    candidates = [
-                        self.repo_root / f"{module_rel}.py",
-                        self.repo_root / module_rel / "__init__.py",
-                    ]
-                    for candidate in candidates:
-                        if candidate.exists():
-                            mapping[alias.asname or alias.name] = str(candidate)
-                            break
+                    resolved = self._resolve_module_path(alias.name)
+                    imported_as = alias.asname or alias.name.split(".")[0]
+                    if resolved is not None:
+                        mapping[imported_as] = str(resolved)
+                    else:
+                        self._unresolved_imports.add(alias.name)
+                        logger.debug(
+                            "causal_graph: unresolved import '%s' — "
+                            "chain truncated here.",
+                            alias.name,
+                        )
+
         return mapping
 
     @staticmethod
