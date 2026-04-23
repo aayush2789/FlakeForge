@@ -1,0 +1,5 @@
+[INIT] Using HTTP env: http://localhost:8000
+[START] episode=f7ca775e-d820-4da0-a296-c79937bd74dc test=tests/test_flaky.py::test_fetch_should_complete max_steps=5
+[BASELINE] pass_rate=0.400
+[FINGERPRINT] mean=681ms cv=0.124 flakiness=0.410
+[LLM] Backend request start: adapter=analyzer_lora
