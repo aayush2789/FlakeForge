@@ -1,14 +1,14 @@
 from typing import Any, Dict
 
 try:
-    from ..models import FlakeForgeObservation, Hypothesis
-except ImportError:
     from models import FlakeForgeObservation, Hypothesis
+except ImportError:
+    from ..models import FlakeForgeObservation, Hypothesis
 
 try:
-    from ..server.hypothesis_engine import compute_duration_fingerprint
-except ImportError:
     from server.hypothesis_engine import compute_duration_fingerprint
+except ImportError:
+    from ..server.hypothesis_engine import compute_duration_fingerprint
 
 def _hypothesis_payload(hypothesis: Hypothesis) -> Dict[str, Any]:
     return {

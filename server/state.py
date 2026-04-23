@@ -29,6 +29,7 @@ class EpisodeState:
     perf_median_ratio: float = 1.0
     total_diff_lines: int = 0
 
+    reward_history: List[float] = field(default_factory=list)
     last_actions: List[str] = field(default_factory=list)
     actions_taken: List[str] = field(default_factory=list)
     hypothesis_confidence_at_each_step: List[float] = field(default_factory=list)

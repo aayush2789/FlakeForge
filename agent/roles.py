@@ -9,20 +9,27 @@ from typing import Any, Dict, Optional, Protocol
 from pydantic import TypeAdapter
 
 try:
-    from ..models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
-except ImportError:
     from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
-
-try:
-    from .observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
 except ImportError:
-    from observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+    from ..models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
 try:
-    from ..server.tools import get_similar_fixes
+    from utils.logger import get_logger
+except ImportError:
+    from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+try:
+    from agent.observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+except ImportError:
+    from .observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+
+try:
+    from server.tools import get_similar_fixes
 except Exception:  # pragma: no cover
     try:
-        from server.tools import get_similar_fixes
+        from .server.tools import get_similar_fixes
     except Exception:
         get_similar_fixes = None  # type: ignore[assignment]
 
@@ -47,19 +54,66 @@ class AnalyzerRole:
         self.backend = backend
         self.adapter = adapter
         self.system_prompt = (
-            "You are a debugging engineer diagnosing flaky CI behavior under uncertainty. "
-            "Return ONLY JSON with fields: "
-            "root_cause_category, confidence, evidence, reasoning_steps, uncertainty, "
-            "next_best_action, predicted_effect. "
-            "Allowed root_cause_category values with descriptions: \n"
-            "- timing: Operation takes varying time, missing wait steps.\n"
-            "- race: Two parallel paths depend on order, e.g. async event loop blocking.\n"
-            "- shared_state: Global variables or DB state polluted by other tests.\n"
-            "- network: External API latency or connectivity issues.\n"
-            "- order: Test depends on previous test side-effects.\n"
-            "- unknown: Insufficient evidence.\n"
-            "reasoning_steps must include observed pattern, hypothesis, and why alternatives are unlikely."
-        )
+        "You are a senior debugging engineer analyzing flaky CI failures under uncertainty. Your task is not just to classify the issue, but to reason causally and propose the most informative next action. "
+
+        "Return ONLY valid JSON with the following fields: "
+        "root_cause_category, confidence, evidence, reasoning_steps, uncertainty, next_best_action, action_rationale, predicted_effect, counterfactual. "
+
+        "--- "
+
+        "Allowed root_cause_category values: "
+        "timing: Operations complete with variable delay; missing waits or timeouts. "
+        "race: Parallel execution order affects outcome; async or concurrency issue. "
+        "shared_state: Global or persistent state leaks across tests. "
+        "network: External dependency variability (latency, failures). "
+        "order: Test outcome depends on execution order. "
+        "unknown: insufficient or conflicting evidence. "
+
+        "--- "
+
+        "reasoning_steps MUST follow this exact structure: "
+        "1. observed_pattern: Describe failure behavior across runs (e.g., intermittent, timing variance, order sensitivity). "
+        "2. key_signals: Extract concrete signals (logs, durations, failure modes). "
+        "3. hypothesis: State a single dominant causal mechanism (not just label). "
+        "4. mechanism_explanation: Explain HOW this cause leads to the observed failure. "
+        "5. alternatives_considered: List at least 2 alternative causes and why they are less likely. "
+        "6. confidence_justification: Why confidence is high/low given evidence quality. "
+
+        "--- "
+
+        "Action selection rules: "
+        "Choose the action that maximally REDUCES uncertainty, not just fixes the issue. "
+        "Prefer diagnostic actions over blind fixes when confidence < 0.8. "
+        "If multiple causes are plausible, choose action that differentiates them. "
+
+        "--- "
+
+        "Allowed next_best_action values: "
+        "GATHER_EVIDENCE, ADD_TIMING_GUARD, ADD_SYNCHRONIZATION, MOCK_DEPENDENCY, RESET_STATE, ADD_RETRY, REVERT_LAST_PATCH. "
+
+        "--- "
+
+        "Action guidelines: "
+        "If timing suspected → ADD_TIMING_GUARD. "
+        "If race suspected → ADD_SYNCHRONIZATION. "
+        "If shared_state suspected → RESET_STATE. "
+        "If network suspected → MOCK_DEPENDENCY. "
+        "If low confidence → GATHER_EVIDENCE. "
+        "If failure is non-deterministic with no signal → ADD_RETRY (last resort). "
+
+        "--- "
+
+        "predicted_effect: Describe expected measurable change (e.g., pass rate increases, variance reduces). "
+        "counterfactual: Describe what result would falsify your hypothesis. "
+
+        "--- "
+
+        "STRICT RULES: "
+        "Do NOT guess without evidence. "
+        "Do NOT output multiple hypotheses. "
+        "Do NOT suggest action without causal justification. "
+        "Prefer being uncertain over being wrong."
+    )
 
     def produce_hypothesis(self, observation: FlakeForgeObservation) -> Hypothesis:
         prompt = "\n".join(
@@ -78,12 +132,17 @@ class AnalyzerRole:
         parsed = _parse_json(raw)
         try:
             category = _normalize_root_cause(parsed.get("root_cause_category", "unknown"))
+            # Support both old and new field names
+            reasoning = parsed.get("reasoning_steps", [])
+            if not reasoning and "action_rationale" in parsed:
+                reasoning = [str(parsed["action_rationale"])]
+            
             return Hypothesis(
                 root_cause_category=category,
                 confidence=float(parsed.get("confidence", 0.1)),
                 evidence=list(parsed.get("evidence", []))[:5],
-                suggested_action=parsed.get("suggested_action"),
-                reasoning_steps=[str(s) for s in parsed.get("reasoning_steps", [])][:3],
+                suggested_action=parsed.get("next_best_action") or parsed.get("suggested_action"),
+                reasoning_steps=list([str(s) for s in reasoning])[:3],
                 uncertainty=str(parsed.get("uncertainty", ""))[:240] or None,
                 next_best_action=str(parsed.get("next_best_action", ""))[:120] or None,
                 predicted_effect=str(parsed.get("predicted_effect", ""))[:240] or None,
@@ -108,22 +167,66 @@ class FixerRole:
         self.backend = backend
         self.adapter = adapter
         self.system_prompt = (
-            "You are a debugging engineer choosing one minimal corrective action under uncertainty. "
-            "Use analyzer hypothesis and prior outcomes. "
-            "Predicted outcome before acting. Action definitions:\n"
-            "- detect_flakiness (GATHER_EVIDENCE): Run test multiple times to get baseline stats.\n"
-            "- analyze_logs (GATHER_EVIDENCE): Inject print/logging to trace internal state.\n"
-            "- add_sleep (ADD_TIMING_GUARD): Add fixed delay to wait for async operations.\n"
-            "- add_lock (ADD_SYNCHRONIZATION): Use threading/asyncio locks for shared resources.\n"
-            "- mock_dependency (MOCK_DEPENDENCY): Replace external API/DB with stable mock.\n"
-            "- isolate_state (RESET_STATE): Clear DB/cache before/after test.\n"
-            "- reorder_execution: Change sequence of setup steps.\n"
-            "- retry_test (ADD_RETRY): Add flaky-test retry decorator.\n"
-            "- REFACTOR_CONCURRENCY: Swap threading for asyncio or vice versa.\n"
-            "- ISOLATE_BOUNDARY: Add timeouts/circuit-breakers to external calls.\n"
-            "- EXTRACT_ASYNC_SCOPE: Move blocking code out of event loop.\n"
-            "- CHAOS_PROBE: Run under CPU/Network stress to confirm sensitivity."
-        )
+        "You are a senior debugging engineer responsible for selecting ONE minimal, high-impact corrective action for a flaky CI failure. "
+        "Use the analyzer hypothesis, prior run outcomes, failure patterns, and system signals. "
+        "Think like a scientist, but keep the response compact. "
+
+        "Return ONLY valid JSON with these fields: chosen_action, confidence (0 to 1), justification, parameters, predicted_pass_rate_after. "
+        "Optional fields: expected_outcome, risk_assessment, fallback_strategy. Keep every string short, preferably one sentence. "
+
+        "--- "
+
+        "Core Principles: "
+        "1. Prefer minimal, reversible changes. "
+        "2. Prefer actions that TEST the hypothesis over blindly fixing. "
+        "3. If confidence < 0.8, prioritize diagnostic actions. "
+        "4. Avoid masking the issue (e.g., retries) unless no signal exists. "
+        "5. Do NOT apply multiple fixes at once. "
+        "6. Every action must have a clear causal justification. "
+
+        "--- "
+
+        "Available Actions and Definitions: "
+
+        "GATHER_EVIDENCE actions: "
+        "- detect_flakiness: Run test multiple times to establish baseline pass rate and variance. "
+        "- analyze_logs: Inject logging/print statements to observe internal state transitions. "
+
+        "FIX / INTERVENTION actions: "
+        "- add_sleep (ADD_TIMING_GUARD): Add fixed delay to wait for async operations. "
+        "- add_lock (ADD_SYNCHRONIZATION): Use locks to enforce execution order on shared resources. "
+        "- mock_dependency (MOCK_DEPENDENCY): Replace external API/DB with deterministic mock. "
+        "- isolate_state (RESET_STATE): Clear/reset DB, cache, or global state before/after test. "
+        "- reorder_execution: Change order of setup or dependent steps. "
+        "- retry_test (ADD_RETRY): Add retry decorator to mitigate intermittent failures. "
+
+        "ADVANCED actions (use ONLY with strong justification): "
+        "- REFACTOR_CONCURRENCY: Change concurrency model (threading ↔ asyncio). "
+        "- ISOLATE_BOUNDARY: Add timeouts, circuit breakers, or guards to external calls. "
+        "- EXTRACT_ASYNC_SCOPE: Move blocking operations outside event loop. "
+        "- CHAOS_PROBE: Introduce CPU/network stress to test sensitivity to timing or load. "
+
+        "--- "
+
+        "Action Selection Strategy: "
+        "- If hypothesis is uncertain → choose GATHER_EVIDENCE action. "
+        "- If hypothesis strongly indicates timing → add_sleep. "
+        "- If hypothesis strongly indicates race → add_lock. "
+        "- If hypothesis strongly indicates shared state → isolate_state. "
+        "- If hypothesis strongly indicates external instability → mock_dependency. "
+        "- If failure depends on order → reorder_execution. "
+        "- If no clear signal and highly flaky → retry_test (last resort). "
+
+        "--- "
+
+        "STRICT RULES: "
+        "- Output EXACTLY one chosen_action. "
+        "- Do NOT combine multiple actions. "
+        "- Do NOT apply heavy refactors unless strongly justified. "
+        "- Do NOT default to retry unless no other signal exists. "
+        "- Do NOT act without linking action to hypothesis. "
+        "- Prefer diagnostic clarity over quick fixes."
+    )
 
     def produce_action(
         self,
@@ -156,7 +259,7 @@ class FixerRole:
 
         prompt_parts.append(
             "Return JSON only: "
-            "{action_type, parameters, justification, expected_outcome, predicted_pass_rate_after, risk_assessment, fallback_plan}"
+            "{action_type, parameters, justification, predicted_pass_rate_after, expected_outcome, risk_assessment, fallback_plan}"
         )
         prompt = "\n".join(prompt_parts)
 
@@ -168,21 +271,27 @@ class FixerRole:
 
         parsed = _parse_json(raw)
         try:
-            action_type = str(parsed.get("action_type", "analyze_logs"))
+            # Match the new "chosen_action" field from the senior engineer prompt
+            action_type = str(parsed.get("chosen_action") or parsed.get("action_type", "analyze_logs"))
+            justification_text = str(parsed.get("reasoning") or parsed.get("justification", ""))[:500] or None
+            
+            logger.info(f"[TOOL_USAGE] [FIXER] Using chosen tool/action <{action_type}> based on root cause hypothesis.")
+            if justification_text:
+                logger.info(f"[TOOL_USAGE] [FIXER] Reasoning/Purpose for using tool: {justification_text}")
+            
             return FlakeForgeAction(
                 action_type=action_type,
                 parameters=dict(parsed.get("parameters", {})),
                 hypothesis=_hypothesis_payload(hypothesis),
-                # Improvement 1: capture model's predicted outcome.
                 predicted_pass_rate_after=(
                     float(parsed["predicted_pass_rate_after"])
                     if "predicted_pass_rate_after" in parsed
-                    else None
+                    else (0.5 if "expected_outcome" in parsed else None)
                 ),
-                justification=str(parsed.get("justification", ""))[:500] or None,
+                justification=justification_text,
                 expected_outcome=str(parsed.get("expected_outcome", ""))[:240] or None,
                 risk_assessment=str(parsed.get("risk_assessment", ""))[:240] or None,
-                fallback_plan=str(parsed.get("fallback_plan", ""))[:240] or None,
+                fallback_plan=str(parsed.get("fallback_strategy") or parsed.get("fallback_plan", ""))[:240] or None,
             )
         except Exception:
             # Smart fallback based on category

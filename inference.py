@@ -28,13 +28,14 @@ except Exception:  # pragma: no cover
     load_dotenv = None  # type: ignore[assignment]
 
 try:
-    from .agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
-    from .client import FlakeForgeEnv
-    from .models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
-except ImportError:
     from agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
     from client import FlakeForgeEnv
     from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+except ImportError:
+    # This might happen if running from within a subfolder
+    from .agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
+    from .client import FlakeForgeEnv
+    from .models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
 
 
 if load_dotenv:
@@ -64,10 +65,23 @@ LOG_FILE = OUTPUT_DIR / f"flakeforge_inference_{RUN_TS}.log"
 SUMMARY_FILE = OUTPUT_DIR / f"flakeforge_summary_{RUN_TS}.json"
 
 
+import sys
+sys.path.append(str(Path(__file__).resolve().parent))
+try:
+    from utils.logger import get_logger
+except ImportError:
+    # fallback if module not found for some reason
+    logging = __import__('logging')
+    get_logger = lambda n, log_file=None: logging.getLogger(n)
+
+logger = get_logger(__name__, log_file=LOG_FILE)
+
+
 def _log(message: str) -> None:
-    print(message, flush=True)
-    with LOG_FILE.open("a", encoding="utf-8") as f:
-        f.write(message + "\n")
+    if "[WARN]" in message or "[ERROR]" in message:
+        logger.error(message)
+    else:
+        logger.info(message)
 
 
 class OpenAIModelBackend(ModelBackend):
@@ -196,6 +210,9 @@ async def run_inference() -> Dict[str, Any]:
         for step_idx in range(1, MAX_STEPS + 1):
             step_t0 = time.time()
 
+            # Phase 0: Sync with previous step's background assessment to get critique/feedback.
+            await env.wait_for_previous_judge()
+
             # Phase 1: Analysis (Analyzer role).
             hypothesis = analyzer.produce_hypothesis(obs)
 
@@ -280,6 +297,9 @@ async def run_inference() -> Dict[str, Any]:
             obs = next_obs
             if bool(next_obs.done):
                 break
+
+        # Phase 3: Final sync to ensure all judge evaluations are in before summary.
+        await env.wait_for_previous_judge()
 
         elapsed_s = round(time.time() - started_at, 3)
         total_reward = round(sum(float(s["reward"]) for s in steps), 4)

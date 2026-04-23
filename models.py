@@ -101,7 +101,7 @@ class FlakeForgeAction(Action):
         }
         canonical_action_type = alias_action_map.get(self.action_type, self.action_type)
 
-        params = self.parameters or {}
+        params = dict(self.parameters or {})
 
         if canonical_action_type == "GATHER_EVIDENCE":
             allowed = {"injection_target"}
@@ -224,6 +224,7 @@ class FlakeForgeAction(Action):
             if not isinstance(n_runs, int) or not (1 <= n_runs <= 20):
                 raise ValueError("CHAOS_PROBE.n_runs must be an integer between 1 and 20")
 
+        object.__setattr__(self, "parameters", params)
         return self
 
     @staticmethod

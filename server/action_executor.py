@@ -56,26 +56,26 @@ def build_patch_spec(action: FlakeForgeAction, resolved_target: Dict[str, Any]) 
             "operation": "insert_before",
             "target": {"type": "call", "identifier": resolved_target.get("identifier", "await")},
             "code_template": "await asyncio.sleep({delay_ms} / 1000)",
-            "parameters": {"delay_ms": action.parameters["delay_ms"]},
+            "parameters": {"delay_ms": action.parameters.get("delay_ms", 100)},
         }
     if c_action == "ADD_SYNCHRONIZATION":
         return {
             "operation": "wrap_with",
             "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
             "code_template": "with {lock_var}:\\n    {body}",
-            "parameters": {"lock_var": "_flakeforge_lock", "primitive": action.parameters["primitive"]},
+            "parameters": {"lock_var": "_flakeforge_lock", "primitive": action.parameters.get("primitive", "threading.Lock")},
         }
     if c_action == "MOCK_DEPENDENCY":
         return {
             "operation": "add_decorator",
             "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
             "code_template": "@unittest.mock.patch('{target}')",
-            "parameters": {"target": action.parameters["target"]},
+            "parameters": {"target": action.parameters.get("target", "builtins.open")},
         }
     if c_action == "RESET_STATE":
         return {
             "operation": "ensure_reset_fixture",
-            "target": {"scope": action.parameters["scope"]},
+            "target": {"scope": action.parameters.get("scope", "function")},
             "code_template": "",
             "parameters": {},
         }
@@ -84,8 +84,8 @@ def build_patch_spec(action: FlakeForgeAction, resolved_target: Dict[str, Any]) 
             "operation": "ensure_retry_wrapper",
             "target": {
                 "function_name": resolved_target.get("identifier", "test"),
-                "max_attempts": action.parameters["max_attempts"],
-                "backoff_ms": action.parameters["backoff_ms"],
+                "max_attempts": action.parameters.get("max_attempts", 3),
+                "backoff_ms": action.parameters.get("backoff_ms", 0),
             },
             "code_template": "",
             "parameters": {},
@@ -95,7 +95,7 @@ def build_patch_spec(action: FlakeForgeAction, resolved_target: Dict[str, Any]) 
             "operation": "ensure_seed_call",
             "target": {
                 "function_name": resolved_target.get("identifier", "test"),
-                "library": action.parameters["library"],
+                "library": action.parameters.get("library", "random"),
             },
             "code_template": "",
             "parameters": {},

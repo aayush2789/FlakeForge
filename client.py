@@ -47,6 +47,8 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         self._pending_judge_feedback: Optional[Dict[str, Any]] = None
         # Reflexion: store the last critique to inject into the next observation.
         self._pending_critique: str = ""
+        # Speed Optimization: store background judge task
+        self._latest_judge_task: Optional[asyncio.Task] = None
 
     def _step_payload(self, action: FlakeForgeAction) -> Dict[str, Any]:
         return action.model_dump()
@@ -67,6 +69,7 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         self._judge_scores = []
         self._pending_judge_feedback = None
         self._pending_critique = ""
+        self._latest_judge_task = None
         return await super().reset(**kwargs)
 
     async def step(self, action: FlakeForgeAction, **kwargs: Any) -> StepResult[FlakeForgeObservation]:
@@ -95,9 +98,14 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
                 [critique_snippet] + list(result.observation.log_snippets)
             )[-5:]  # keep window tight
 
-        # --- Async judge (60 s hard cap) ---
+        # --- Async judge (detached background task) ---
+        self._latest_judge_task = asyncio.create_task(self._run_judge_safely(result.observation))
+        
+        return result
+
+    async def _run_judge_safely(self, observation: FlakeForgeObservation) -> None:
         try:
-            scores = await asyncio.wait_for(self._run_judge(result.observation), timeout=120.0)
+            scores = await asyncio.wait_for(self._run_judge(observation), timeout=60.0)
         except Exception as judge_exc:
             import traceback
             print(f"[WARN] Failed to run judge: {judge_exc!r}", flush=True)
@@ -116,9 +124,12 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
             "critique": scores.get("critique", ""),
             "prediction_error": scores.get("prediction_error", ""),
         }
-        # Store critique for next step's Reflexion injection.
         self._pending_critique = scores.get("critique", "")
-        return result
+
+    async def wait_for_previous_judge(self) -> None:
+        """Awaits the previously dispatched judge task so the critique is ready for the current step."""
+        if self._latest_judge_task and not self._latest_judge_task.done():
+            await self._latest_judge_task
 
     def get_judge_scores(self) -> List[Dict[str, Any]]:
         return list(self._judge_scores)
@@ -128,25 +139,23 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
         return await super().from_docker_image(image_name, **kwargs)
 
     async def _run_judge(self, observation: FlakeForgeObservation) -> Dict[str, Any]:
-        """Run both judge prompts concurrently; returns scores + critique."""
-        hypothesis_prompt = self._build_hypothesis_prompt(observation)
-        patch_prompt = self._build_patch_prompt(observation)
+        """Run one judge prompt that scores both hypothesis and patch together."""
+        judge_prompt = json.dumps(
+            {
+                "task": "score_both",
+                "hypothesis": json.loads(self._build_hypothesis_prompt(observation)),
+                "patch": json.loads(self._build_patch_prompt(observation)),
+            }
+        )
 
-        hypothesis_response = await self._call_nvidia_judge(hypothesis_prompt)
-        patch_response = await self._call_nvidia_judge(patch_prompt)
-
-        h_parsed = self._parse_judge_response(hypothesis_response)
-        p_parsed = self._parse_judge_response(patch_response)
-
-        # Aggregate critiques: prefer patch critique (more action-specific).
-        critique = p_parsed.get("critique") or h_parsed.get("critique") or ""
-        prediction_error = p_parsed.get("prediction_error") or h_parsed.get("prediction_error") or ""
+        response = await self._call_nvidia_judge(judge_prompt)
+        parsed = self._parse_judge_response(response)
 
         return {
-            "judge_hypothesis_score": h_parsed["score"],
-            "judge_patch_score": p_parsed["score"],
-            "critique": critique,
-            "prediction_error": prediction_error,
+            "judge_hypothesis_score": parsed["judge_hypothesis_score"],
+            "judge_patch_score": parsed["judge_patch_score"],
+            "critique": parsed["critique"],
+            "prediction_error": parsed["prediction_error"],
         }
 
     @staticmethod
@@ -190,7 +199,7 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
     async def _call_nvidia_judge(prompt: str) -> str:
         api_key = (os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
         if not api_key:
-            return '{"score": 0, "reasoning": "no_api_key", "critique": "", "prediction_error": ""}'
+            return '{"judge_hypothesis_score": 0, "judge_patch_score": 0, "critique": "", "prediction_error": ""}'
 
         judge_model = os.environ.get("JUDGE_MODEL", "minimaxai/minimax-m2.7").strip()
         judge_timeout = float(os.environ.get("REQUEST_TIMEOUT_S", "45"))
@@ -205,8 +214,8 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
             {
                 "role": "system",
                 "content": (
-                    "You are a senior code reviewer grading a patch/hypothesis. "
-                    'Reply ONLY with JSON: {"score": <0-5>, "reasoning": "<40 words>", '
+                    "You are a senior code reviewer grading a hypothesis and a patch. "
+                    'Reply ONLY with JSON: {"judge_hypothesis_score": <0-5>, "judge_patch_score": <0-5>, '
                     '"critique": "<one actionable sentence for the Fixer>", '
                     '"prediction_error": "<what clue or prediction was wrong>"}'
                 ),
@@ -220,13 +229,13 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
                 messages=messages,
                 temperature=0.2,
                 top_p=0.95,
-                max_tokens=1200,
+                max_tokens=400,
                 timeout=judge_timeout,
             )
-            return completion.choices[0].message.content or '{"score": 0}'
+            return completion.choices[0].message.content or '{"judge_hypothesis_score": 0, "judge_patch_score": 0, "critique": "", "prediction_error": ""}'
         except Exception as e:
             print(f"[WARN] Client judge API err: {e}")
-            return '{"score": 0, "reasoning": "api_error", "critique": "", "prediction_error": ""}'
+            return '{"judge_hypothesis_score": 0, "judge_patch_score": 0, "critique": "", "prediction_error": ""}'
 
     @staticmethod
     def _parse_judge_response(response: str) -> Dict[str, Any]:
@@ -240,18 +249,17 @@ class FlakeForgeEnv(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForg
                 json_str = json_str[start_idx:end_idx+1]
                 
             parsed = json.loads(json_str)
-            score = max(0, min(5, int(parsed.get("score", 0))))
             return {
-                "score": score,
-                "reasoning": str(parsed.get("reasoning", ""))[:200],
+                "judge_hypothesis_score": max(0, min(5, int(parsed.get("judge_hypothesis_score", parsed.get("score", 0))))),
+                "judge_patch_score": max(0, min(5, int(parsed.get("judge_patch_score", parsed.get("score", 0))))),
                 "critique": str(parsed.get("critique", ""))[:300],
                 "prediction_error": str(parsed.get("prediction_error", ""))[:200],
             }
         except Exception:
             match = re.search(r"\b([0-5])\b", response)
             return {
-                "score": int(match.group(1)) if match else 0,
-                "reasoning": "fallback_parse",
+                "judge_hypothesis_score": int(match.group(1)) if match else 0,
+                "judge_patch_score": int(match.group(1)) if match else 0,
                 "critique": "",
                 "prediction_error": "",
             }
