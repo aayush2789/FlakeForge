@@ -111,7 +111,7 @@ class FlakeForgeEnvironment(Environment):
     def __init__(
         self,
         repo_path: str = "/app/seed_repos/timing_race",
-        test_id: str = "tests/test_flaky.py::test_flaky_case",
+        test_id: str = "tests/test_flaky.py::test_fetch_should_complete",
         max_steps: int = 14,
         benchmark_test_id: Optional[str] = None,
         chaos_profile: str = "none",
@@ -360,11 +360,16 @@ class FlakeForgeEnvironment(Environment):
         )
         final_validation_runs = 0
         if done and not self._episode.regression_detected:
-            terminal_runs = self._run_test_n_times(n=50)
-            final_validation_runs = len(terminal_runs)
-            self._episode.current_pass_rate = self._pass_rate(terminal_runs)
-            self._episode.run_history.extend(terminal_runs)
-            self._episode.run_history = self._episode.run_history[-10:]
+            # Skip expensive final validation when the test was already
+            # passing at baseline — there is nothing meaningful to gain and
+            # the extra 50 runs (≈40 s) will time out the HTTP connection,
+            # silently killing the Teacher Judge response too.
+            if self._episode.baseline_pass_rate < 1.0:
+                terminal_runs = self._run_test_n_times(n=10)
+                final_validation_runs = len(terminal_runs)
+                self._episode.current_pass_rate = self._pass_rate(terminal_runs)
+                self._episode.run_history.extend(terminal_runs)
+                self._episode.run_history = self._episode.run_history[-10:]
         self._episode.done = done
 
         # ── RLVR Hybrid: judge_feedback on action is accepted but intentionally
@@ -880,6 +885,9 @@ class FlakeForgeEnvironment(Environment):
 
         teacher_context = self._manifest_oracle.get("teacher_judge_context", {})
         # Build the prompt payload (no LLM if API key absent)
+        import logging as _logging
+        _tj_log = _logging.getLogger(__name__)
+
         api_key = (
             _os.environ.get("NVIDIA_API_KEY")
             or _os.environ.get("OPENAI_API_KEY")
@@ -889,7 +897,14 @@ class FlakeForgeEnvironment(Environment):
         score: float = 0.0
         critique: str = ""
 
-        if api_key:
+        if not api_key:
+            _tj_log.warning("[TEACHER_JUDGE] Skipped: no API key found (NVIDIA_API_KEY / OPENAI_API_KEY not set)")
+        else:
+            _tj_log.info(
+                "[TEACHER_JUDGE] Starting — steps=%d manifest=%s",
+                len(self._episode.cot_trajectory),
+                bool(self._manifest_oracle),
+            )
             prompt_payload = json.dumps(
                 {
                     "task": "grade_reasoning_trajectory",
@@ -913,17 +928,15 @@ class FlakeForgeEnvironment(Environment):
                 ensure_ascii=False,
             )
             try:
-                # Run async call in a sync context.
-                # Use get_running_loop() (Python 3.10+) which raises RuntimeError
-                # when no loop is running — more reliable than get_event_loop().
+                # Detect whether we're already inside a running event loop (FastAPI/uvicorn).
+                # get_running_loop() raises RuntimeError when no loop is running.
                 try:
                     running_loop = _asyncio.get_running_loop()
                 except RuntimeError:
                     running_loop = None
 
                 if running_loop is not None and running_loop.is_running():
-                    # We're inside an event loop (e.g. FastAPI/uvicorn); spawn a new
-                    # thread that can safely call asyncio.run() without conflict.
+                    _tj_log.info("[TEACHER_JUDGE] Running via ThreadPoolExecutor (inside FastAPI loop)")
                     import concurrent.futures as _cf
                     with _cf.ThreadPoolExecutor(max_workers=1) as pool:
                         future = pool.submit(
@@ -931,14 +944,13 @@ class FlakeForgeEnvironment(Environment):
                         )
                         score, critique = future.result(timeout=90)
                 else:
+                    _tj_log.info("[TEACHER_JUDGE] Running via asyncio.run() (no running loop)")
                     score, critique = _asyncio.run(
                         self._call_teacher_judge(prompt_payload, api_key)
                     )
+                _tj_log.info("[TEACHER_JUDGE] Complete — score=%.1f critique_len=%d", score, len(critique))
             except Exception as exc:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "[TEACHER_JUDGE] Failed: %s", exc
-                )
+                _tj_log.warning("[TEACHER_JUDGE] Failed: %s", exc, exc_info=True)
 
         self._episode.teacher_judge_score = score
         self._episode.teacher_judge_critique = critique
