@@ -21,17 +21,25 @@ except ImportError:
 logger = get_logger(__name__)
 
 try:
-    from agent.observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+    from agent.observation_utils import build_compact_observation, _first_lines, _hypothesis_payload, _extract_judge_feedback
 except ImportError:
-    from .observation_utils import build_compact_observation, _first_lines, _hypothesis_payload
+    from .observation_utils import build_compact_observation, _first_lines, _hypothesis_payload, _extract_judge_feedback
 
 try:
     from server.tools import get_similar_fixes
 except Exception:  # pragma: no cover
+    get_similar_fixes = None  # type: ignore[assignment]
+
+try:
+    from server.hypothesis_engine import infer_hypothesis
+    from server.state import EpisodeState
+except Exception:  # pragma: no cover
     try:
-        from .server.tools import get_similar_fixes
+        from .server.hypothesis_engine import infer_hypothesis  # type: ignore[assignment]
+        from .server.state import EpisodeState  # type: ignore[assignment]
     except Exception:
-        get_similar_fixes = None  # type: ignore[assignment]
+        infer_hypothesis = None  # type: ignore[assignment]
+        EpisodeState = None  # type: ignore[assignment]
 
 
 class ModelBackend(Protocol):
@@ -136,6 +144,47 @@ class AnalyzerRole:
             reasoning = parsed.get("reasoning_steps", [])
             if not reasoning and "action_rationale" in parsed:
                 reasoning = [str(parsed["action_rationale"])]
+
+            if (
+                category == "unknown"
+                and infer_hypothesis is not None
+                and EpisodeState is not None
+            ):
+                episode_state = EpisodeState(
+                    episode_id=observation.episode_id,
+                    test_identifier=observation.test_identifier,
+                    step=observation.step,
+                    step_count=observation.step,
+                    max_steps=observation.steps_remaining + observation.step,
+                    baseline_pass_rate=observation.baseline_pass_rate,
+                    current_pass_rate=observation.current_pass_rate,
+                    run_history=list(observation.run_history),
+                    duration_fingerprint=observation.duration_fingerprint,
+                    current_hypothesis=observation.current_hypothesis,
+                    secondary_hypothesis=observation.secondary_hypothesis,
+                    reflection=observation.reflection,
+                    causal_graph_dict=observation.causal_graph,
+                    infrastructure_sensitive=observation.infrastructure_sensitive,
+                    chaos_pass_rate=observation.chaos_pass_rate or 0.0,
+                    chaos_baseline_pass_rate=observation.chaos_baseline_pass_rate,
+                    perf_regression_detected=bool(observation.perf_sentinel_status.get("regression") if observation.perf_sentinel_status else False),
+                    perf_median_ratio=float(observation.perf_sentinel_status.get("median_ratio", 1.0) if observation.perf_sentinel_status else 1.0),
+                    total_diff_lines=observation.total_diff_lines,
+                    last_actions=list(observation.last_actions),
+                    actions_taken=list(observation.last_actions),
+                    hypothesis_confidence_at_each_step=[h.confidence for h in ([observation.current_hypothesis] if observation.current_hypothesis else [])],
+                    prediction_error_history=list(observation.prediction_error_history),
+                    last_outcomes=list(observation.last_outcomes),
+                    patches_applied=list(observation.patches_applied),
+                    log_snippets=list(observation.log_snippets),
+                    async_markers=list(observation.async_markers),
+                    failure_pattern_summary=observation.failure_pattern_summary or {},
+                    causal_hints=list(observation.causal_hints),
+                    judge_scores=[],
+                )
+                heuristic_hypothesis = infer_hypothesis(episode_state, list(observation.run_history), observation.test_identifier)
+                if heuristic_hypothesis and heuristic_hypothesis.root_cause_category != "unknown":
+                    return heuristic_hypothesis
             
             return Hypothesis(
                 root_cause_category=category,
@@ -173,6 +222,7 @@ class FixerRole:
 
         "Return ONLY valid JSON with these fields: chosen_action, confidence (0 to 1), justification, parameters, predicted_pass_rate_after. "
         "Optional fields: expected_outcome, risk_assessment, fallback_strategy. Keep every string short, preferably one sentence. "
+        "If latest_judge_feedback is present in the observation, use it directly to adjust the next action. "
 
         "--- "
 
@@ -234,6 +284,33 @@ class FixerRole:
         hypothesis: Hypothesis,
         few_shot_examples: Optional[list[dict[str, str]]] = None,
     ) -> FlakeForgeAction:
+        if hypothesis.suggested_action and hypothesis.confidence >= 0.5:
+            suggested_action = str(hypothesis.suggested_action)
+            default_parameters: Dict[str, Any] = {}
+            if suggested_action == "ADD_TIMING_GUARD":
+                default_parameters = {"delay_ms": 100}
+            elif suggested_action == "ADD_SYNCHRONIZATION":
+                default_parameters = {"primitive": "lock"}
+            elif suggested_action == "MOCK_DEPENDENCY":
+                default_parameters = {"target": "requests.get"}
+            elif suggested_action == "RESET_STATE":
+                default_parameters = {"scope": "function"}
+            elif suggested_action == "ADD_RETRY":
+                default_parameters = {"max_attempts": 2, "backoff_ms": 100}
+
+            feedback = _extract_judge_feedback(observation)
+            justification = feedback.get("judge_critique") or f"Applied {suggested_action} from the current hypothesis."
+            return FlakeForgeAction(
+                action_type=suggested_action,
+                parameters=default_parameters,
+                hypothesis=_hypothesis_payload(hypothesis),
+                predicted_pass_rate_after=min(1.0, max(observation.current_pass_rate, observation.current_pass_rate + 0.2)),
+                justification=str(justification)[:500] or None,
+                expected_outcome=f"{suggested_action} should address {hypothesis.root_cause_category}.",
+                risk_assessment="Deterministic fallback based on a strong hypothesis.",
+                fallback_plan="Re-evaluate with evidence if this does not improve stability.",
+            )
+
         examples = few_shot_examples
         if examples is None:
             examples = _auto_retrieve_examples(observation, hypothesis)
@@ -274,6 +351,11 @@ class FixerRole:
             # Match the new "chosen_action" field from the senior engineer prompt
             action_type = str(parsed.get("chosen_action") or parsed.get("action_type", "analyze_logs"))
             justification_text = str(parsed.get("reasoning") or parsed.get("justification", ""))[:500] or None
+
+            if action_type in {"analyze_logs", "detect_flakiness"} and hypothesis.suggested_action:
+                action_type = str(hypothesis.suggested_action)
+                if not justification_text:
+                    justification_text = f"Promoted from diagnostic to {action_type} based on the current hypothesis."
             
             logger.info(f"[TOOL_USAGE] [FIXER] Using chosen tool/action <{action_type}> based on root cause hypothesis.")
             if justification_text:
@@ -286,12 +368,15 @@ class FixerRole:
                 predicted_pass_rate_after=(
                     float(parsed["predicted_pass_rate_after"])
                     if "predicted_pass_rate_after" in parsed
-                    else (0.5 if "expected_outcome" in parsed else None)
+                    else float(observation.current_pass_rate)
                 ),
-                justification=justification_text,
-                expected_outcome=str(parsed.get("expected_outcome", ""))[:240] or None,
-                risk_assessment=str(parsed.get("risk_assessment", ""))[:240] or None,
-                fallback_plan=str(parsed.get("fallback_strategy") or parsed.get("fallback_plan", ""))[:240] or None,
+                justification=justification_text or f"Selected {action_type} based on current hypothesis and feedback.",
+                expected_outcome=(str(parsed.get("expected_outcome", "")).strip()[:240])
+                or f"{action_type} should clarify the failure mode.",
+                risk_assessment=(str(parsed.get("risk_assessment", "")).strip()[:240])
+                or "Low confidence; action may not improve stability immediately.",
+                fallback_plan=(str(parsed.get("fallback_strategy") or parsed.get("fallback_plan", "")).strip()[:240])
+                or "Gather more evidence and revise the hypothesis.",
             )
         except Exception:
             # Smart fallback based on category
@@ -309,7 +394,7 @@ class FixerRole:
                 hypothesis=_hypothesis_payload(hypothesis),
                 justification=f"JSON parsing failed; falling back to heuristic {fallback_type}",
                 expected_outcome="Fallback recovery",
-                predicted_pass_rate_after=None,
+                predicted_pass_rate_after=float(observation.current_pass_rate),
                 risk_assessment="Low risk",
                 fallback_plan="Retry with different prompt",
             )

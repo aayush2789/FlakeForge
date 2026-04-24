@@ -1,3 +1,5 @@
+import json
+
 from typing import Any, Dict
 
 try:
@@ -27,6 +29,30 @@ def _first_lines(text: str, line_count: int) -> str:
         return ""
     lines = text.splitlines()
     return "\n".join(lines[:line_count])
+
+
+def _extract_judge_feedback(observation: FlakeForgeObservation) -> Dict[str, Any]:
+    feedback: Dict[str, Any] = {}
+
+    for snippet in reversed(observation.log_snippets or []):
+        try:
+            payload = json.loads(snippet)
+        except Exception:
+            continue
+        if isinstance(payload, dict) and "judge_critique" in payload:
+            feedback["judge_critique"] = str(payload.get("judge_critique", ""))
+            if payload.get("judge_prediction_error") is not None:
+                feedback["judge_prediction_error"] = str(payload.get("judge_prediction_error", ""))
+            break
+
+    reflection = observation.reflection or {}
+    if isinstance(reflection, dict):
+        if reflection.get("judge_critique"):
+            feedback.setdefault("judge_critique", str(reflection.get("judge_critique", "")))
+        if reflection.get("judge_prediction_error"):
+            feedback.setdefault("judge_prediction_error", str(reflection.get("judge_prediction_error", "")))
+
+    return feedback
 
 def build_compact_observation(observation: FlakeForgeObservation, include_sources: bool = False, for_judge: bool = False) -> Dict[str, Any]:
     """Unifies observation payload construction for Fixer, Analyzer, and Judge."""
@@ -72,6 +98,7 @@ def build_compact_observation(observation: FlakeForgeObservation, include_source
             "steps_remaining": observation.steps_remaining,
             "async_markers": list(observation.async_markers)[:20],
             "log_snippets": list(observation.log_snippets)[-3:],
+            "latest_judge_feedback": _extract_judge_feedback(observation),
             "duration_fingerprint": observation.duration_fingerprint,
             "last_actions": list(observation.last_actions)[-3:],
             "last_outcomes": list(observation.last_outcomes)[-3:],

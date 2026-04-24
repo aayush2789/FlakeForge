@@ -571,10 +571,11 @@ def _apply_wrap_with(source: str, target: Dict[str, Any], rendered: str) -> str:
         def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
             if fn_name and fn_name not in original_node.name.value and fn_name != "test":
                 return updated_node
-            with_stmt = cst.parse_statement(f"with {with_expr}:\n    pass\n")
-            if not isinstance(with_stmt, cst.With):
-                return updated_node
-            wrapped = with_stmt.with_changes(body=with_stmt.body.with_changes(body=list(updated_node.body.body)))
+            with_stmt = cst.With(
+                items=[cst.WithItem(item=cst.parse_expression(with_expr))],
+                body=cst.IndentedBlock(body=list(updated_node.body.body)),
+            )
+            wrapped = with_stmt
             return updated_node.with_changes(body=updated_node.body.with_changes(body=[wrapped]))
 
     return module.visit(WrapWithTransformer()).code
