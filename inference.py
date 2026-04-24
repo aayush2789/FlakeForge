@@ -210,9 +210,6 @@ async def run_inference() -> Dict[str, Any]:
         for step_idx in range(1, MAX_STEPS + 1):
             step_t0 = time.time()
 
-            # Phase 0: Sync with previous step's background assessment to get critique/feedback.
-            await env.wait_for_previous_judge()
-
             # Phase 1: Analysis (Analyzer role).
             hypothesis = analyzer.produce_hypothesis(obs)
 
@@ -229,13 +226,12 @@ async def run_inference() -> Dict[str, Any]:
             next_obs = _extract_observation(step_result)
             reward = float(getattr(step_result, "reward", next_obs.reward or 0.0))
 
-            # Judge scores now come from client.py's async _run_judge().
-            # They are stored in env._judge_scores[-1] after step() completes.
-            latest_scores = env.get_judge_scores()[-1] if env.get_judge_scores() else {}
-            hypothesis_score = int(latest_scores.get("judge_hypothesis_score", 0))
-            patch_score = int(latest_scores.get("judge_patch_score", 0))
-            critique = str(latest_scores.get("critique", ""))
-            prediction_error = str(latest_scores.get("prediction_error", ""))
+            # Judge scores now come from client.py's get_teacher_judge_result() ONLY at the end of the episode.
+            # Default these to 0/empty strings for the per-step log.
+            hypothesis_score = 0
+            patch_score = 0
+            critique = ""
+            prediction_error = ""
 
             if critique:
                 _log(f"[JUDGE_CRITIQUE] step={step_idx}: {critique}")
@@ -298,8 +294,7 @@ async def run_inference() -> Dict[str, Any]:
             if bool(next_obs.done):
                 break
 
-        # Phase 3: Final sync to ensure all judge evaluations are in before summary.
-        await env.wait_for_previous_judge()
+        # Phase 3: Teacher Judge evaluation now available after episode completes.
 
         elapsed_s = round(time.time() - started_at, 3)
         total_reward = round(sum(float(s["reward"]) for s in steps), 4)
@@ -307,6 +302,7 @@ async def run_inference() -> Dict[str, Any]:
         mean_p = round(sum(int(s["judge_patch_score"]) for s in steps) / max(len(steps), 1), 3)
         final_obs = obs
 
+        teacher_data = env.get_teacher_judge_result() or {}
         summary = {
             "episode_id": final_obs.episode_id,
             "test_identifier": final_obs.test_identifier,
@@ -322,6 +318,8 @@ async def run_inference() -> Dict[str, Any]:
             "total_reward": total_reward,
             "avg_judge_hypothesis_score": mean_h,
             "avg_judge_patch_score": mean_p,
+            "teacher_judge_score": int(teacher_data.get("score", 0)),
+            "teacher_judge_critique": teacher_data.get("critique", ""),
             "elapsed_s": elapsed_s,
             "duration_fingerprint": final_obs.duration_fingerprint,
             "root_cause_identified": (
