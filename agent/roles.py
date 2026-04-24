@@ -137,10 +137,17 @@ class AnalyzerRole:
             if not reasoning and "action_rationale" in parsed:
                 reasoning = [str(parsed["action_rationale"])]
             
+            # Fix: LLM may return evidence as a raw string instead of a list.
+            # Calling list() on a string iterates characters, producing ["T","h","e",...].
+            raw_ev = parsed.get("evidence", [])
+            if isinstance(raw_ev, str):
+                raw_ev = [raw_ev] if raw_ev.strip() else []
+            elif not isinstance(raw_ev, list):
+                raw_ev = [str(raw_ev)] if raw_ev else []
             return Hypothesis(
                 root_cause_category=category,
                 confidence=float(parsed.get("confidence", 0.1)),
-                evidence=list(parsed.get("evidence", []))[:5],
+                evidence=raw_ev[:5],
                 suggested_action=parsed.get("next_best_action") or parsed.get("suggested_action"),
                 reasoning_steps=list([str(s) for s in reasoning])[:3],
                 uncertainty=str(parsed.get("uncertainty", ""))[:240] or None,

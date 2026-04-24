@@ -65,7 +65,13 @@ class EpisodeState:
     # Verbal critique from the Teacher Judge LLM
     teacher_judge_critique: str = ""
 
+    # ── Baseline regression snapshot: True if non-target tests were ALREADY
+    # failing before the agent took any action. Prevents test_flaky_simple
+    # (randomly fails 30%) from counting as an agent-introduced regression.
+    baseline_regression_status: bool = False
+
     start_time: float = field(default_factory=time.time)
+
 
     def is_done(self) -> bool:
         return self.done or self.step_count >= self.max_steps or self.current_pass_rate >= 0.95

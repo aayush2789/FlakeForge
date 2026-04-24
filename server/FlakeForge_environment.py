@@ -215,6 +215,13 @@ class FlakeForgeEnvironment(Environment):
         self._episode.current_pass_rate = self._episode.baseline_pass_rate
         # Improvement 4: compute duration fingerprint from baseline runs.
         self._episode.duration_fingerprint = compute_duration_fingerprint(baseline_runs)
+        # Capture baseline regression status BEFORE any patches are applied.
+        # This lets step() distinguish agent-introduced regressions from
+        # pre-existing failures (e.g. test_flaky_simple's 30% random failure rate).
+        self._episode.baseline_regression_status = self.runner.check_regressions(
+            exclude_test_id=self.test_id, timeout_seconds=30
+        )
+
 
         # ── V2 Pillar 2: Chaos baseline ───────────────────────────────────────
         if self.chaos_profile != ChaosProfile.NONE:
@@ -318,7 +325,15 @@ class FlakeForgeEnvironment(Environment):
         self._episode.run_history.extend(post_runs)
         self._episode.run_history = self._episode.run_history[-10:]
         self._episode.current_pass_rate = self._pass_rate(post_runs)
-        self._episode.regression_detected = self.runner.check_regressions(exclude_test_id=self.test_id, timeout_seconds=30)
+        self._episode.regression_detected = self.runner.check_regressions(
+            exclude_test_id=self.test_id, timeout_seconds=30
+        )
+        # Guard against false regressions: if the non-target tests were already
+        # failing before this episode (tracked in baseline_regression_status),
+        # do not count that as a new regression introduced by the agent.
+        if self._episode.regression_detected and getattr(self._episode, "baseline_regression_status", False):
+            self._episode.regression_detected = False
+
 
         # ── V2 Pillar 2: Chaos verification after each patch ─────────────────────
         if self.chaos_profile != ChaosProfile.NONE and action.action_type != "CHAOS_PROBE":
@@ -898,14 +913,17 @@ class FlakeForgeEnvironment(Environment):
                 ensure_ascii=False,
             )
             try:
-                # Run async call in a sync context
-                loop = None
+                # Run async call in a sync context.
+                # Use get_running_loop() (Python 3.10+) which raises RuntimeError
+                # when no loop is running — more reliable than get_event_loop().
                 try:
-                    loop = _asyncio.get_event_loop()
+                    running_loop = _asyncio.get_running_loop()
                 except RuntimeError:
-                    pass
-                if loop and loop.is_running():
-                    # We're inside an event loop (e.g. pytest-asyncio); use run_in_executor
+                    running_loop = None
+
+                if running_loop is not None and running_loop.is_running():
+                    # We're inside an event loop (e.g. FastAPI/uvicorn); spawn a new
+                    # thread that can safely call asyncio.run() without conflict.
                     import concurrent.futures as _cf
                     with _cf.ThreadPoolExecutor(max_workers=1) as pool:
                         future = pool.submit(
