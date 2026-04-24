@@ -54,7 +54,10 @@ def build_patch_spec(action: FlakeForgeAction, resolved_target: Dict[str, Any]) 
     if c_action == "ADD_TIMING_GUARD":
         return {
             "operation": "insert_before",
-            "target": {"type": "call", "identifier": resolved_target.get("identifier", "await")},
+            "target": {
+                "type": "function",
+                "identifier": resolved_target.get("identifier", "test"),
+            },
             "code_template": "await asyncio.sleep({delay_ms} / 1000)",
             "parameters": {"delay_ms": action.parameters.get("delay_ms", 100)},
         }
@@ -142,4 +145,13 @@ def build_patch_spec(action: FlakeForgeAction, resolved_target: Dict[str, Any]) 
             "code_template": "",
             "parameters": dict(action.parameters),
         }
-    raise ValueError(f"Unsupported action type for patching: {action.action_type}")
+    # Unknown / unhandled action types — return a no-op GATHER_EVIDENCE spec
+    # so the executor never raises ValueError and crashes the server.
+    return {
+        "operation": "ensure_reset_fixture",
+        "target": {"scope": "function"},
+        "code_template": "",
+        "parameters": {},
+        "_no_op_reason": f"unsupported_action:{action.action_type}",
+    }
+
