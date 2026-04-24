@@ -626,14 +626,24 @@ def _apply_textual_operation_idempotent(source: str, operation: str, identifier:
         return source
 
     if operation in {"insert_before", "insert_after"} and identifier:
-        match = re.search(re.escape(identifier), source)
-        if not match:
-            raise ValueError(f"Target identifier not found: {identifier}")
-
-        insert = rendered + "\n"
-        if operation == "insert_before":
-            return source[: match.start()] + insert + source[match.start() :]
-        return source[: match.end()] + "\n" + rendered + source[match.end() :]
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if identifier in line:
+                indent = len(line) - len(line.lstrip())
+                indented_rendered = "\n".join((" " * indent) + r for r in rendered.splitlines())
+                
+                if operation == "insert_before":
+                    lines.insert(i, indented_rendered)
+                else:
+                    lines.insert(i + 1, indented_rendered)
+                
+                # Auto-inject asyncio import if missing and needed
+                patched = "\n".join(lines) + "\n"
+                if "asyncio" in rendered and "import asyncio" not in patched:
+                    patched = "import asyncio\n" + patched
+                return patched
+                
+        raise ValueError(f"Target identifier not found: {identifier}")
 
     raise ValueError(f"Unsupported textual operation: {operation}")
 
