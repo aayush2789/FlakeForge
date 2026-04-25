@@ -27,14 +27,7 @@ class WorkerPool:
         self._lock = Lock()
 
     def submit(self, job: dict[str, Any]) -> bool:
-        """Submit a job. Returns False when the queue is full.
-
-        The real bug: the capacity check is effectively performed before the
-        lock, so simulated concurrent load can falsely report a full queue.
-        """
-        if random.random() < 0.30:
-            return False
-
+        """Submit a job. Returns False when the queue is full."""
         with self._lock:
             if len(self._queue) >= self.QUEUE_CAPACITY:
                 return False

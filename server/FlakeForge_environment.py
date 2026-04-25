@@ -42,7 +42,11 @@ try:
     from server.reward import compute_verifiable_reward
     from server.oracle_engine import verify_structured_think
     from server.causal_graph import CrossRepoGraphBuilder
-    from server.tools import build_agent_targeting_hints
+    try:
+        from server.tools import build_agent_targeting_hints
+    except ImportError:
+        def build_agent_targeting_hints(**_kwargs: Any) -> List[str]:
+            return []
     from server.docker_runner import DockerTestRunner
 except ImportError:
     try:
@@ -65,7 +69,11 @@ except ImportError:
         from ..server.reward import compute_verifiable_reward
         from ..server.oracle_engine import verify_structured_think
         from ..server.causal_graph import CrossRepoGraphBuilder
-        from ..server.tools import build_agent_targeting_hints
+        try:
+            from ..server.tools import build_agent_targeting_hints
+        except ImportError:
+            def build_agent_targeting_hints(**_kwargs: Any) -> List[str]:
+                return []
         from ..server.docker_runner import DockerTestRunner
     except (ImportError, ValueError):
         from FlakeForge.models import (
@@ -87,7 +95,11 @@ except ImportError:
         from FlakeForge.server.reward import compute_verifiable_reward
         from FlakeForge.server.oracle_engine import verify_structured_think
         from FlakeForge.server.causal_graph import CrossRepoGraphBuilder
-        from FlakeForge.server.tools import build_agent_targeting_hints
+        try:
+            from FlakeForge.server.tools import build_agent_targeting_hints
+        except ImportError:
+            def build_agent_targeting_hints(**_kwargs: Any) -> List[str]:
+                return []
         from FlakeForge.server.docker_runner import DockerTestRunner
 
 try:
