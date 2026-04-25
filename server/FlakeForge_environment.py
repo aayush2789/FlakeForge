@@ -38,6 +38,7 @@ try:
     )
     from server.patch_applier import apply_search_replace_patch
     from server.reward import compute_verifiable_reward
+    from server.oracle_engine import verify_structured_think
     from server.causal_graph import CrossRepoGraphBuilder
     from server.docker_runner import DockerTestRunner
 except ImportError:
@@ -58,6 +59,7 @@ except ImportError:
         )
         from ..server.patch_applier import apply_search_replace_patch
         from ..server.reward import compute_verifiable_reward
+        from ..server.oracle_engine import verify_structured_think
         from ..server.causal_graph import CrossRepoGraphBuilder
         from ..server.docker_runner import DockerTestRunner
     except (ImportError, ValueError):
@@ -77,6 +79,7 @@ except ImportError:
         )
         from FlakeForge.server.patch_applier import apply_search_replace_patch
         from FlakeForge.server.reward import compute_verifiable_reward
+        from FlakeForge.server.oracle_engine import verify_structured_think
         from FlakeForge.server.causal_graph import CrossRepoGraphBuilder
         from FlakeForge.server.docker_runner import DockerTestRunner
 
@@ -242,6 +245,15 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         )
 
         # --- 1. Apply patch ---
+        # Snapshot sources *before* the patch for differential oracle verification.
+        pre_sources: Dict[str, str] = {}
+        if (
+            action.structured_think is not None
+            and action.structured_think.claims
+            and action.patch_text.strip()
+        ):
+            pre_sources = self._collect_sources()
+
         patch_result = {"success": False, "error": "empty_patch", "files_modified": [], "lines_changed": 0, "diff": ""}
         if action.patch_text.strip():
             patch_result = apply_search_replace_patch(
@@ -277,9 +289,24 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         else:
             post_pass_rate = self._episode_state.current_pass_rate
 
-        # --- 4. Compute reward ---
+        # --- 4. Compute reward (oracle first, then reward) ---
         pre_entropy = failure_mode_entropy(self._episode_state.run_history[-self.num_runs:])
         observation = self._build_observation()  # Build before reward for causal proximity
+
+        # Oracle: verify structured claims against pre/post patch sources.
+        oracle_score: Optional[float] = None
+        if action.structured_think is not None and action.structured_think.claims:
+            post_sources = self._collect_sources()  # current disk = post-patch
+            try:
+                annotated_think, oracle_score = verify_structured_think(
+                    action.structured_think,
+                    pre_sources=pre_sources,
+                    post_sources=post_sources,
+                )
+                action = action.model_copy(update={"structured_think": annotated_think})
+                logger.info("[ENV] ORACLE score=%.3f claims=%d", oracle_score, len(annotated_think.claims))
+            except Exception as exc:
+                logger.warning("[ENV] Oracle verification failed (non-fatal): %s", exc)
 
         reward_breakdown = compute_verifiable_reward(
             action=action,
@@ -288,6 +315,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             post_run_results=post_run_dicts,
             baseline_pass_rate=self._episode_state.baseline_pass_rate,
             pre_entropy=pre_entropy,
+            oracle_score=oracle_score,
         )
 
         # --- 5. Update state ---
@@ -574,6 +602,30 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         """Resolve the default target file for patches."""
         test_parts = self.test_identifier.split("::")
         return test_parts[0] if test_parts else ""
+
+    def _collect_sources(self) -> Dict[str, str]:
+        """Collect current on-disk source texts keyed by path relative to repo_path.
+
+        Used to feed the oracle engine with pre/post source snapshots.
+        This is called *before* a patch is applied for pre-sources and *after*
+        for post-sources, so it just reads the current disk state.
+        """
+        sources: Dict[str, str] = {}
+        if self._episode_state is None:
+            return sources
+        skip = {"__pycache__", ".git", "node_modules", "venv", ".venv", ".pytest_cache"}
+        for root, dirs, files in os.walk(self.repo_path):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                full = Path(root) / f
+                rel = str(full.relative_to(self.repo_path)).replace("\\", "/")
+                try:
+                    sources[rel] = full.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    pass
+        return sources
 
     def _done_reason(self, pass_rate: float, done: bool) -> str:
         if not done:
