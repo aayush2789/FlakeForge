@@ -84,15 +84,18 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
     def __init__(
         self,
-        repo_path: str,
-        test_identifier: str,
+        repo_path: Optional[str] = None,
+        test_identifier: Optional[str] = None,
         max_steps: int = 8,
         num_runs: int = 10,
         runner: Optional[Any] = None,
         chaos_runner: Optional[Any] = None,
     ) -> None:
-        self.repo_path = Path(repo_path)
-        self.test_identifier = test_identifier
+        default_repo = os.environ.get("FF_REPO_PATH", str(Path("test_repos") / "timing_race_minimal"))
+        default_test = os.environ.get("FF_TEST_ID", "tests/test_flaky.py::test_fetch_should_complete")
+
+        self.repo_path = Path(repo_path or default_repo)
+        self.test_identifier = test_identifier or default_test
         self.max_steps = max_steps
         self.num_runs = num_runs
         self.runner = runner
@@ -107,7 +110,18 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         **kwargs: Any,
     ) -> FlakeForgeObservation:
         """Initialize a new episode."""
-        del seed, kwargs
+        del seed
+
+        # Allow remote clients to configure env at reset-time.
+        if "repo_path" in kwargs and kwargs["repo_path"]:
+            self.repo_path = Path(str(kwargs["repo_path"]))
+        if "test_identifier" in kwargs and kwargs["test_identifier"]:
+            self.test_identifier = str(kwargs["test_identifier"])
+        if "max_steps" in kwargs and kwargs["max_steps"] is not None:
+            self.max_steps = int(kwargs["max_steps"])
+        if "num_runs" in kwargs and kwargs["num_runs"] is not None:
+            self.num_runs = int(kwargs["num_runs"])
+
         episode_id = episode_id or str(uuid.uuid4())[:8]
         logger.info("[ENV] RESET episode=%s test=%s", episode_id, self.test_identifier)
 

@@ -23,8 +23,10 @@ except Exception:  # pragma: no cover
 
 try:
     from openenv.core import EnvClient
+    from openenv.core.client_types import StepResult
 except Exception:
     EnvClient = None  # type: ignore[assignment]
+    StepResult = None  # type: ignore[assignment]
 
 try:
     from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
@@ -50,6 +52,49 @@ if load_dotenv is not None:
     load_dotenv()
 
 
+if EnvClient is not None:
+    class FlakeForgeEnvClient(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForgeState]):
+        """Concrete OpenEnv client for FlakeForge's action/observation models."""
+
+        def _step_payload(self, action: FlakeForgeAction) -> Dict[str, Any]:
+            return action.model_dump()
+
+        def _parse_result(self, payload: Dict[str, Any]) -> Any:
+            observation_data = payload.get("observation", {})
+            observation = FlakeForgeObservation.model_validate(observation_data)
+            reward = payload.get("reward", getattr(observation, "reward", 0.0))
+            done = payload.get("done", getattr(observation, "done", False))
+
+            if StepResult is not None:
+                result = StepResult(
+                    observation=observation,
+                    reward=float(reward or 0.0),
+                    done=bool(done),
+                )
+            else:
+                result = {
+                    "observation": observation,
+                    "reward": float(reward or 0.0),
+                    "done": bool(done),
+                }
+
+            state = FlakeForgeState(
+                episode_id=str(getattr(observation, "episode_id", "")),
+                step_count=int(getattr(observation, "step", 0)),
+                done=bool(done),
+                current_pass_rate=float(getattr(observation, "current_pass_rate", 0.0)),
+                baseline_pass_rate=float(getattr(observation, "baseline_pass_rate", 0.0)),
+            )
+            setattr(result, "state", state)
+            setattr(result, "info", {})
+            return result
+
+        def _parse_state(self, payload: Dict[str, Any]) -> FlakeForgeState:
+            return FlakeForgeState.model_validate(payload)
+else:
+    FlakeForgeEnvClient = None  # type: ignore[assignment]
+
+
 def _as_step_output_like(value: Any) -> Any:
     """Normalize env return values to a StepOutput-like object.
 
@@ -57,17 +102,25 @@ def _as_step_output_like(value: Any) -> Any:
     - OpenEnv client/server style return object with observation/reward/done/state/info
     - Direct observation returns from local environment implementations
     """
-    if hasattr(value, "observation") and hasattr(value, "done"):
+    if (
+        hasattr(value, "observation")
+        and hasattr(value, "done")
+        and hasattr(value, "state")
+        and hasattr(value, "info")
+    ):
         return value
 
     class _StepLike:
-        def __init__(self, observation: FlakeForgeObservation) -> None:
+        def __init__(self, source: Any) -> None:
+            observation = getattr(source, "observation", source)
             self.observation = observation
-            self.reward = float(getattr(observation, "reward", 0.0))
-            self.done = bool(getattr(observation, "done", False))
-            self.info = {}
+            self.reward = float(
+                getattr(source, "reward", getattr(observation, "reward", 0.0)) or 0.0
+            )
+            self.done = bool(getattr(source, "done", getattr(observation, "done", False)))
+            self.info = getattr(source, "info", {}) or {}
 
-            self.state = FlakeForgeState(
+            self.state = getattr(source, "state", None) or FlakeForgeState(
                 episode_id=str(getattr(observation, "episode_id", "")),
                 step_count=int(getattr(observation, "step", 0)),
                 done=self.done,
@@ -157,10 +210,24 @@ def _should_use_remote_env() -> bool:
     return bool(base_url) or use_docker
 
 
+def _run_async(coro: Any) -> Any:
+    """Run a coroutine in CLI and notebook contexts without masking real errors."""
+    try:
+        return asyncio.run(coro)
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "asyncio.run() cannot be called from a running event loop" not in msg:
+            raise
+
+        loop = asyncio.get_event_loop()
+        return loop.run_until_complete(coro)
+
+
 async def run_episode(
     env: FlakeForgeEnvironment,
     agent: UnifiedFlakeForgeAgent,
     verbose: bool = True,
+    reset_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a single episode of the unified inference loop.
 
@@ -177,7 +244,7 @@ async def run_episode(
     }
 
     # Reset environment
-    reset_result = env.reset()
+    reset_result = env.reset(**(reset_kwargs or {}))
     if asyncio.iscoroutine(reset_result):
         reset_result = await reset_result
     step_output = _as_step_output_like(reset_result)
@@ -280,9 +347,15 @@ def run_inference(
         env_url = (os.environ.get("ENV_BASE_URL") or "http://localhost:5000").strip()
         if verbose:
             logger.info("[INFERENCE] Using remote OpenEnv client at %s", env_url)
-        if EnvClient is None:
+        if FlakeForgeEnvClient is None:
             raise RuntimeError("Remote execution requested but openenv.core.EnvClient is unavailable")
-        env = EnvClient(base_url=env_url)
+        env = FlakeForgeEnvClient(base_url=env_url)
+        reset_payload = {
+            "repo_path": repo_path,
+            "test_identifier": test_identifier,
+            "max_steps": max_steps,
+            "num_runs": num_runs,
+        }
 
         async def _run_remote() -> Dict[str, Any]:
             connect = getattr(env, "connect", None)
@@ -291,7 +364,12 @@ def run_inference(
                 if asyncio.iscoroutine(maybe_connected):
                     await maybe_connected
             try:
-                return await run_episode(env, agent, verbose=verbose)
+                return await run_episode(
+                    env,
+                    agent,
+                    verbose=verbose,
+                    reset_kwargs=reset_payload,
+                )
             finally:
                 close = getattr(env, "close", None)
                 if callable(close):
@@ -299,11 +377,7 @@ def run_inference(
                     if asyncio.iscoroutine(maybe_closed):
                         await maybe_closed
 
-        try:
-            result = asyncio.run(_run_remote())
-        except RuntimeError:
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(_run_remote())
+        result = _run_async(_run_remote())
     else:
         runner = _build_default_runner(repo_path)
         if runner is None and verbose:
@@ -319,12 +393,7 @@ def run_inference(
         )
 
         # Run episode
-        try:
-            result = asyncio.run(run_episode(env, agent, verbose=verbose))
-        except RuntimeError:
-            # If event loop is already running (e.g., in Jupyter)
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(run_episode(env, agent, verbose=verbose))
+        result = _run_async(run_episode(env, agent, verbose=verbose))
 
     if verbose:
         logger.info(
