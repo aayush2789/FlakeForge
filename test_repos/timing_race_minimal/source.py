@@ -22,7 +22,7 @@ async def fetch_data_with_race(timeout_override: float | None = None) -> dict[st
     if timeout_override is not None:
         timeout = timeout_override
     else:
-        timeout = 0.05 if random.random() < 0.8 else 0.5
+        timeout = 0.5
     
     # Simulate an async operation that takes some time to initialize
     try:

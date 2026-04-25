@@ -121,13 +121,15 @@ def apply_search_replace_patch(
             "diff": "",
         }
 
-    # Create git stash for rollback
-    backup_created = _create_git_stash(repo_path)
-
     files_modified: List[str] = []
     total_lines_changed = 0
     hunks_applied = 0
     all_diffs: List[str] = []
+    originals: Dict[Path, str] = {}
+
+    def rollback() -> None:
+        for path, content in originals.items():
+            path.write_text(content, encoding="utf-8")
 
     try:
         for hunk in hunks:
@@ -143,9 +145,18 @@ def apply_search_replace_patch(
                 if candidates:
                     target = candidates[0]
                 else:
-                    continue
+                    rollback()
+                    return {
+                        "success": False,
+                        "error": f"target_file_not_found_{file_path}",
+                        "files_modified": files_modified,
+                        "lines_changed": total_lines_changed,
+                        "hunks_applied": hunks_applied,
+                        "diff": "\n".join(all_diffs),
+                    }
 
             original = target.read_text(encoding="utf-8", errors="ignore")
+            originals.setdefault(target, original)
 
             # Apply the hunk
             modified = _apply_single_hunk(original, hunk.search_text, hunk.replace_text)
@@ -153,8 +164,7 @@ def apply_search_replace_patch(
                 # Search text not found — try fuzzy match
                 modified = _apply_fuzzy_hunk(original, hunk.search_text, hunk.replace_text)
                 if modified is None:
-                    if backup_created:
-                        _git_stash_pop(repo_path)
+                    rollback()
                     return {
                         "success": False,
                         "error": f"search_text_not_found_in_{target.name}",
@@ -179,6 +189,17 @@ def apply_search_replace_patch(
             if diff_text:
                 all_diffs.append(diff_text)
 
+        if hunks_applied != len(hunks):
+            rollback()
+            return {
+                "success": False,
+                "error": "not_all_hunks_applied",
+                "files_modified": files_modified,
+                "lines_changed": total_lines_changed,
+                "hunks_applied": hunks_applied,
+                "diff": "\n".join(all_diffs),
+            }
+
         return {
             "success": True,
             "files_modified": files_modified,
@@ -190,8 +211,7 @@ def apply_search_replace_patch(
 
     except Exception as exc:
         # Rollback on any error
-        if backup_created:
-            _git_stash_pop(repo_path)
+        rollback()
         return {
             "success": False,
             "error": str(exc),

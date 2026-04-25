@@ -43,7 +43,7 @@ You receive a deep observation of a flaky test including source code, failure tr
 run history, and deep codebase signals (module cache violations, fixture scope risks, 
 mock residue, import side effects, async contamination).
 
-You MUST respond with EXACTLY two XML blocks:
+You MUST respond with EXACTLY two XML blocks and no Markdown fences:
 
 1. <think> block: Your root cause analysis
    - State the root cause category (one of: async_wait, concurrency, test_order_dependency,
@@ -66,6 +66,9 @@ You MUST respond with EXACTLY two XML blocks:
 RULES:
 - The <think> block must contain "Root Cause:" and "confidence:" 
 - The <patch> block must contain valid search/replace hunks
+- Do NOT wrap your answer in ```xml, ```patch, or any Markdown code fence
+- SEARCH text must be copied exactly from the observation, including indentation
+- Every SEARCH block must include ======= and >>>>>>> REPLACE
 - Do NOT add sleep() calls or retry decorators to mask flakiness
 - Do NOT modify unrelated files
 - Prefer minimal, surgical fixes that address the root cause
@@ -81,8 +84,12 @@ Strategy: Increase timeout to accommodate lock contention latency.
 </think>
 
 <patch>
---- tests/test_flaky.py
-    result = await asyncio.wait_for(fetch_data_with_race(), timeout=0.05)
+--- source.py
+<<<<<<< SEARCH
+        timeout = 0.05 if random.random() < 0.8 else 0.5
+=======
+        timeout = 0.5
+>>>>>>> REPLACE
 </patch>"""
 
 
@@ -182,8 +189,18 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
     return "\n".join(parts)
 
 
+def _strip_markdown_fence(text: str) -> str:
+    """Remove a single Markdown fence around model output if present."""
+    stripped = text.strip()
+    match = re.fullmatch(r"```(?:[A-Za-z0-9_-]+)?\s*(.*?)\s*```", stripped, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return stripped
+
+
 def extract_think(response: str) -> str:
     """Extract content between <think> and </think> tags."""
+    response = _strip_markdown_fence(response)
     match = re.search(r"<think>(.*?)</think>", response, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -194,13 +211,27 @@ def extract_think(response: str) -> str:
 
 def extract_patch(response: str) -> str:
     """Extract content between <patch> and </patch> tags."""
+    response = _strip_markdown_fence(response)
     match = re.search(r"<patch>(.*?)</patch>", response, re.DOTALL)
     if match:
-        return match.group(1).strip()
+        return _strip_markdown_fence(match.group(1))
 
-    fenced = re.search(r"```(?:patch|diff)?\s*(.*?)```", response, re.DOTALL | re.IGNORECASE)
+    fenced = re.search(r"```(?:patch|diff|xml)?\s*(.*?)```", response, re.DOTALL | re.IGNORECASE)
     if fenced:
-        return fenced.group(1).strip()
+        fenced_text = fenced.group(1).strip()
+        patch_match = re.search(r"<patch>(.*?)</patch>", fenced_text, re.DOTALL)
+        if patch_match:
+            return _strip_markdown_fence(patch_match.group(1))
+        return fenced_text
+
+    # Last-resort tolerant parsing for models that emit the hunk without tags.
+    hunk_start = response.find("<<<<<<< SEARCH")
+    if hunk_start != -1:
+        header_start = response.rfind("\n--- ", 0, hunk_start)
+        start = header_start + 1 if header_start != -1 else hunk_start
+        hunk_end = response.find(">>>>>>> REPLACE", hunk_start)
+        if hunk_end != -1:
+            return response[start:hunk_end + len(">>>>>>> REPLACE")].strip()
 
     return ""
 

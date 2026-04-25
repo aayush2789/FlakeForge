@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from models import FlakeForgeAction, RunRecord, RewardBreakdown
+from agent.unified_agent import extract_patch, extract_think
 from server.patch_applier import parse_search_replace_hunks, apply_search_replace_patch
 from server.reward import (
     compute_format_reward,
@@ -21,6 +22,31 @@ from server.reward import (
 
 class TestPatchApplierRegressions:
     """Regression tests for the V3 patch applier."""
+
+    def test_extracts_patch_from_xml_markdown_fence(self):
+        """Models sometimes wrap the required XML blocks in a Markdown fence."""
+        response = """```xml
+<think>
+Root Cause: async_wait (confidence: 0.95)
+Evidence: timeout.
+</think>
+<patch>
+--- source.py
+<<<<<<< SEARCH
+timeout = 0.05
+=======
+timeout = 0.5
+>>>>>>> REPLACE
+</patch>
+```"""
+
+        assert "Root Cause: async_wait" in extract_think(response)
+        assert extract_patch(response) == """--- source.py
+<<<<<<< SEARCH
+timeout = 0.05
+=======
+timeout = 0.5
+>>>>>>> REPLACE"""
 
     def test_whitespace_fuzzy_match(self):
         """Patch with slightly different indentation should still apply."""
