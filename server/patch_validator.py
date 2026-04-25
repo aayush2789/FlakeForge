@@ -96,11 +96,11 @@ def _find_source_key(path: str, source_map: Dict[str, str]) -> Optional[str]:
 
 
 def _node_text(source: str, node: ast.AST) -> str:
-    if not hasattr(node, "lineno") or not hasattr(node, "end_lineno"):
+    if not hasattr(node, "lineno"):
         return ""
     lines = source.splitlines()
     start = max(int(node.lineno) - 1, 0)
-    end = int(node.end_lineno)
+    end = int(getattr(node, "end_lineno", node.lineno))
     return "\n".join(lines[start:end])
 
 
@@ -161,7 +161,7 @@ def _hard_anti_hack_errors(hunks: Sequence[Any]) -> List[str]:
         search_lower = hunk.search_text.lower()
         replace_lower = hunk.replace_text.lower()
 
-        if replace_lower.count("assert") < search_lower.count("assert"):
+        if len(re.findall(r"\bassert\b", replace_lower)) < len(re.findall(r"\bassert\b", search_lower)):
             errors.append("anti_hack_assertion_deletion")
 
         for pattern in _SLEEP_PATTERNS:

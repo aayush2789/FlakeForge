@@ -440,7 +440,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         else:
             post_pass_rate = self._episode_state.current_pass_rate
 
-        # --- 4. Compute reward (oracle first, then reward) ---
+        # --- 4. Regression check ---
         regression_detected = post_pass_rate < self._episode_state.baseline_pass_rate - 0.1
         if patch_result["success"] and not syntax_error and self.runner is not None:
             try:
@@ -452,7 +452,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 logger.debug("[ENV] Regression check failed: %s", exc)
         patch_result["regression_detected"] = regression_detected
 
-        # --- 4. Compute reward ---
+        # --- 5. Compute reward ---
         pre_entropy = failure_mode_entropy(self._episode_state.run_history[-self.num_runs:])
         observation = self._build_observation()  # Build before reward for causal proximity
 
@@ -488,7 +488,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             think_history=self._episode_state.step_think_history,
         )
 
-        # --- 5. Update state ---
+        # --- 6. Update state ---
         self._episode_state.current_pass_rate = post_pass_rate
         self._episode_state.run_history.extend(post_runs)
         self._episode_state.last_think_text = action.think_text
@@ -697,7 +697,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             return self._preflight_result(
                 runs=runs[:quick_runs],
                 env_type="stable",
-                should_train=True,
+                should_train=False,
                 reason="preflight_stable_pass",
                 stage="determinism",
                 quick_runs=quick_runs,
@@ -988,8 +988,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
     def _check_syntax(self, files: List[str]) -> Optional[str]:
         """Check that modified files have valid Python syntax."""
         for f in files:
-            path = Path(f)
-            if not path.exists() or not path.suffix == ".py":
+            path = self.repo_path / f
+            if not path.exists() or path.suffix != ".py":
                 continue
             try:
                 source = path.read_text(encoding="utf-8", errors="ignore")

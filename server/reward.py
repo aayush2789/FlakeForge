@@ -28,6 +28,15 @@ except ImportError:
         failure_mode_entropy,
     )
 
+try:
+    from agent.unified_agent import infer_category_from_patch
+except ImportError:
+    try:
+        from ..agent.unified_agent import infer_category_from_patch
+    except ImportError:
+        def infer_category_from_patch(patch_text: str) -> str:
+            return "unknown"
+
 
 def _claim_has_required_format(claim: Any) -> bool:
     return (
@@ -134,7 +143,7 @@ def compute_stability_reward(
     baseline_pass_rate: float,
     current_pass_rate: float,
 ) -> float:
-    """Potential-based stability reward: Φ(current) - Φ(baseline). Returns ~-1.0..2.0."""
+    """Potential-based stability reward: Φ(current) - Φ(baseline). Returns ~-1.0..3.0."""
     shaped = _potential(current_pass_rate) - _potential(baseline_pass_rate)
 
     if current_pass_rate >= 1.0:
@@ -209,13 +218,13 @@ def compute_anti_hack_penalty(
     penalty = 0.0
     patch_lower = patch_text.lower()
 
-    if "assert" in patch_lower:
+    if re.search(r"\bassert\b", patch_lower):
         search_blocks = re.findall(r"<<<<<<< SEARCH\n(.*?)=======", patch_text, re.DOTALL)
         replace_blocks = re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
 
         for search, replace in zip(search_blocks, replace_blocks):
-            search_asserts = search.lower().count("assert")
-            replace_asserts = replace.lower().count("assert")
+            search_asserts = len(re.findall(r"\bassert\b", search.lower()))
+            replace_asserts = len(re.findall(r"\bassert\b", replace.lower()))
             if search_asserts > replace_asserts:
                 penalty -= 0.5 * (search_asserts - replace_asserts)
 
@@ -267,6 +276,41 @@ def compute_reasoning_consistency(
     return -0.5
 
 
+def compute_think_history_penalty(
+    action: FlakeForgeAction,
+    think_history: Optional[List[Dict[str, Any]]],
+) -> float:
+    """Mildly penalize repeating the same diagnosis without new evidence."""
+    if not think_history:
+        return 0.0
+
+    categories: set[str] = set()
+    entities: set[str] = set()
+    reasons: set[str] = set()
+    if action.structured_think and action.structured_think.claims:
+        for claim in action.structured_think.claims:
+            if claim.category:
+                categories.add(claim.category)
+            if claim.entity:
+                entities.add(claim.entity)
+            if claim.reason:
+                reasons.add(claim.reason[:35].lower().strip())
+    elif action.predicted_category:
+        categories.add(action.predicted_category)
+
+    if not categories and not entities and not reasons:
+        return 0.0
+
+    previous = think_history[-1]
+    repeated_category = bool(categories & set(previous.get("categories", [])))
+    repeated_entity = bool(entities & set(previous.get("entities", [])))
+    repeated_reason = bool(reasons & set(previous.get("reason_signatures", [])))
+
+    if repeated_category and (repeated_entity or repeated_reason):
+        return -0.25
+    return 0.0
+
+
 def compute_verifiable_reward(
     action: FlakeForgeAction,
     observation: FlakeForgeObservation,
@@ -279,8 +323,6 @@ def compute_verifiable_reward(
     think_history: Optional[List[Dict[str, Any]]] = None,
 ) -> RewardBreakdown:
     """Compute the full multi-signal verifiable reward."""
-    history: List[Dict[str, Any]] = think_history or []
-
     patch_applied = patch_result.get("success", False)
     rejected_by_validator = bool(patch_result.get("rejected_by_validator", False))
     rolled_back = bool(patch_result.get("rolled_back", False))
@@ -307,7 +349,6 @@ def compute_verifiable_reward(
         post_pass_rate = observation.current_pass_rate
         post_entropy = pre_entropy
 
-    from agent.unified_agent import infer_category_from_patch
     inferred_cat = infer_category_from_patch(action.patch_text)
 
     breakdown = RewardBreakdown()
@@ -320,6 +361,7 @@ def compute_verifiable_reward(
         rejected_by_validator=rejected_by_validator,
         rolled_back=rolled_back,
     )
+    breakdown.regression_penalty = -1.5 if regression_detected else 0.0
     breakdown.anti_hack_penalty = compute_anti_hack_penalty(
         action.patch_text, files_modified, lines_changed,
     )
@@ -348,6 +390,7 @@ def compute_verifiable_reward(
     )
     breakdown.failure_entropy_reward = compute_entropy_reward(pre_entropy, post_entropy)
     breakdown.noop_patch_penalty = -0.5 if patch_applied and noop_patch else 0.0
+    breakdown.think_history_penalty = compute_think_history_penalty(action, think_history)
 
     # ── Oracle (mild reasoning reward) ──────────────
     if oracle_score is not None:
@@ -382,9 +425,11 @@ def compute_verifiable_reward(
         + breakdown.causal_proximity_reward * 0.5
         + breakdown.failure_entropy_reward * 0.5
         + breakdown.anti_hack_penalty     * 1.5
+        + breakdown.regression_penalty    * 1.0
         + oracle_component
         + breakdown.patch_validation_signal * 1.0
         + breakdown.noop_patch_penalty    * 1.0
+        + breakdown.think_history_penalty * 1.0
         + breakdown.terminal_bonus        * 1.0,
         4,
     )

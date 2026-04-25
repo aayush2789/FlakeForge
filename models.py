@@ -313,10 +313,12 @@ class RewardBreakdown:
     causal_proximity_reward: float = 0.0
     failure_entropy_reward: float = 0.0
     anti_hack_penalty: float = 0.0
+    regression_penalty: float = 0.0
     reasoning_consistency_reward: float = 0.0
     oracle_reasoning_reward: float = 0.0
     patch_validation_signal: float = 0.0
     noop_patch_penalty: float = 0.0
+    think_history_penalty: float = 0.0
     terminal_bonus: float = 0.0
     total_reward: float = 0.0
 
@@ -328,10 +330,12 @@ class RewardBreakdown:
             "causal_proximity": self.causal_proximity_reward,
             "failure_entropy": self.failure_entropy_reward,
             "anti_hack": self.anti_hack_penalty,
+            "regression": self.regression_penalty,
             "reasoning_consistency": self.reasoning_consistency_reward,
             "oracle_reasoning": self.oracle_reasoning_reward,
             "patch_validation": self.patch_validation_signal,
             "noop_patch": self.noop_patch_penalty,
+            "think_history": self.think_history_penalty,
             "terminal_bonus": self.terminal_bonus,
             "total": self.total_reward,
         }

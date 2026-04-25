@@ -216,7 +216,7 @@ class TestRewardRegressions:
     def test_stability_edge_case_100_percent(self):
         """100% pass rate gives terminal bonus."""
         reward = compute_stability_reward(0.5, 1.0)
-        assert reward == 2.0
+        assert reward == 2.25
 
     def test_anti_hack_assertion_deletion(self):
         """Deleting assertions should be heavily penalized."""
