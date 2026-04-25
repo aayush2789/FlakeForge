@@ -77,7 +77,7 @@ class EpisodeState(BaseModel):
     last_think_text: str = ""
     last_patch_text: str = ""
     last_reward: float = 0.0
-    last_reward_breakdown: Optional[Dict[str, float]] = None
+    last_reward_breakdown: Dict[str, float] = Field(default_factory=dict)
 
     # File tree
     file_tree: List[str] = Field(default_factory=list)

@@ -148,7 +148,7 @@ class LLMBackend:
         self.api_key = api_key or os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY", "EMPTY")
         
         self.max_tokens = int(max_tokens or os.environ.get("MAX_TOKENS", 4096))
-        self.temperature = float(temperature or os.environ.get("TEMPERATURE", 0.7))
+        self.temperature = float(temperature or os.environ.get("TEMPERATURE", 0.2))
 
     def generate(self, prompt: str, *, system_prompt: str) -> str:
         """Generate a completion using an OpenAI-compatible API."""
@@ -277,6 +277,24 @@ async def run_episode(
             step_result = await step_result
         step_output = _as_step_output_like(step_result)
         observation = step_output.observation
+
+        # Log result
+        reward = step_output.reward
+        breakdown = step_output.info.get("reward_breakdown", {})
+        done = step_output.done
+        pass_rate_after = step_output.state.current_pass_rate
+        pass_rate_before = observation.baseline_pass_rate
+
+        logger.info(
+            f"[EPISODE] RESULT step={step_output.state.step_count} reward={reward:.4f} "
+            f"pass_rate={pass_rate_before:.2f}→{pass_rate_after:.2f} "
+            f"done={done} reason={step_output.info.get('done_reason', '')}"
+        )
+        if breakdown and verbose:
+            logger.info(f"    Breakdown: {breakdown}")
+
+        if not step_output.info.get("patch_result", {}).get("success", False) and verbose:
+            logger.warning(f"    [DEBUG] Patch failed to apply. Raw response excerpt: {action.raw_response[:200]}...")
 
         # Track trajectory
         step_data = {

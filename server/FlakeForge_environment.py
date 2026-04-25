@@ -39,24 +39,46 @@ try:
     from server.patch_applier import apply_search_replace_patch
     from server.reward import compute_verifiable_reward
     from server.causal_graph import CrossRepoGraphBuilder
+    from server.docker_runner import DockerTestRunner
 except ImportError:
-    from ..models import (
-        FlakeForgeAction,
-        FlakeForgeObservation,
-        FlakeForgeState,
-        RunRecord,
-        PatchRecord,
-        RewardBreakdown,
-        failure_mode_entropy,
-    )
-    from ..server.state import EpisodeState
-    from ..server.deep_flakiness import (
-        build_deep_observation_signals,
-        extract_failure_frontier,
-    )
-    from ..server.patch_applier import apply_search_replace_patch
-    from ..server.reward import compute_verifiable_reward
-    from ..server.causal_graph import CrossRepoGraphBuilder
+    try:
+        from ..models import (
+            FlakeForgeAction,
+            FlakeForgeObservation,
+            FlakeForgeState,
+            RunRecord,
+            PatchRecord,
+            RewardBreakdown,
+            failure_mode_entropy,
+        )
+        from ..server.state import EpisodeState
+        from ..server.deep_flakiness import (
+            build_deep_observation_signals,
+            extract_failure_frontier,
+        )
+        from ..server.patch_applier import apply_search_replace_patch
+        from ..server.reward import compute_verifiable_reward
+        from ..server.causal_graph import CrossRepoGraphBuilder
+        from ..server.docker_runner import DockerTestRunner
+    except (ImportError, ValueError):
+        from FlakeForge.models import (
+            FlakeForgeAction,
+            FlakeForgeObservation,
+            FlakeForgeState,
+            RunRecord,
+            PatchRecord,
+            RewardBreakdown,
+            failure_mode_entropy,
+        )
+        from FlakeForge.server.state import EpisodeState
+        from FlakeForge.server.deep_flakiness import (
+            build_deep_observation_signals,
+            extract_failure_frontier,
+        )
+        from FlakeForge.server.patch_applier import apply_search_replace_patch
+        from FlakeForge.server.reward import compute_verifiable_reward
+        from FlakeForge.server.causal_graph import CrossRepoGraphBuilder
+        from FlakeForge.server.docker_runner import DockerTestRunner
 
 try:
     from utils.logger import get_logger
@@ -98,7 +120,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self.test_identifier = test_identifier or default_test
         self.max_steps = max_steps
         self.num_runs = num_runs
-        self.runner = runner
+        # Default to DockerTestRunner if no runner provided
+        self.runner = runner or DockerTestRunner(str(self.repo_path))
         self.chaos_runner = chaos_runner
         self._episode_state: Optional[EpisodeState] = None
         self._openenv_state: Optional[FlakeForgeState] = None
@@ -374,6 +397,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             last_think_text=self._episode_state.last_think_text,
             last_patch_text=self._episode_state.last_patch_text,
             last_reward=self._episode_state.last_reward,
+            reward_breakdown=self._episode_state.last_reward_breakdown,
+            reward=self._episode_state.last_reward,
         )
 
     def _run_tests(self, n: int) -> List[RunRecord]:
@@ -385,20 +410,16 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         results: List[RunRecord] = []
         for _ in range(n):
             try:
-                result = self.runner.run_single(self.test_identifier)
-                results.append(RunRecord(
-                    passed=result.get("passed", False),
-                    duration_ms=result.get("duration_ms", 0),
-                    error_type=result.get("error_type"),
-                    error_message=result.get("error_message"),
-                    stderr_excerpt=result.get("stderr", "")[:500],
-                ))
+                # DockerTestRunner uses run_test, not run_single
+                result = self.runner.run_test(self.test_identifier)
+                results.append(result)
             except Exception as exc:
                 results.append(RunRecord(
                     passed=False,
                     duration_ms=0,
                     error_type=type(exc).__name__,
                     error_message=str(exc)[:200],
+                    stderr_excerpt=None,
                 ))
         return results
 
