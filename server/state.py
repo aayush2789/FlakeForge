@@ -55,23 +55,8 @@ class EpisodeState:
     failure_pattern_summary: Dict[str, Any] = field(default_factory=dict)
     causal_hints: List[str] = field(default_factory=list)
     async_markers: List[str] = field(default_factory=list)
-
-    # ── RLVR Hybrid: Chain-of-Thought trajectory & Teacher Judge ──────────────
-    # Each step appends one dict: {step, action_type, justification,
-    # reasoning_steps, predicted_pass_rate_after, actual_pass_rate}
-    cot_trajectory: List[Dict[str, Any]] = field(default_factory=list)
-    # Set once at episode end by _finalize_episode(); range 0.0–10.0
-    teacher_judge_score: Optional[float] = None
-    # Verbal critique from the Teacher Judge LLM
-    teacher_judge_critique: str = ""
-
-    # ── Baseline regression snapshot: True if non-target tests were ALREADY
-    # failing before the agent took any action. Prevents test_flaky_simple
-    # (randomly fails 30%) from counting as an agent-introduced regression.
-    baseline_regression_status: bool = False
-
+    
     start_time: float = field(default_factory=time.time)
-
 
     def is_done(self) -> bool:
         return self.done or self.step_count >= self.max_steps or self.current_pass_rate >= 0.95

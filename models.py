@@ -68,10 +68,8 @@ class FlakeForgeAction(Action):
     action_type: ACTION_TYPES
     parameters: Dict[str, Any] = Field(default_factory=dict)
     hypothesis: Optional["HypothesisPayload"] = None
-    # RLVR Hybrid: judge_feedback is deprecated and ignored server-side.
-    # Kept for backward compatibility with clients that still send it.
     judge_feedback: Optional["JudgeFeedbackPayload"] = None
-    # Agent's predicted outcome before env evaluates the action.
+    # Improvement 1: agent's predicted outcome before env evaluates the action.
     # Penalised by reward shaping when wrong — accelerates credit assignment.
     predicted_pass_rate_after: Optional[float] = Field(
         default=None,
@@ -382,12 +380,6 @@ class FlakeForgeObservation(Observation):
     failure_pattern_summary: Optional[Dict[str, Any]] = None
     causal_hints: List[str] = Field(default_factory=list)
     reflection: Optional[Dict[str, Any]] = None
-    # RLVR Hybrid: Carries flake_category + is_infrastructure_sensitive from the
-    # manifest oracle so the agent can form a correct hypothesis earlier.
-    manifest_oracle_hint: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Oracle hints from flake_manifest.json: {flake_category, is_infrastructure_sensitive, chaos_profile_needed}",
-    )
 
     @field_validator("run_history")
     @classmethod
@@ -402,8 +394,6 @@ class FlakeForgeState(State):
     current_pass_rate: float = 0.0
     baseline_pass_rate: float = 0.0
     regression_detected: bool = False
-    # RLVR Hybrid: judge_scores replaced by deterministic manifest signals.
-    # Kept as empty stub so existing callers don't break.
     judge_scores: List[Dict[str, Any]] = Field(default_factory=list)
     # ── V2 Fields ─────────────────────────────────────────────────────
     chaos_pass_rate: Optional[float] = None
