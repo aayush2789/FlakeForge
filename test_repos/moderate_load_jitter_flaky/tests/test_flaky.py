@@ -4,14 +4,13 @@ Flaky tests for the moderate_load_jitter_flaky scenario.
 Primary flaky test:
     test_request_processing_should_succeed
       – expected: always succeeds
-      – actual: fails ~30-40% of the time due to queue saturation (gate 1)
-        and config stale reads (gate 2)
+      – actual: fails ~30% of the time due to queue saturation
 
 Secondary / helper tests:
     test_pool_accepts_single_job
       – should be stable; validates gate 1 in isolation
     test_config_read_returns_valid_flag
-      – mildly flaky on its own (~15%); documents gate 2 in isolation
+      – stable helper; verifies config access is not the flaky root cause
     test_multiple_requests_all_succeed
       – higher-visibility flaky test; submits 5 requests and asserts all pass
         (fails if even one hits a queue-full or stale-config error)
@@ -52,12 +51,8 @@ def test_request_processing_should_succeed():
 
     A single call to process_request() should always return success=True.
 
-    Gate 1: ~30% chance the queue reports full (race in submit())
-    Gate 2: ~15% chance config returns None (stale-read window in read())
-
-    Combined failure rate before any fix: ~35-40%
-    After gate 1 is fixed (remove the jitter branch): ~15%
-    After both gates are fixed: ~0%
+    Failure rate before fix: ~30%
+    After the queue-submit race is fixed: ~0%
     """
     result = process_request("req-001")
     assert result["success"], (
@@ -86,16 +81,12 @@ def test_pool_accepts_single_job():
 
 def test_config_read_returns_valid_flag():
     """
-    Gate 2 isolation: reading 'feature_flag' from a fresh ConfigStore
-    should never return None.
-
-    Fails ~15% of the time due to the simulated None-window in read().
+    Stable helper: reading 'feature_flag' from a fresh ConfigStore should
+    never return None.
     """
     store = ConfigStore(DEFAULT_CONFIG)
     flag = store.read("feature_flag")
-    assert flag is not None, (
-        "ConfigStore.read() returned None - caught the stale-refresh window"
-    )
+    assert flag is not None
     assert flag is True
 
 
@@ -103,9 +94,9 @@ def test_multiple_requests_all_succeed():
     """
     Stress variant: submit 5 independent requests, all should succeed.
 
-    Failure probability with both gates active:
-        P(at least one fails) = 1 - (1 - 0.38)^5  ≈  91%
-    So this test will almost always fail until both gates are fixed, making
+    Failure probability with the queue gate active:
+        P(at least one fails) = 1 - (1 - 0.30)^5  ~= 83%
+    So this test will usually fail until the queue gate is fixed, making
     it a good high-signal target during the repair episode.
     """
     errors = []

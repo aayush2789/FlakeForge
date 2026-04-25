@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import math
 import os
+import runpy
 import traceback
 import uuid
 from collections import Counter
@@ -162,6 +163,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         episode_id = episode_id or str(uuid.uuid4())[:8]
         logger.info("[ENV] RESET episode=%s test=%s", episode_id, self.test_identifier)
+
+        self._reset_demo_repo_if_present()
 
         # Read source files
         test_source, source_under_test = self._read_sources()
@@ -619,8 +622,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
     def _preflight_gate(
         self,
         *,
-        quick_runs: int = 5,
-        confirm_runs: int = 10,
+        quick_runs: int = 10,
+        confirm_runs: int = 20,
         drop_deterministic_bugs: bool = True,
     ) -> Dict[str, Any]:
         """Classify environment before training: sanity → determinism → flakiness.
@@ -820,6 +823,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
     def _synthetic_runs(self, n: int) -> List[RunRecord]:
         """Generate synthetic run results for development/testing."""
         import random
+        from server.docker_runner import RunRecord
         results = []
         for _ in range(n):
             passed = random.random() > 0.5
@@ -828,6 +832,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 duration_ms=random.randint(10, 500),
                 error_type=None if passed else "TimeoutError",
                 error_message=None if passed else "Operation timed out",
+                stderr_excerpt=None,
             ))
         return results
 
@@ -1045,6 +1050,18 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         if self._episode_state and self._episode_state.step_count >= self.max_steps:
             return "max_steps_reached"
         return "unknown"
+
+    def _reset_demo_repo_if_present(self) -> None:
+        """Restore bundled demo repos before each episode when they provide a reset script."""
+        if os.environ.get("FF_SKIP_DEMO_RESET", "0") == "1":
+            return
+        reset_script = self.repo_path / "reset_demo.py"
+        if not reset_script.exists():
+            return
+        try:
+            runpy.run_path(str(reset_script), run_name="__main__")
+        except Exception as exc:
+            logger.warning("[ENV] Demo reset script failed: %s", exc)
 
     @property
     def state(self) -> FlakeForgeState:

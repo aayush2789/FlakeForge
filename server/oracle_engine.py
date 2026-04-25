@@ -175,7 +175,15 @@ class RaceConditionOracle(OraclePlugin):
 
     category = "async_wait"
 
-    _RACE_PATTERNS = ("wait_for", "sleep(", "asyncio.wait_for", "timeout=")
+    _RACE_PATTERNS = (
+        "wait_for",
+        "sleep(",
+        "asyncio.wait_for",
+        "timeout=",
+        "random.random",
+        "queue_full",
+        "QUEUE_CAPACITY",
+    )
     _SYNC_PATTERNS = tuple(s.split(".")[-1].lower() for s in _SYNC_PRIMITIVES)
 
     def verify(

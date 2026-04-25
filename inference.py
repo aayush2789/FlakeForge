@@ -550,6 +550,8 @@ def run_inference(
             max_steps=max_steps,
             num_runs=num_runs,
         )
+        # Force preflight to use the requested num_runs for confirm stage
+        env._preflight_gate(confirm_runs=num_runs)
 
         # Run episode
         result = _run_async(run_episode(env, agent, verbose=verbose))
@@ -580,7 +582,7 @@ def main() -> None:
     parser.add_argument("--test-id", default=_default_test_id(), help="Target test identifier")
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"), help="LLM model name")
     parser.add_argument("--max-steps", type=int, default=None, help="Max episode steps")
-    parser.add_argument("--num-runs", type=int, default=10, help="Repeated test runs per step")
+    parser.add_argument("--num-runs", type=int, default=int(os.environ.get("NUM_RUNS", 10)), help="Repeated test runs per step")
     parser.add_argument("--api-base", default=os.environ.get("API_BASE_URL") or os.environ.get("OPENAI_API_BASE"), help="OpenAI-compatible base URL")
     parser.add_argument("--api-key", default=os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY"), help="API key")
     parser.add_argument("--quiet", action="store_true", help="Disable verbose logging")

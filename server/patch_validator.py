@@ -143,6 +143,18 @@ def _added_lines_for_hunks(hunks: Sequence[Any]) -> List[str]:
     return added
 
 
+def _added_lines_from_diff(diff_text: str) -> List[str]:
+    """Return real added lines from a unified diff, ignoring file/hunk headers."""
+    added: List[str] = []
+    for line in (diff_text or "").splitlines():
+        if not line.startswith("+"):
+            continue
+        if line.startswith("+++") or line.startswith("+@@"):
+            continue
+        added.append(line[1:])
+    return added
+
+
 def _hard_anti_hack_errors(hunks: Sequence[Any]) -> List[str]:
     errors: List[str] = []
     for hunk in hunks:
@@ -345,9 +357,14 @@ def _reasoning_alignment_errors(
                             f"reasoning_action_misalignment: cache decorator still present on {key}::{target_entity}"
                         )
 
-                if ("lock" in reason or "semaphore" in reason) and not re.search(
-                    r"\b(Lock|RLock|Semaphore|Event)\b", _node_text(post, post_node)
-                ):
+                post_node_text = _node_text(post, post_node)
+                uses_sync_primitive = bool(
+                    re.search(r"\b(Lock|RLock|Semaphore|Event)\b", post_node_text)
+                    or re.search(r"\bwith\s+[\w.]*_(?:lock|rlock|semaphore|event)\s*:", post_node_text)
+                    or re.search(r"\bwith\s+[\w.]*\.(?:lock|rlock|semaphore|event)\s*:", post_node_text)
+                    or re.search(r"\b(?:acquire|release)\s*\(", post_node_text)
+                )
+                if ("lock" in reason or "semaphore" in reason) and not uses_sync_primitive:
                     errors.append(
                         f"reasoning_action_misalignment: claim mentions synchronization "
                         f"but {key}::{target_entity} does not use a sync primitive"
@@ -492,7 +509,11 @@ class PatchValidator:
         modified_sources: Dict[str, str] = sim.get("modified_sources") or {}
         original_sources: Dict[str, str] = sim.get("original_sources") or sim.get("rollback_snapshots") or {}
         lines_changed = int(sim.get("lines_changed") or 0)
-        added_lines = _added_lines_for_hunks(hunks)
+        # Prefer the simulated diff for smell checks. Semantic/fuzzy fallbacks
+        # may clean up malformed model hunk text before producing final code.
+        added_lines = _added_lines_from_diff(sim.get("diff") or "")
+        if not added_lines:
+            added_lines = _added_lines_for_hunks(hunks)
 
         # ── Stage 5 (partial): minimal destructiveness ─────────────────────
         if lines_changed > 120:

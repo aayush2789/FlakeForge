@@ -1,4 +1,11 @@
-"""
+"""Reset the moderate flaky demo repo back to its original flaky state."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+SOURCE = '''"""
 Moderate flaky target for FlakeForge testing.
 
 Root cause: a worker pool that reports queue-full under simulated concurrent
@@ -27,7 +34,14 @@ class WorkerPool:
         self._lock = Lock()
 
     def submit(self, job: dict[str, Any]) -> bool:
-        """Submit a job. Returns False when the queue is full."""
+        """Submit a job. Returns False when the queue is full.
+
+        The real bug: the capacity check is effectively performed before the
+        lock, so simulated concurrent load can falsely report a full queue.
+        """
+        if random.random() < 0.30:
+            return False
+
         with self._lock:
             if len(self._queue) >= self.QUEUE_CAPACITY:
                 return False
@@ -49,7 +63,7 @@ class ConfigStore:
     """Small config store used by the request pipeline."""
 
     def __init__(self, initial: dict[str, Any]) -> None:
-        self._data: dict[str, Any] = dict(initial)
+        self._data: dict[str, Any] | None = dict(initial)
         self._refresh_lock = Lock()
 
     def read(self, key: str) -> Any:
@@ -113,3 +127,14 @@ def reset_state() -> None:
     global _pool, _config
     _pool = WorkerPool()
     _config = ConfigStore(DEFAULT_CONFIG)
+'''
+
+
+def main() -> None:
+    path = Path(__file__).with_name("source.py")
+    path.write_text(SOURCE, encoding="utf-8")
+    print(f"Reset {path}")
+
+
+if __name__ == "__main__":
+    main()
