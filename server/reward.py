@@ -444,7 +444,7 @@ def compute_verifiable_reward(
         action.patch_text, files_modified, lines_changed,
     )
     breakdown.noop_patch_penalty = -0.5 if patch_applied and noop_patch else 0.0
-    breakdown.protected_file_penalty = -2.0 if protected_file else 0.0
+
 
     # ── Scaled regression penalty (was hard -3.0 × 2.0 = -6.0) ──────────────
     if regression_detected:
@@ -517,7 +517,6 @@ def compute_verifiable_reward(
         + breakdown.diversity_penalty     * 1.0
         + breakdown.claim_novelty_reward  * 1.0
         + breakdown.noop_patch_penalty    * 1.0
-        + breakdown.protected_file_penalty * 1.0
         + breakdown.regression_penalty    * 1.5     # scaled, not fixed -6
         + breakdown.terminal_bonus        * 1.0,
         4,
