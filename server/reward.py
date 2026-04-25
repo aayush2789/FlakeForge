@@ -101,14 +101,22 @@ def compute_format_reward(action: FlakeForgeAction) -> float:
 def compute_compile_reward(
     patch_applied_successfully: bool,
     syntax_error: Optional[str] = None,
+    *,
+    rejected_by_validator: bool = False,
+    rolled_back: bool = False,
 ) -> float:
     """Check that the patched file compiles without errors.
 
     Returns:
         1.0 if patch applied + no syntax errors
         0.5 if patch applied but has warnings
-       -1.0 if syntax error
+       -1.0 if patch failed for generic reasons (not validator rejection)
+        0.0 if patch was rejected by PatchValidator (penalty lives in patch_validation_signal)
+        0.0 if apply was rolled back after a sanity syntax check (disk restored)
+       -0.5 if syntax error after successful apply
     """
+    if rejected_by_validator or rolled_back:
+        return 0.0
     if not patch_applied_successfully:
         return -1.0
     if syntax_error:
@@ -406,7 +414,9 @@ def compute_verifiable_reward(
     history: List[Dict[str, Any]] = think_history or []
 
     patch_applied = patch_result.get("success", False)
-    syntax_error = patch_result.get("error") if not patch_applied else None
+    rejected_by_validator = bool(patch_result.get("rejected_by_validator", False))
+    rolled_back = bool(patch_result.get("rolled_back", False))
+    syntax_error = patch_result.get("syntax_error") if patch_applied else None
     files_modified = patch_result.get("files_modified", [])
     lines_changed = patch_result.get("lines_changed", 0)
     noop_patch = bool(patch_result.get("noop", False))
@@ -431,7 +441,26 @@ def compute_verifiable_reward(
 
     breakdown = RewardBreakdown()
     breakdown.format_reward = compute_format_reward(action)
-    breakdown.compile_reward = compute_compile_reward(patch_applied, syntax_error)
+    breakdown.compile_reward = compute_compile_reward(
+        patch_applied,
+        syntax_error,
+        rejected_by_validator=rejected_by_validator,
+        rolled_back=rolled_back,
+    )
+
+    # PatchValidator shaping: invalid patch → -0.3; valid → +0.2 × validation score
+    if rejected_by_validator:
+        breakdown.patch_validation_signal = -0.3
+    elif patch_applied and patch_result.get("validation_score") is not None:
+        try:
+            vs = float(patch_result["validation_score"])
+            breakdown.patch_validation_signal = round(0.2 * max(0.0, min(1.0, vs)), 4)
+        except (TypeError, ValueError):
+            breakdown.patch_validation_signal = 0.0
+    elif patch_applied:
+        breakdown.patch_validation_signal = 0.0
+    else:
+        breakdown.patch_validation_signal = 0.0
     breakdown.stability_reward = compute_stability_reward(baseline_pass_rate, post_pass_rate)
     breakdown.causal_proximity_reward = compute_causal_proximity_reward(
         files_modified,
@@ -516,6 +545,7 @@ def compute_verifiable_reward(
         + oracle_component
         + breakdown.diversity_penalty     * 1.0
         + breakdown.claim_novelty_reward  * 1.0
+        + breakdown.patch_validation_signal * 1.0
         + breakdown.noop_patch_penalty    * 1.0
         + breakdown.protected_file_penalty * 1.0
         + breakdown.regression_penalty    * 1.5     # scaled, not fixed -6

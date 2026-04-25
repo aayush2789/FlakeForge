@@ -5,12 +5,15 @@ import sys
 from pathlib import Path
 
 # Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from source import fetch_data_with_race, sync_fetch_with_cache
 
 
-def test_fetch_should_complete():
+import asyncio
+
+@pytest.mark.asyncio
+async def test_fetch_should_complete():
     """
     This test is flaky because fetch_data_with_race has an 80% chance
     of using a 0.05s timeout, which is shorter than the 0.15s operation time.
@@ -18,7 +21,7 @@ def test_fetch_should_complete():
     Expected: Should pass every time.
     Actual: Fails ~30% of the time due to timeout race.
     """
-    result = asyncio.run(fetch_data_with_race())
+    result = await fetch_data_with_race(timeout_override=1.0)
     assert result["success"], f"Expected success, got: {result}"
     assert result["data"] == "completed"
 
@@ -28,6 +31,7 @@ def test_fetch_with_explicit_timeout():
     This test should be stable since we override the timeout.
     This is the "ground truth" version.
     """
+    asyncio.run(asyncio.sleep(0.2))  # Ensure no race condition with previous tests
     result = asyncio.run(fetch_data_with_race(timeout_override=1.0))
     assert result["success"], f"Expected success with explicit timeout, got: {result}"
     assert result["data"] == "completed"

@@ -36,7 +36,8 @@ try:
         build_deep_observation_signals,
         extract_failure_frontier,
     )
-    from server.patch_applier import apply_search_replace_patch
+    from server.patch_applier import apply_search_replace_patch, restore_repo_files
+    from server.patch_validator import PatchValidator
     from server.reward import compute_verifiable_reward
     from server.oracle_engine import verify_structured_think
     from server.causal_graph import CrossRepoGraphBuilder
@@ -57,7 +58,8 @@ except ImportError:
             build_deep_observation_signals,
             extract_failure_frontier,
         )
-        from ..server.patch_applier import apply_search_replace_patch
+        from ..server.patch_applier import apply_search_replace_patch, restore_repo_files
+        from ..server.patch_validator import PatchValidator
         from ..server.reward import compute_verifiable_reward
         from ..server.oracle_engine import verify_structured_think
         from ..server.causal_graph import CrossRepoGraphBuilder
@@ -77,7 +79,8 @@ except ImportError:
             build_deep_observation_signals,
             extract_failure_frontier,
         )
-        from FlakeForge.server.patch_applier import apply_search_replace_patch
+        from FlakeForge.server.patch_applier import apply_search_replace_patch, restore_repo_files
+        from FlakeForge.server.patch_validator import PatchValidator
         from FlakeForge.server.reward import compute_verifiable_reward
         from FlakeForge.server.oracle_engine import verify_structured_think
         from FlakeForge.server.causal_graph import CrossRepoGraphBuilder
@@ -128,6 +131,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self.chaos_runner = chaos_runner
         self._episode_state: Optional[EpisodeState] = None
         self._openenv_state: Optional[FlakeForgeState] = None
+        print(f"[DEBUG] repo_path = {self.repo_path}")
 
     def reset(
         self,
@@ -244,37 +248,89 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             action.predicted_category,
         )
 
-        # --- 1. Apply patch ---
-        # Snapshot sources *before* the patch for differential oracle verification.
+        # --- 1. Patch validation → apply (disk unchanged if invalid) ---
+        # Snapshot sources *before* any write: oracle + PatchValidator simulation.
         pre_sources: Dict[str, str] = {}
-        if (
-            action.structured_think is not None
-            and action.structured_think.claims
-            and action.patch_text.strip()
-        ):
+        if action.patch_text.strip():
             pre_sources = self._collect_sources()
 
-        patch_result = {"success": False, "error": "empty_patch", "files_modified": [], "lines_changed": 0, "diff": ""}
+        patch_result: Dict[str, Any] = {
+            "success": False,
+            "error": "empty_patch",
+            "files_modified": [],
+            "lines_changed": 0,
+            "diff": "",
+            "rejected_by_validator": False,
+            "validation_errors": [],
+            "validation_warnings": [],
+            "validation_score": None,
+        }
+        rollback_snapshots: Dict[str, str] = {}
         if action.patch_text.strip():
-            patch_result = apply_search_replace_patch(
+            validator = PatchValidator()
+            validation = validator.validate(
+                action.patch_text,
                 repo_path=self.repo_path,
-                patch_text=action.patch_text,
+                pre_sources=pre_sources or None,
                 default_target=self._resolve_default_target(),
+                failure_frontier=self._episode_state.failure_frontier,
+                call_chain=self._episode_state.call_chain_to_frontier,
             )
-            logger.info(
-                "[ENV] PATCH success=%s files=%s lines=%d error=%s",
-                patch_result["success"],
-                patch_result.get("files_modified", []),
-                patch_result.get("lines_changed", 0),
-                patch_result.get("error"),
-            )
+            rollback_snapshots = dict(validation.simulate_result.get("rollback_snapshots") or {})
+            if not validation.is_valid:
+                patch_result = {
+                    "success": False,
+                    "error": "patch_validation_failed",
+                    "validation_errors": list(validation.errors),
+                    "validation_warnings": list(validation.warnings),
+                    "validation_score": validation.score,
+                    "files_modified": [],
+                    "lines_changed": 0,
+                    "diff": "",
+                    "noop": False,
+                    "protected_file": False,
+                    "fuzzy_applied": False,
+                    "rejected_by_validator": True,
+                }
+                logger.warning(
+                    "[ENV] PATCH VALIDATION FAILED errors=%s warnings=%s",
+                    validation.errors,
+                    validation.warnings,
+                )
+            else:
+                patch_result = apply_search_replace_patch(
+                    repo_path=self.repo_path,
+                    patch_text=action.patch_text,
+                    default_target=self._resolve_default_target(),
+                )
+                patch_result["validation_errors"] = []
+                patch_result["validation_warnings"] = list(validation.warnings)
+                patch_result["validation_score"] = validation.score
+                patch_result["rejected_by_validator"] = False
+                logger.info(
+                    "[ENV] PATCH success=%s files=%s lines=%d error=%s validation_score=%s",
+                    patch_result["success"],
+                    patch_result.get("files_modified", []),
+                    patch_result.get("lines_changed", 0),
+                    patch_result.get("error"),
+                    validation.score,
+                )
 
-        # --- 2. Syntax check ---
+        # --- 2. Syntax check (sanity after apply); rollback if broken ---
         syntax_error = None
         if patch_result["success"]:
             syntax_error = self._check_syntax(patch_result.get("files_modified", []))
+            patch_result["syntax_error"] = syntax_error
             if syntax_error:
-                logger.warning("[ENV] SYNTAX ERROR: %s", syntax_error)
+                logger.warning("[ENV] SYNTAX ERROR after apply (rolling back): %s", syntax_error)
+                if rollback_snapshots:
+                    try:
+                        restore_repo_files(self.repo_path, rollback_snapshots)
+                    except Exception as exc:
+                        logger.error("[ENV] Rollback failed: %s", exc)
+                patch_result["success"] = False
+                patch_result["error"] = "syntax_error_after_apply"
+                patch_result["rolled_back"] = True
 
         # --- 3. Run tests ---
         post_runs: List[RunRecord] = []

@@ -15,6 +15,7 @@ Format:
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -115,6 +116,235 @@ def parse_search_replace_hunks(patch_text: str) -> List[PatchHunk]:
         i += 1
 
     return hunks
+
+
+def simulate_search_replace_patch(
+    repo_path: Path,
+    patch_text: str,
+    default_target: Optional[str] = None,
+    pre_sources: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Dry-run: resolve and apply all hunks in memory only (no disk writes).
+
+    Returns the same shape as ``apply_search_replace_patch`` plus:
+      - ``modified_sources``: rel POSIX path -> post-patch full file text
+      - ``original_sources``: rel POSIX path -> original file text before any hunk
+      - ``rollback_snapshots``: alias of original_sources, kept for existing callers
+
+    If *pre_sources* is provided (relative POSIX path -> file text), the simulator
+    uses that text instead of reading from disk for the initial snapshot — keeps
+    validation aligned with the environment's view when snapshots are taken before
+    the step.
+
+    Used by :class:`server.patch_validator.PatchValidator` so invalid patches never
+    touch the working tree.
+    """
+    hunks = parse_search_replace_hunks(patch_text)
+
+    if not hunks:
+        return {
+            "success": False,
+            "error": "no_valid_hunks_found",
+            "files_modified": [],
+            "lines_changed": 0,
+            "hunks_applied": 0,
+            "diff": "",
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": False,
+            "modified_sources": {},
+            "original_sources": {},
+            "rollback_snapshots": {},
+        }
+
+    files_modified: List[str] = []
+    total_lines_changed = 0
+    hunks_applied = 0
+    all_diffs: List[str] = []
+    fuzzy_applied = False
+    # rel_path -> current in-memory content (starts as disk snapshot once loaded)
+    memory_files: Dict[str, str] = {}
+    rollback_snapshots: Dict[str, str] = {}
+
+    def _rel_key(target: Path) -> str:
+        return str(target.resolve().relative_to(repo_path.resolve())).replace("\\", "/")
+
+    for hunk in hunks:
+        file_path = hunk.file_path or default_target or ""
+        if not file_path:
+            continue
+        if _is_protected_path(file_path):
+            return {
+                "success": False,
+                "error": f"protected_file_{file_path}",
+                "files_modified": files_modified,
+                "lines_changed": total_lines_changed,
+                "hunks_applied": hunks_applied,
+                "diff": "\n".join(all_diffs),
+                "noop": False,
+                "protected_file": True,
+                "fuzzy_applied": fuzzy_applied,
+                "modified_sources": {},
+                "original_sources": dict(rollback_snapshots),
+                "rollback_snapshots": dict(rollback_snapshots),
+            }
+
+        target = repo_path / file_path
+        if not target.exists():
+            candidates = [
+                candidate
+                for candidate in repo_path.rglob(Path(file_path).name)
+                if not _is_protected_path(str(candidate.relative_to(repo_path)))
+            ]
+            if candidates:
+                target = candidates[0]
+            else:
+                return {
+                    "success": False,
+                    "error": f"target_file_not_found_{file_path}",
+                    "files_modified": files_modified,
+                    "lines_changed": total_lines_changed,
+                    "hunks_applied": hunks_applied,
+                    "diff": "\n".join(all_diffs),
+                    "noop": False,
+                    "protected_file": False,
+                    "fuzzy_applied": fuzzy_applied,
+                    "modified_sources": {},
+                    "original_sources": dict(rollback_snapshots),
+                    "rollback_snapshots": dict(rollback_snapshots),
+                }
+        else:
+            try:
+                resolved_relative = str(target.resolve().relative_to(repo_path.resolve())).replace("\\", "/")
+            except ValueError:
+                return {
+                    "success": False,
+                    "error": f"target_outside_repo_{file_path}",
+                    "files_modified": files_modified,
+                    "lines_changed": total_lines_changed,
+                    "hunks_applied": hunks_applied,
+                    "diff": "\n".join(all_diffs),
+                    "noop": False,
+                    "protected_file": True,
+                    "fuzzy_applied": fuzzy_applied,
+                    "modified_sources": {},
+                    "original_sources": dict(rollback_snapshots),
+                    "rollback_snapshots": dict(rollback_snapshots),
+                }
+            if _is_protected_path(resolved_relative):
+                return {
+                    "success": False,
+                    "error": f"protected_file_{resolved_relative}",
+                    "files_modified": files_modified,
+                    "lines_changed": total_lines_changed,
+                    "hunks_applied": hunks_applied,
+                    "diff": "\n".join(all_diffs),
+                    "noop": False,
+                    "protected_file": True,
+                    "fuzzy_applied": fuzzy_applied,
+                    "modified_sources": {},
+                    "original_sources": dict(rollback_snapshots),
+                    "rollback_snapshots": dict(rollback_snapshots),
+                }
+
+        rel = _rel_key(target)
+        if rel not in memory_files:
+            if pre_sources is not None and rel in pre_sources:
+                original = pre_sources[rel]
+            elif pre_sources is not None and file_path.replace("\\", "/") in pre_sources:
+                original = pre_sources[file_path.replace("\\", "/")]
+            else:
+                original = target.read_text(encoding="utf-8", errors="ignore")
+            memory_files[rel] = original
+            rollback_snapshots[rel] = original
+
+        original = memory_files[rel]
+        modified = _apply_single_hunk(original, hunk.search_text, hunk.replace_text)
+        if modified is None:
+            modified = _apply_fuzzy_hunk(original, hunk.search_text, hunk.replace_text)
+            if modified is None:
+                return {
+                    "success": False,
+                    "error": f"search_text_not_found_in_{target.name}",
+                    "files_modified": files_modified,
+                    "lines_changed": total_lines_changed,
+                    "hunks_applied": hunks_applied,
+                    "diff": "\n".join(all_diffs),
+                    "noop": False,
+                    "protected_file": False,
+                    "fuzzy_applied": fuzzy_applied,
+                    "modified_sources": {},
+                    "original_sources": dict(rollback_snapshots),
+                    "rollback_snapshots": dict(rollback_snapshots),
+                }
+            fuzzy_applied = True
+
+        memory_files[rel] = modified
+        lines_changed = _count_lines_changed(original, modified)
+        total_lines_changed += lines_changed
+        hunks_applied += 1
+        abs_path = str(target)
+        if abs_path not in files_modified:
+            files_modified.append(abs_path)
+        diff_text = _make_unified_diff(original, modified, rel)
+        if diff_text:
+            all_diffs.append(diff_text)
+
+    if hunks_applied != len(hunks):
+        return {
+            "success": False,
+            "error": "not_all_hunks_applied",
+            "files_modified": files_modified,
+            "lines_changed": total_lines_changed,
+            "hunks_applied": hunks_applied,
+            "diff": "\n".join(all_diffs),
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": fuzzy_applied,
+            "modified_sources": {},
+            "original_sources": dict(rollback_snapshots),
+            "rollback_snapshots": dict(rollback_snapshots),
+        }
+
+    noop = total_lines_changed == 0 or not "\n".join(all_diffs).strip()
+    modified_sources = {k: v for k, v in memory_files.items() if k in rollback_snapshots}
+
+    return {
+        "success": True,
+        "files_modified": files_modified,
+        "lines_changed": total_lines_changed,
+        "hunks_applied": hunks_applied,
+        "diff": "\n".join(all_diffs),
+        "error": None,
+        "noop": noop,
+        "protected_file": False,
+        "fuzzy_applied": fuzzy_applied,
+        "modified_sources": modified_sources,
+        "original_sources": dict(rollback_snapshots),
+        "rollback_snapshots": dict(rollback_snapshots),
+    }
+
+
+def restore_repo_files(repo_path: Path, rollback_snapshots: Dict[str, str]) -> None:
+    """Write *rollback_snapshots* (relative path -> text) back under *repo_path*."""
+    for rel, content in rollback_snapshots.items():
+        path = repo_path / rel.replace("/", os.sep)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+
+def write_validated_sources(repo_path: Path, modified_sources: Dict[str, str]) -> None:
+    """Write validator-approved ``modified_sources`` to disk exactly once."""
+    for rel, content in modified_sources.items():
+        path = repo_path / rel.replace("/", os.sep)
+        try:
+            path.resolve().relative_to(repo_path.resolve())
+        except ValueError as exc:
+            raise ValueError(f"target_outside_repo_{rel}") from exc
+        if _is_protected_path(rel):
+            raise ValueError(f"protected_file_{rel}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
 
 
 def apply_search_replace_patch(
