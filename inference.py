@@ -337,6 +337,7 @@ async def run_episode(
             "predicted_category": action.predicted_category,
             "predicted_confidence": action.predicted_confidence,
             "think_text": action.think_text[:500],
+            "patch_text": action.patch_text,
             "patch_applied": step_output.info.get("patch_result", {}).get("success", False),
             "reward": step_output.reward,
             "reward_breakdown": step_output.info.get("reward_breakdown", {}),
