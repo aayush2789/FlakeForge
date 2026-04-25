@@ -241,9 +241,8 @@ def _build_default_runner(repo_path: str) -> Optional[Any]:
 
 
 def _should_use_remote_env() -> bool:
-    base_url = (os.environ.get("ENV_BASE_URL") or "").strip()
-    use_docker = os.environ.get("USE_DOCKER_IMAGE", "0").strip().lower() in {"1", "true", "yes"}
-    return bool(base_url) or use_docker
+    # Force local environment for V3 evaluation
+    return False
 
 
 def _run_async(coro: Any) -> Any:
@@ -300,7 +299,7 @@ async def run_episode(
 
         if verbose:
             logger.info(
-                "[EPISODE] STEP %d → category=%s confidence=%.2f patch_len=%d",
+                "[EPISODE] STEP %d -> category=%s confidence=%.2f patch_len=%d",
                 observation.step + 1,
                 action.predicted_category,
                 action.predicted_confidence,
@@ -323,7 +322,7 @@ async def run_episode(
 
         logger.info(
             f"[EPISODE] RESULT step={step_output.state.step_count} reward={reward:.4f} "
-            f"pass_rate={pass_rate_before:.2f}→{pass_rate_after:.2f} "
+            f"pass_rate={pass_rate_before:.2f}->{pass_rate_after:.2f} "
             f"done={done} reason={step_output.info.get('done_reason', '')}"
         )
         if breakdown and verbose:
@@ -352,7 +351,7 @@ async def run_episode(
 
         if verbose:
             logger.info(
-                "[EPISODE] RESULT step=%d reward=%.4f pass_rate=%.2f→%.2f done=%s reason=%s",
+                "[EPISODE] RESULT step=%d reward=%.4f pass_rate=%.2f->%.2f done=%s reason=%s",
                 step_data["step"],
                 step_output.reward,
                 observation.baseline_pass_rate,
@@ -443,7 +442,6 @@ def run_inference(
             test_identifier=test_identifier,
             max_steps=max_steps,
             num_runs=num_runs,
-            runner=runner,
         )
 
         # Run episode

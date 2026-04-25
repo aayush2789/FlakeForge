@@ -341,7 +341,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         )
 
         logger.info(
-            "[ENV] REWARD total=%.4f breakdown=%s done=%s pass_rate=%.2f→%.2f",
+            "[ENV] REWARD total=%.4f breakdown=%s done=%s pass_rate=%.2f->%.2f",
             reward_breakdown.total_reward,
             {k: round(v, 3) for k, v in reward_breakdown.to_dict().items()},
             done,
