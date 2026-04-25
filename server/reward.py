@@ -1,17 +1,20 @@
-"""V3 Reward Architecture — Six-signal verifiable reward, no LLM judge.
+"""V3 Reward Architecture — seven-signal verifiable reward, no LLM judge.
 
-Each signal is deterministic and derived from execution outcomes:
-1. Format Compliance: Valid <think>+<patch> structure
-2. Compile/Syntax: Modified file parses without errors
-3. Stability Delta: Pass-rate improvement over baseline
-4. Causal Proximity: Patch touches causal frontier, not distant code
-5. Failure Entropy Reduction: Fewer distinct error modes after fix
-6. Anti-Hack Penalty: Catch test deletion, sleep injection, broad try/except
+Signals
+-------
+1. Format Compliance: valid JSON <think> + valid <patch> structure
+2. Compile/Syntax: modified file parses without errors
+3. Stability Delta: pass-rate improvement over baseline          (weight 0.60)
+4. Causal Proximity: patch touches causal frontier
+5. Failure Entropy Reduction: fewer distinct error modes
+6. Anti-Hack Penalty: sleep injection, test deletion, skip decorators
+7. Oracle Reasoning: structured-claim differential verification   (weight 0.25)
+   (replaces the old free-form reasoning_consistency keyword check)
 
 Research basis:
-- DeepSeek R1: Format+correctness reward (no human prefs)
-- RLEF: Execution-verified compilability
-- Reflexion NeurIPS 2023: Self-consistency check for reasoning
+- DeepSeek R1: format+correctness reward (no human prefs)
+- RLEF: execution-verified compilability
+- Reflexion NeurIPS 2023: self-consistency for reasoning
 """
 
 from __future__ import annotations
@@ -41,37 +44,38 @@ except ImportError:
     )
 
 
-# ── Signal 1: Format Compliance ──────────────────────────────────────────────
+# ── Signal 1: Format Compliance ───────────────────────────────────────────────
 
 def compute_format_reward(action: FlakeForgeAction) -> float:
-    """Check that the model produced valid <think> and <patch> blocks.
+    """Check that the model produced a valid <think> JSON block and a <patch> block.
 
-    Returns:
-        1.0 if both blocks present with required fields
-        0.5 if only one block present
-        0.0 if neither
+    JSON think:  +0.5 if StructuredThink parsed without penalty.
+                 +0.25 if parsed with minor penalty.
+                  0.0 if completely malformed.
+    Patch block: +0.5 if valid search/replace hunk present.
     """
     score = 0.0
 
-    # Check think block
-    if action.think_text:
-        think = action.think_text.lower()
-        has_root_cause = "root cause:" in think or "root_cause:" in think
-        has_confidence = "confidence:" in think
-        has_evidence = any(word in think for word in ["evidence:", "because", "the ", "causing", "due to"])
-
-        if has_root_cause and has_confidence:
+    st = action.structured_think
+    if st is not None:
+        if st.claims and st.format_penalty == 0.0:
             score += 0.5
-        elif has_root_cause or has_confidence:
+        elif st.claims and st.format_penalty > -0.5:
             score += 0.25
+        # fully unparseable → 0.0 from think
+    else:
+        # Fallback: legacy keyword check for un-structured output.
+        if action.think_text:
+            think = action.think_text.lower()
+            if ("root cause:" in think or '"category"' in think) and "confidence" in think:
+                score += 0.25
 
-    # Check patch block
+    # Patch block (search/replace structure check).
     if action.patch_text:
         has_search = "<<<<<<< SEARCH" in action.patch_text or "<<<<<<<" in action.patch_text
         has_replace = ">>>>>>> REPLACE" in action.patch_text or ">>>>>>>" in action.patch_text
-        has_separator = "=======" in action.patch_text
-
-        if has_search and has_replace and has_separator:
+        has_sep = "=======" in action.patch_text
+        if has_search and has_replace and has_sep:
             score += 0.5
         elif has_search or has_replace:
             score += 0.25
@@ -272,7 +276,7 @@ def compute_anti_hack_penalty(
     return round(max(penalty, -2.0), 2)
 
 
-# ── Reasoning Consistency (Bonus Signal) ────────────────────────────────────
+# ── Reasoning Consistency (legacy fallback — kept for backward compat) ────────
 
 def compute_reasoning_consistency(
     predicted_category: str,
@@ -280,32 +284,22 @@ def compute_reasoning_consistency(
     think_text: str,
     patch_text: str,
 ) -> float:
-    """Check that the reasoning in <think> is consistent with the <patch>.
+    """Category match between predicted and patch-inferred root cause.
 
-    Verifies that the diagnosed root cause category matches what the
-    patch actually modifies. Prevents "vibe-coding" (reasoning that
-    sounds good but doesn't match the actual fix).
-
-    Returns:
-        Float in [-0.5, 0.5]
+    Used only when the oracle has not been run (no structured_think).
+    Returns: float in [-0.5, 0.5]
     """
     if not predicted_category or not inferred_category_from_patch:
         return 0.0
-
-    # Exact match
     if predicted_category == inferred_category_from_patch:
         return 0.5
-
-    # Related category match (e.g., concurrency ↔ async_wait)
     related = RELATED_CATEGORIES.get(predicted_category, set())
     if inferred_category_from_patch in related:
         return 0.25
-
-    # Mismatch — reasoning doesn't match what was actually changed
     return -0.5
 
 
-# ── Composite Reward ────────────────────────────────────────────────────────
+# ── Composite Reward ──────────────────────────────────────────────────────────
 
 def compute_verifiable_reward(
     action: FlakeForgeAction,
@@ -314,14 +308,23 @@ def compute_verifiable_reward(
     post_run_results: List[Dict[str, Any]],
     baseline_pass_rate: float,
     pre_entropy: float,
+    oracle_score: Optional[float] = None,
     regression_detected: bool = False,
 ) -> RewardBreakdown:
-    """Compute the full six-signal verifiable reward.
+    """Compute the full seven-signal verifiable reward.
 
-    All signals are deterministic and derived from execution outcomes.
-    No LLM judge required.
+    Weight allocation (oracle path):
+      stability_reward        × 2.0   (~0.60 of practical range)
+      oracle_reasoning_reward × 1.0   (~0.25)
+      causal_proximity        × 0.5
+      failure_entropy         × 0.5
+      format_reward           × 0.5
+      compile_reward          × 1.0
+      anti_hack_penalty       × 1.5
+      terminal_bonus          × 1.0
+
+    When oracle_score is None the legacy reasoning_consistency signal runs.
     """
-    # Patch metadata
     patch_applied = patch_result.get("success", False)
     syntax_error = patch_result.get("error") if not patch_applied else None
     files_modified = patch_result.get("files_modified", [])
@@ -330,11 +333,9 @@ def compute_verifiable_reward(
     protected_file = bool(patch_result.get("protected_file", False))
     regression_detected = bool(regression_detected or patch_result.get("regression_detected", False))
 
-    # Post-run results
     post_pass_count = sum(1 for r in post_run_results if r.get("passed", False))
     post_pass_rate = post_pass_count / max(len(post_run_results), 1)
 
-    # Post entropy
     post_errors = [r.get("error_type", "") for r in post_run_results if not r.get("passed", True)]
     post_counter = Counter(e for e in post_errors if e)
     if post_counter:
@@ -345,11 +346,9 @@ def compute_verifiable_reward(
     else:
         post_entropy = 0.0
 
-    # Inferred category from actual patch changes
     from agent.unified_agent import infer_category_from_patch
     inferred_cat = infer_category_from_patch(action.patch_text)
 
-    # Compute signals
     breakdown = RewardBreakdown()
     breakdown.format_reward = compute_format_reward(action)
     breakdown.compile_reward = compute_compile_reward(patch_applied, syntax_error)
@@ -362,27 +361,30 @@ def compute_verifiable_reward(
     )
     breakdown.failure_entropy_reward = compute_entropy_reward(pre_entropy, post_entropy)
     breakdown.anti_hack_penalty = compute_anti_hack_penalty(
-        action.patch_text,
-        files_modified,
-        lines_changed,
-    )
-    breakdown.reasoning_consistency_reward = compute_reasoning_consistency(
-        action.predicted_category,
-        inferred_cat,
-        action.think_text,
-        action.patch_text,
+        action.patch_text, files_modified, lines_changed,
     )
     breakdown.noop_patch_penalty = -0.5 if patch_applied and noop_patch else 0.0
     breakdown.protected_file_penalty = -2.0 if protected_file else 0.0
     breakdown.regression_penalty = -3.0 if regression_detected else 0.0
 
+    if oracle_score is not None:
+        breakdown.oracle_reasoning_reward = round(float(oracle_score), 4)
+        breakdown.reasoning_consistency_reward = 0.0
+    else:
+        breakdown.reasoning_consistency_reward = compute_reasoning_consistency(
+            action.predicted_category, inferred_cat, action.think_text, action.patch_text,
+        )
+        breakdown.oracle_reasoning_reward = 0.0
+
+    if patch_applied and post_run_results and post_pass_rate >= 1.0:
+        breakdown.terminal_bonus = 2.0
+    elif patch_applied and post_run_results and post_pass_rate > baseline_pass_rate + 0.3:
     # Terminal bonus for full stability
     if post_pass_rate >= 1.0 and not regression_detected:
         breakdown.terminal_bonus = 2.0
     elif post_pass_rate > baseline_pass_rate + 0.3 and not regression_detected:
         breakdown.terminal_bonus = 1.0
 
-    # Weighted total
     breakdown.total_reward = round(
         breakdown.format_reward * 0.5
         + breakdown.compile_reward * 1.0
@@ -390,6 +392,8 @@ def compute_verifiable_reward(
         + breakdown.causal_proximity_reward * 0.5
         + breakdown.failure_entropy_reward * 0.5
         + breakdown.anti_hack_penalty * 1.5
+        + breakdown.reasoning_consistency_reward * 0.5   # fallback path only
+        + breakdown.oracle_reasoning_reward * 1.0        # structured-claim oracle
         + breakdown.reasoning_consistency_reward * 0.5
         + breakdown.noop_patch_penalty * 1.0
         + breakdown.protected_file_penalty * 1.0

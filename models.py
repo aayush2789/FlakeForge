@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from openenv.core.env_server.types import Action, Observation, State
 from pydantic import BaseModel, Field, field_validator
@@ -60,6 +60,59 @@ RELATED_CATEGORIES = {
 }
 
 
+# ── Structured Think: machine-readable claim list ────────────────────────────
+
+ClaimPolarity = Literal["present", "absent"]
+ClaimVerdict = Literal["confirmed", "inconclusive", "refuted", "unverified"]
+
+
+class ThinkClaim(BaseModel):
+    """One structured assertion about a potential flakiness root cause.
+
+    The agent must produce a *list* of these in its think block (as JSON).
+    Each claim is independently verified by the OracleEngine against the
+    pre- and post-patch ASTs, yielding a partial score per claim.
+    """
+
+    claim_id: str = Field(description="Unique ID within this think block, e.g. 'c1'")
+    category: str = Field(description="Root cause category from ROOT_CAUSE_TYPES")
+    entity: str = Field(description="Name of the function/class/variable involved")
+    location: str = Field(
+        description="Fully-qualified location: 'path/to/file.py::ClassName.method_name'"
+    )
+    ast_node_type: str = Field(
+        default="",
+        description="Optional: expected libcst node type, e.g. 'FunctionDef', 'Decorator'",
+    )
+    polarity: ClaimPolarity = Field(
+        description="'present' = bug exists; 'absent' = bug was removed by the fix"
+    )
+    predicted_effect: str = Field(
+        default="",
+        description="One-sentence prediction of the expected pass-rate change after fix",
+    )
+    reason: str = Field(description="Short (≤40 words) causal justification")
+
+    # Filled in by oracle after verification — never set by the model.
+    verdict: ClaimVerdict = Field(default="unverified")
+    oracle_score: float = Field(default=0.0)
+
+
+class StructuredThink(BaseModel):
+    """Full structured think block: a list of claims + overall confidence."""
+
+    claims: List[ThinkClaim] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Format penalty injected by the parser (0.0 = perfect JSON, -1.0 = parse error)
+    format_penalty: float = Field(default=0.0, ge=-1.0, le=0.0)
+
+    @property
+    def primary_category(self) -> str:
+        if not self.claims:
+            return "unknown"
+        return self.claims[0].category
+
+
 # ── V3 Unified Action: <think> + <patch> ──────────────────────────────────────
 
 class FlakeForgeAction(Action):
@@ -70,6 +123,8 @@ class FlakeForgeAction(Action):
     # Parsed fields (populated by the environment after parsing raw_response)
     think_text: str = ""
     patch_text: str = ""
+    # Structured think block (parsed from JSON inside think_text)
+    structured_think: Optional[StructuredThink] = None
     # Inferred category from think block
     predicted_category: str = "unknown"
     predicted_confidence: float = 0.0
@@ -245,6 +300,7 @@ class RewardBreakdown:
     failure_entropy_reward: float = 0.0
     anti_hack_penalty: float = 0.0
     reasoning_consistency_reward: float = 0.0
+    oracle_reasoning_reward: float = 0.0   # NEW: structured-claim oracle score
     noop_patch_penalty: float = 0.0
     protected_file_penalty: float = 0.0
     regression_penalty: float = 0.0
@@ -260,6 +316,7 @@ class RewardBreakdown:
             "failure_entropy": self.failure_entropy_reward,
             "anti_hack": self.anti_hack_penalty,
             "reasoning_consistency": self.reasoning_consistency_reward,
+            "oracle_reasoning": self.oracle_reasoning_reward,
             "noop_patch": self.noop_patch_penalty,
             "protected_file": self.protected_file_penalty,
             "regression": self.regression_penalty,
