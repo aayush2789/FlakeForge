@@ -65,8 +65,15 @@ def build_patch_spec(action: FlakeForgeAction, resolved_target: Dict[str, Any]) 
         return {
             "operation": "wrap_with",
             "target": {"type": "function", "identifier": resolved_target.get("identifier", "test")},
-            "code_template": "with {lock_var}:\\n    {body}",
-            "parameters": {"lock_var": "_flakeforge_lock", "primitive": action.parameters.get("primitive", "threading.Lock")},
+            "code_template": "with {lock_expr}:",
+            "parameters": {
+                "lock_expr": {
+                    "lock": "threading.Lock()",
+                    "event": "threading.Event()",
+                    "barrier": "threading.Barrier(2)",
+                    "semaphore": "threading.Semaphore(1)",
+                }.get(action.parameters.get("primitive", "lock"), action.parameters.get("primitive", "lock")),
+            },
         }
     if c_action == "MOCK_DEPENDENCY":
         return {
