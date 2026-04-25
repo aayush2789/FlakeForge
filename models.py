@@ -254,6 +254,16 @@ class FlakeForgeObservation(Observation):
     patches_applied: List[PatchRecord] = Field(default_factory=list)
     total_diff_lines: int = 0
 
+    # ── V3.1 Hypothesis trail (per-step summaries for diversity tracking) ──
+    think_history: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Per-step summary dicts: {step, categories, entities, reason_signatures, "
+            "oracle_score, pass_rate_after, reward}.  Used by the reward system to "
+            "penalise repeated hypotheses and by the prompt builder to warn the agent."
+        ),
+    )
+
     # ── V3 Deep Flakiness Signals (AST-derived, <5ms) ────────────────────
     module_cache_violations: List[str] = Field(
         default_factory=list,
@@ -340,7 +350,7 @@ class FlakeForgeState(State):
 
 @dataclass
 class RewardBreakdown:
-    """Six-signal reward breakdown for transparency."""
+    """Eight-signal reward breakdown for transparency."""
     format_reward: float = 0.0
     compile_reward: float = 0.0
     stability_reward: float = 0.0
@@ -348,10 +358,13 @@ class RewardBreakdown:
     failure_entropy_reward: float = 0.0
     anti_hack_penalty: float = 0.0
     reasoning_consistency_reward: float = 0.0
-    oracle_reasoning_reward: float = 0.0   # NEW: structured-claim oracle score
+    oracle_reasoning_reward: float = 0.0
+    oracle_gate_penalty: float = 0.0       # hard gate when oracle strongly disagrees
+    diversity_penalty: float = 0.0         # penalise repeating same category across steps
+    claim_novelty_reward: float = 0.0      # reward genuinely new entities / reasoning
     noop_patch_penalty: float = 0.0
     protected_file_penalty: float = 0.0
-    regression_penalty: float = 0.0
+    regression_penalty: float = 0.0        # scaled by regression magnitude, not fixed
     terminal_bonus: float = 0.0
     total_reward: float = 0.0
 
@@ -365,6 +378,9 @@ class RewardBreakdown:
             "anti_hack": self.anti_hack_penalty,
             "reasoning_consistency": self.reasoning_consistency_reward,
             "oracle_reasoning": self.oracle_reasoning_reward,
+            "oracle_gate": self.oracle_gate_penalty,
+            "diversity": self.diversity_penalty,
+            "claim_novelty": self.claim_novelty_reward,
             "noop_patch": self.noop_patch_penalty,
             "protected_file": self.protected_file_penalty,
             "regression": self.regression_penalty,

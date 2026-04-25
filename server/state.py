@@ -81,6 +81,11 @@ class EpisodeState(BaseModel):
     last_patch_result: Dict[str, Any] = Field(default_factory=dict)
     last_done_reason: str = ""
 
+    # Per-step think summaries — powers diversity penalty + hypothesis trail prompt.
+    # Each entry: {step, categories, entities, reason_signatures, oracle_score,
+    #              pass_rate_after, reward}
+    step_think_history: List[Dict[str, Any]] = Field(default_factory=list)
+
     # File tree
     file_tree: List[str] = Field(default_factory=list)
 

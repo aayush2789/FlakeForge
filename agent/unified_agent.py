@@ -190,10 +190,64 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
         parts.append("\n=== PREVIOUS REASONING (JSON) ===")
         parts.append(observation.last_think_text[:800])
 
+    # ── Hypothesis trail: show the full per-step history so the agent can ────
+    # learn from its own trajectory and avoid repeating failed hypotheses.
+    if observation.think_history:
+        parts.append("\n=== HYPOTHESIS TRAIL (all prior steps) ===")
+
+        # Count category repetitions so we can flag staleness.
+        cat_counts: Dict[str, int] = {}
+        for h in observation.think_history:
+            primary = h["categories"][0] if h.get("categories") else "unknown"
+            cat_counts[primary] = cat_counts.get(primary, 0) + 1
+
+        for h in observation.think_history:
+            step = h.get("step", "?")
+            cats = h.get("categories", [])
+            ents = h.get("entities", [])
+            oracle = h.get("oracle_score")
+            pr = h.get("pass_rate_after", 0.0)
+            rew = h.get("reward", 0.0)
+
+            oracle_str = f"{oracle:+.2f}" if oracle is not None else "N/A"
+            ent_str = ", ".join(ents[:3]) if ents else "—"
+            cat_str = " + ".join(cats[:2]) if cats else "unknown"
+
+            flag = ""
+            if cats and cat_counts.get(cats[0], 0) > 1:
+                flag = " ⚠️ REPEATED"
+
+            parts.append(
+                f"  Step {step}: [{cat_str}]{flag}  entities=[{ent_str}]"
+                f"  oracle={oracle_str}  pass_rate={pr:.2f}  reward={rew:+.3f}"
+            )
+
+        # Collect stale categories (tried ≥ 2 times without achieving pass_rate=1.0).
+        stale = [cat for cat, cnt in cat_counts.items() if cnt >= 2]
+        if stale:
+            parts.append(
+                f"\n⛔ STALE HYPOTHESES (tried {', '.join(stale)} multiple times with no solution)."
+            )
+            parts.append(
+                "Your reward will be HEAVILY penalised if you repeat these categories again."
+            )
+            parts.append("You MUST propose a DIFFERENT root cause category and NEW entities.")
+
     parts.append("\n=== YOUR TURN ===")
-    parts.append(
-        "Output <think> JSON claims then <patch> hunks. No Markdown fences."
-    )
+    turn_instruction = "Output <think> JSON claims then <patch> hunks. No Markdown fences."
+    if observation.think_history:
+        stale_cats = {
+            h["categories"][0]
+            for h in observation.think_history
+            if h.get("categories")
+        }
+        attempted = ", ".join(sorted(stale_cats))
+        turn_instruction = (
+            f"IMPORTANT: You already tried [{attempted}]. "
+            "Propose a genuinely DIFFERENT root cause. "
+            "Output <think> JSON claims then <patch> hunks. No Markdown fences."
+        )
+    parts.append(turn_instruction)
     return "\n".join(parts)
 
 
