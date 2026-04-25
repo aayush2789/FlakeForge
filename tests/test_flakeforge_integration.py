@@ -71,6 +71,42 @@ Strategy: Increase timeout
         assert "Root Cause: async_wait" in extract_think(response)
         assert "<<<<<<< SEARCH" in extract_patch(response)
 
+    def test_extract_single_json_response(self):
+        response = """{
+  "think": {
+    "claims": [
+      {
+        "claim_id": "c1",
+        "category": "async_wait",
+        "entity": "fetch",
+        "location": "tests/test_flaky.py::test_fetch",
+        "ast_node_type": "Call",
+        "polarity": "present",
+        "predicted_effect": "The test should stop timing out.",
+        "reason": "The wait_for timeout is too aggressive."
+      }
+    ],
+    "confidence": 0.85
+  },
+  "patch": {
+    "hunks": [
+      {
+        "hunk_id": "h1",
+        "file": "tests/test_flaky.py",
+        "search": "    result = await asyncio.wait_for(fetch(), timeout=0.05)",
+        "replace": "    result = await asyncio.wait_for(fetch(), timeout=0.5)",
+        "rationale": "Use a realistic timeout.",
+        "addresses_claim": "c1"
+      }
+    ]
+  }
+}"""
+        assert '"claims"' in extract_think(response)
+        patch = extract_patch(response)
+        assert "--- tests/test_flaky.py" in patch
+        assert "<<<<<<< SEARCH" in patch
+        assert ">>>>>>> REPLACE" in patch
+
     def test_extract_empty_response(self):
         assert extract_think("") == ""
         assert extract_patch("") == ""

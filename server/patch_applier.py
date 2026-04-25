@@ -734,21 +734,26 @@ def _apply_single_hunk(original: str, search: str, replace: str) -> Optional[str
     return None
 
 
+def _normalise_line(line: str) -> str:
+    """Strip whitespace and trailing Python line-continuation backslashes."""
+    return line.strip().rstrip("\\").rstrip()
+
+
 def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]:
     """Try conservative indentation-only matching when exact match fails."""
-    search_lines = [line.strip() for line in search.strip().split("\n")]
+    search_lines = [_normalise_line(line) for line in search.strip().split("\n")]
     original_lines = original.split("\n")
 
     # Find the starting line
     for start_idx in range(len(original_lines)):
-        if original_lines[start_idx].strip() == search_lines[0]:
+        if _normalise_line(original_lines[start_idx]) == search_lines[0]:
             # Check if all search lines match
             match = True
             for j, search_line in enumerate(search_lines):
                 if start_idx + j >= len(original_lines):
                     match = False
                     break
-                if original_lines[start_idx + j].strip() != search_line:
+                if _normalise_line(original_lines[start_idx + j]) != search_line:
                     match = False
                     break
 

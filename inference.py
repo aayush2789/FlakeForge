@@ -168,8 +168,127 @@ class LLMBackend:
         self.max_tokens = int(max_tokens or os.environ.get("MAX_TOKENS", 4096))
         self.temperature = float(temperature or os.environ.get("TEMPERATURE", 0.2))
 
+    def _openai_json_schema_response_format(self) -> Dict[str, Any]:
+        """Strict response_format for OpenAI-compatible backends that support it."""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "flakeforge_action",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["think", "patch"],
+                    "properties": {
+                        "think": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["claims", "confidence"],
+                            "properties": {
+                                "claims": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "required": [
+                                            "claim_id",
+                                            "category",
+                                            "entity",
+                                            "location",
+                                            "ast_node_type",
+                                            "polarity",
+                                            "predicted_effect",
+                                            "reason",
+                                        ],
+                                        "properties": {
+                                            "claim_id": {"type": "string"},
+                                            "category": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "async_wait",
+                                                    "concurrency",
+                                                    "test_order_dependency",
+                                                    "resource_leak",
+                                                    "shared_state",
+                                                    "network",
+                                                    "platform_dependency",
+                                                    "nondeterminism",
+                                                    "import_side_effect",
+                                                    "module_cache_pollution",
+                                                    "fixture_scope_leak",
+                                                    "mock_residue",
+                                                    "unknown",
+                                                ],
+                                            },
+                                            "entity": {"type": "string"},
+                                            "location": {"type": "string"},
+                                            "ast_node_type": {"type": "string"},
+                                            "polarity": {"type": "string", "enum": ["present", "absent"]},
+                                            "predicted_effect": {"type": "string"},
+                                            "reason": {"type": "string"},
+                                        },
+                                    },
+                                },
+                                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                            },
+                        },
+                        "patch": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["hunks"],
+                            "properties": {
+                                "hunks": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "required": [
+                                            "hunk_id",
+                                            "file",
+                                            "search",
+                                            "replace",
+                                            "rationale",
+                                            "addresses_claim",
+                                        ],
+                                        "properties": {
+                                            "hunk_id": {"type": "string"},
+                                            "file": {"type": "string"},
+                                            "search": {"type": "string"},
+                                            "replace": {"type": "string"},
+                                            "rationale": {"type": "string"},
+                                            "addresses_claim": {"type": "string"},
+                                        },
+                                    },
+                                }
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
     def generate(self, prompt: str, *, system_prompt: str) -> str:
         """Generate a completion using either OpenAI or Ollama natively."""
+        fallback_response = {
+            "think": {
+                "claims": [
+                    {
+                        "claim_id": "c1",
+                        "category": "unknown",
+                        "entity": "",
+                        "location": "",
+                        "ast_node_type": "",
+                        "polarity": "present",
+                        "predicted_effect": "No patch is proposed because the LLM call failed.",
+                        "reason": "The backend call failed before a root cause could be verified.",
+                    }
+                ],
+                "confidence": 0.1,
+            },
+            "patch": {"hunks": []},
+        }
         # Use native Ollama if configured
         if os.environ.get("OLLAMA_API_KEY") or "11434" in self.api_base:
             try:
@@ -183,14 +302,15 @@ class LLMBackend:
                     options={
                         "temperature": self.temperature,
                         "num_predict": self.max_tokens,
-                    }
+                    },
+                    format="json",
                 )
                 return response["message"]["content"] or ""
             except ImportError:
                 logger.warning("[INFERENCE] ollama package not found, falling back to OpenAI compatibility layer")
             except Exception as e:
                 logger.error(f"[INFERENCE] Ollama call failed: {e}")
-                return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {e}\nStrategy: Unable to generate fix."
+                return json.dumps(fallback_response)
 
         # Default to OpenAI compatibility layer
         try:
@@ -199,19 +319,37 @@ class LLMBackend:
                 base_url=self.api_base,
                 api_key=self.api_key,
             )
-            response = client.chat.completions.create(
-                model=self.model_name,
-                messages=[
+            request = {
+                "model": self.model_name,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "response_format": self._openai_json_schema_response_format(),
+            }
+            try:
+                response = client.chat.completions.create(**request)
+            except Exception as response_format_error:
+                logger.warning(
+                    "[INFERENCE] response_format=json_schema unsupported by backend; retrying with json_object: %s",
+                    response_format_error,
+                )
+                request["response_format"] = {"type": "json_object"}
+                try:
+                    response = client.chat.completions.create(**request)
+                except Exception as json_object_error:
+                    logger.warning(
+                        "[INFERENCE] response_format=json_object unsupported by backend; retrying without it: %s",
+                        json_object_error,
+                    )
+                    request.pop("response_format", None)
+                    response = client.chat.completions.create(**request)
             return response.choices[0].message.content or ""
         except Exception as e:
             logger.error(f"[INFERENCE] LLM call failed: {e} (base={self.api_base} model={self.model_name})")
-            return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {e}\nStrategy: Unable to generate fix.\n</think>\n<patch>\n</patch>"
+            return json.dumps(fallback_response)
 
 
 def _build_default_runner(repo_path: str) -> Optional[Any]:

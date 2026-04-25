@@ -1,9 +1,9 @@
 """V3 Unified FlakeForge Agent — single model, single forward pass.
 
-The <think> block is now structured JSON (a list of ThinkClaim objects).
-The parser tries JSON first; on any parse failure it degrades gracefully
-and records a format_penalty on the StructuredThink so the reward system
-can penalise malformed output without raising an error.
+The model response is now a single structured JSON object containing
+``think`` and ``patch`` keys. The parser keeps legacy XML-block support as a
+fallback, but the primary path is JSON-only so reasoning wrappers such as
+``<think>`` cannot leak into the validator input.
 """
 
 from __future__ import annotations
@@ -45,69 +45,74 @@ class ModelBackend(Protocol):
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-_CLAIM_SCHEMA = """{
-  "claims": [
-    {
-      "claim_id": "c1",
-      "category": "<one of ROOT_CAUSE_TYPES>",
-      "entity": "<function / class / variable name>",
-      "location": "<path/to/file.py::ClassName.method OR path/to/file.py::function>",
-      "ast_node_type": "<optional libcst node type, e.g. FunctionDef>",
-      "polarity": "present",
-      "predicted_effect": "<one sentence: what pass-rate change do you expect?>",
-      "reason": "<≤40 words: causal justification>"
-    }
-  ],
-  "confidence": 0.85
-}"""
-
-_HUNK_SCHEMA = """{
-  "hunks": [
-    {
-      "hunk_id": "h1",
-      "file": "<repo-relative path, e.g. pybrake/notifier.py>",
-      "search": "<exact lines to find, verbatim including indentation>",
-      "replace": "<replacement lines (empty string to delete the block)>",
-      "rationale": "<one sentence: why does this fix the root cause?>",
-      "addresses_claim": "<claim_id from the think block, e.g. c1>"
-    }
-  ]
+_UNIFIED_RESPONSE_SCHEMA = """{
+  "think": {
+    "claims": [
+      {
+        "claim_id": "c1",
+        "category": "<one of ROOT_CAUSE_TYPES>",
+        "entity": "<function / class / variable name>",
+        "location": "<path/to/file.py::ClassName.method OR path/to/file.py::function>",
+        "ast_node_type": "<optional libcst/ast node type, e.g. FunctionDef>",
+        "polarity": "present",
+        "predicted_effect": "<one sentence: expected pass-rate change>",
+        "reason": "<40 words or fewer: causal justification>"
+      }
+    ],
+    "confidence": 0.85
+  },
+  "patch": {
+    "hunks": [
+      {
+        "hunk_id": "h1",
+        "file": "<repo-relative path, e.g. pybrake/notifier.py>",
+        "search": "<exact lines to find, verbatim including indentation>",
+        "replace": "<replacement lines; empty string deletes the block>",
+        "rationale": "<one sentence: why this fixes the root cause>",
+        "addresses_claim": "<claim_id from think.claims, e.g. c1>"
+      }
+    ]
+  }
 }"""
 
 UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that identifies and fixes unreliable tests.
 
-You MUST respond with EXACTLY two XML blocks and no Markdown fences:
+You MUST respond with EXACTLY ONE JSON object and nothing else.
 
-1. <think> block — MUST be valid JSON matching this schema exactly:
-{_CLAIM_SCHEMA}
+The object MUST match this schema and key names:
+{_UNIFIED_RESPONSE_SCHEMA}
 
-   ROOT_CAUSE_TYPES: async_wait, concurrency, test_order_dependency,
-   resource_leak, shared_state, network, platform_dependency, nondeterminism,
-   import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
+ROOT_CAUSE_TYPES: async_wait, concurrency, test_order_dependency,
+resource_leak, shared_state, network, platform_dependency, nondeterminism,
+import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
 
-   Rules for the <think> JSON:
-   - claims is a non-empty list.
-   - polarity is "present" when you assert the bug exists in the current code.
-   - predicted_effect is mandatory; forecast the expected pass-rate change.
-   - Do NOT add extra keys; they will be stripped.
+Rules for "think":
+- "think.claims" is a non-empty list.
+- Each claim object must use exactly these model-facing keys:
+  claim_id, category, entity, location, ast_node_type, polarity, predicted_effect, reason.
+- "category" must be one ROOT_CAUSE_TYPES value.
+- "polarity" is "present" when you assert the bug exists in the current code.
+- "predicted_effect" is mandatory; forecast the expected pass-rate change.
+- Do not include validator-filled keys such as verdict, oracle_score, format_penalty, applied, or apply_error.
 
-2. <patch> block — MUST be valid JSON matching this schema exactly:
-{_HUNK_SCHEMA}
-
-   Rules for the <patch> JSON:
-   - hunks is a non-empty list of search/replace operations.
-   - search must be copied verbatim from the source shown in the observation (preserve indentation).
-   - replace is the fixed replacement; use an empty string "" to delete the search block.
-   - addresses_claim links this hunk to a claim_id from the <think> block.
-   - Do NOT add extra keys.
+Rules for "patch":
+- "patch.hunks" is a non-empty list of search/replace operations.
+- Each hunk object must use exactly these model-facing keys:
+  hunk_id, file, search, replace, rationale, addresses_claim.
+- "file" must be a repo-relative path.
+- "search" must be copied verbatim from the source shown in the observation, preserving indentation.
+- "replace" is the fixed replacement; use an empty string "" to delete the search block.
+- "addresses_claim" must equal a claim_id from "think.claims".
 
 GLOBAL RULES:
+- Do NOT output XML tags such as <think> or <patch>.
 - Do NOT wrap your answer in Markdown fences (no ```).
+- Do NOT add text before or after the JSON object.
 - Do NOT add sleep() calls, retry decorators, or @pytest.mark.skip.
 - Prefer minimal, surgical fixes that address the root cause.
 - If uncertain about root cause, use category "unknown" rather than guessing.
 
-PENALTY: Any block that is not valid JSON receives a format penalty that reduces your reward.
+PENALTY: Any response that is not one valid JSON object receives a format penalty that reduces your reward.
 """
 
 
@@ -238,7 +243,7 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
             parts.append("You MUST propose a DIFFERENT root cause category and NEW entities.")
 
     parts.append("\n=== YOUR TURN ===")
-    turn_instruction = "Output <think> JSON claims then <patch> hunks. No Markdown fences."
+    turn_instruction = "Output one JSON object with top-level keys think and patch. No XML, no Markdown fences."
     if observation.think_history:
         stale_cats = {
             h["categories"][0]
@@ -249,7 +254,7 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
         turn_instruction = (
             f"IMPORTANT: You already tried [{attempted}]. "
             "Propose a genuinely DIFFERENT root cause. "
-            "Output <think> JSON claims then <patch> hunks. No Markdown fences."
+            "Output one JSON object with top-level keys think and patch. No XML, no Markdown fences."
         )
     parts.append(turn_instruction)
     return "\n".join(parts)
@@ -263,20 +268,94 @@ def _strip_markdown_fence(text: str) -> str:
     return m.group(1).strip() if m else stripped
 
 
+def _extract_json_object_text(text: str) -> str:
+    """Return the first complete JSON object in text, or an empty string."""
+    stripped = _strip_markdown_fence(text)
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", stripped):
+        try:
+            _, end = decoder.raw_decode(stripped[match.start():])
+        except json.JSONDecodeError:
+            continue
+        return stripped[match.start(): match.start() + end]
+    return ""
+
+
+def _load_json_object(text: str) -> Optional[Dict[str, Any]]:
+    json_text = _extract_json_object_text(text)
+    if not json_text:
+        return None
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _patch_dict_to_search_replace(patch_data: Any) -> str:
+    """Convert validator-compatible JSON hunk fields to legacy patch text."""
+    if not isinstance(patch_data, dict):
+        return ""
+    hunks = patch_data.get("hunks", [])
+    if not isinstance(hunks, list):
+        return ""
+
+    blocks: List[str] = []
+    for hunk in hunks:
+        if not isinstance(hunk, dict):
+            continue
+        file_path = str(hunk.get("file") or "").strip()
+        search = hunk.get("search")
+        replace = hunk.get("replace")
+        if not file_path or not isinstance(search, str) or not isinstance(replace, str):
+            continue
+        if not search.strip():
+            continue
+        blocks.append(
+            "\n".join([
+                f"--- {file_path}",
+                "<<<<<<< SEARCH",
+                search.rstrip("\n"),
+                "=======",
+                replace.rstrip("\n"),
+                ">>>>>>> REPLACE",
+            ])
+        )
+    return "\n\n".join(blocks)
+
+
 def extract_patch(response: str) -> str:
-    """Extract content between <patch> and </patch> tags."""
+    """Extract patch text, preferring the single-object JSON response format."""
     response = _strip_markdown_fence(response)
+
+    data = _load_json_object(response)
+    if isinstance(data, dict) and "patch" in data:
+        patch_text = _patch_dict_to_search_replace(data.get("patch"))
+        if patch_text:
+            return patch_text
 
     m = re.search(r"<patch>(.*?)</patch>", response, re.DOTALL)
     if m:
-        return _strip_markdown_fence(m.group(1))
+        inner = _strip_markdown_fence(m.group(1))
+        data = _load_json_object(inner)
+        if isinstance(data, dict):
+            patch_text = _patch_dict_to_search_replace(data.get("patch") if "patch" in data else data)
+            if patch_text:
+                return patch_text
+        return inner
 
     fenced = re.search(r"```(?:patch|diff|xml)?\s*(.*?)```", response, re.DOTALL | re.IGNORECASE)
     if fenced:
         inner = fenced.group(1).strip()
         pm = re.search(r"<patch>(.*?)</patch>", inner, re.DOTALL)
         if pm:
-            return _strip_markdown_fence(pm.group(1))
+            patch_inner = _strip_markdown_fence(pm.group(1))
+            data = _load_json_object(patch_inner)
+            if isinstance(data, dict):
+                patch_text = _patch_dict_to_search_replace(data.get("patch") if "patch" in data else data)
+                if patch_text:
+                    return patch_text
+            return patch_inner
         return inner
 
     hunk_start = response.find("<<<<<<< SEARCH")
@@ -326,26 +405,17 @@ def _normalise_category(raw: str) -> str:
     return _NORM_MAP.get(c, "unknown")
 
 
-def _parse_structured_think(think_raw: str) -> StructuredThink:
+def _parse_structured_think(think_raw: Any) -> StructuredThink:
     """Try to parse think_raw as JSON StructuredThink.
 
     On any failure: return a StructuredThink with format_penalty=-1.0 and
     whatever claims could be salvaged.  Never raises.
     """
-    text = think_raw.strip()
-
-    # Model sometimes wraps in a code fence inside the think block.
-    text = _strip_markdown_fence(text)
-
-    # Some models add a trailing comment or text after the closing brace.
-    # Try to extract the outermost JSON object.
-    json_match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not json_match:
-        return StructuredThink(format_penalty=-1.0)
-
-    try:
-        data = json.loads(json_match.group(0))
-    except json.JSONDecodeError:
+    if isinstance(think_raw, dict):
+        data = think_raw
+    else:
+        data = _load_json_object(str(think_raw))
+    if data is None:
         return StructuredThink(format_penalty=-1.0)
 
     claims: List[ThinkClaim] = []
@@ -400,22 +470,17 @@ _ALLOWED_CLAIM_KEYS = {
 }
 
 
-def _parse_structured_patch(patch_raw: str) -> "StructuredPatch":
+def _parse_structured_patch(patch_raw: Any) -> "StructuredPatch":
     """Try to parse patch_raw as JSON StructuredPatch.
 
     On any failure: return a StructuredPatch with format_penalty=-1.0 and
     whatever hunks could be salvaged.  Never raises.
     """
-    text = patch_raw.strip()
-    text = _strip_markdown_fence(text)
-
-    json_match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not json_match:
-        return StructuredPatch(format_penalty=-1.0)
-
-    try:
-        data = json.loads(json_match.group(0))
-    except json.JSONDecodeError:
+    if isinstance(patch_raw, dict):
+        data = patch_raw
+    else:
+        data = _load_json_object(str(patch_raw))
+    if data is None:
         return StructuredPatch(format_penalty=-1.0)
 
     hunks: List[PatchHunk] = []
@@ -451,10 +516,13 @@ def _parse_structured_patch(patch_raw: str) -> "StructuredPatch":
 
 
 def extract_think(response: str) -> str:
-    """Extract raw text between <think> and </think> tags (for logging / prompts)."""
+    """Extract think JSON/text from the model response."""
     response = _strip_markdown_fence(response)
+    data = _load_json_object(response)
+    if isinstance(data, dict) and "think" in data:
+        return json.dumps(data.get("think"), ensure_ascii=False)
     m = re.search(r"<think>(.*?)</think>", response, re.DOTALL)
-    return m.group(1).strip() if m else response.strip()
+    return m.group(1).strip() if m else ""
 
 
 # ── Backward-compat helpers (still used by reward.py / tests) ─────────────────
@@ -515,11 +583,11 @@ def infer_category_from_patch(patch_text: str) -> str:
 class UnifiedFlakeForgeAgent:
     """V3 Unified agent — one model, one forward pass.
 
-    The <think> block is expected to be structured JSON.  If the model emits
-    well-formed JSON the structured_think field on the returned action is
-    populated and the oracle can verify it.  If not, a format_penalty is
-    recorded and backward-compat regex parsers are used as a fallback so the
-    episode does not crash.
+    The response is expected to be one structured JSON object. If the model
+    emits well-formed JSON, structured_think and structured_patch are populated
+    and the patch hunks are converted to validator-compatible search/replace
+    text. Legacy XML parsing remains as a fallback so older completions do not
+    crash an episode.
     """
 
     def __init__(self, backend: ModelBackend) -> None:
@@ -530,12 +598,21 @@ class UnifiedFlakeForgeAgent:
         prompt = build_unified_prompt(observation)
         raw_response = self.backend.generate(prompt, system_prompt=self.system_prompt)
 
-        think_raw = extract_think(raw_response)
-        patch_raw = extract_patch(raw_response)
-
-        # Try structured JSON parse for both blocks; never raises.
-        structured_think = _parse_structured_think(think_raw)
-        structured_patch = _parse_structured_patch(patch_raw)
+        response_obj = _load_json_object(raw_response)
+        if isinstance(response_obj, dict) and (
+            isinstance(response_obj.get("think"), dict)
+            or isinstance(response_obj.get("patch"), dict)
+        ):
+            think_raw = json.dumps(response_obj.get("think", {}), ensure_ascii=False)
+            structured_think = _parse_structured_think(response_obj.get("think", {}))
+            structured_patch = _parse_structured_patch(response_obj.get("patch", {}))
+            patch_raw = _patch_dict_to_search_replace(response_obj.get("patch", {}))
+        else:
+            think_raw = extract_think(raw_response)
+            patch_raw = extract_patch(raw_response)
+            # Try structured JSON parse for both legacy blocks; never raises.
+            structured_think = _parse_structured_think(think_raw)
+            structured_patch = _parse_structured_patch(patch_raw)
 
         # Derive scalar fields from structured parse, falling back to regex.
         predicted_category = (
@@ -549,21 +626,21 @@ class UnifiedFlakeForgeAgent:
             else extract_confidence_from_think(think_raw)
         )
 
-        if "<think>" not in raw_response or "<patch>" not in raw_response:
+        if response_obj is None:
             logger.warning(
-                "[UNIFIED_AGENT] Model output missing expected XML tags; using tolerant parsing."
+                "[UNIFIED_AGENT] Model output is not a single JSON object; using tolerant parsing."
             )
 
         if structured_think.format_penalty < 0.0:
             logger.warning(
-                "[UNIFIED_AGENT] <think> block is not valid JSON (penalty=%.1f); "
+                "[UNIFIED_AGENT] think object is not valid JSON (penalty=%.1f); "
                 "falling back to legacy parsing.",
                 structured_think.format_penalty,
             )
 
         if structured_patch.format_penalty < 0.0:
             logger.warning(
-                "[UNIFIED_AGENT] <patch> block is not valid JSON (penalty=%.1f); "
+                "[UNIFIED_AGENT] patch object is not valid JSON (penalty=%.1f); "
                 "patch will not have structured hunk fields.",
                 structured_patch.format_penalty,
             )
