@@ -6,9 +6,11 @@ import asyncio
 import argparse
 import json
 import os
+import shutil
 import traceback
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from dotenv import load_dotenv
@@ -588,10 +590,188 @@ def _default_test_id() -> str:
     return os.environ.get("FF_TEST_ID", "tests/test_flaky.py::test_fetch_should_complete")
 
 
+def _default_seed_root() -> str:
+    env_root = os.environ.get("FF_SEED_ROOT")
+    if env_root:
+        return env_root
+
+    project_root = Path(__file__).resolve().parent
+    candidates = [
+        Path(r"C:\CodingNest\seed_repos\idoft"),
+        Path(r"C:\CodingNest\seed_repos\idof"),
+        Path("/CodingNest/seed_repos/idoft"),
+        Path("/CodingNest/seed_repos/idof"),
+        (project_root / ".." / "seed_repos" / "idoft"),
+        (project_root / ".." / "seed_repos" / "idof"),
+        (project_root / ".." / ".." / "seed_repos" / "idoft"),
+        (project_root / ".." / ".." / "seed_repos" / "idof"),
+    ]
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.exists() and any(resolved.glob("*/flake_manifest.json")):
+            return str(resolved)
+    return str(candidates[0])
+
+
+def _load_seed_cases(seed_root: str | Path) -> List[Dict[str, Any]]:
+    root = Path(seed_root).expanduser().resolve()
+    cases: List[Dict[str, Any]] = []
+    for manifest_path in sorted(root.glob("*/flake_manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("[INFERENCE] Skipping unreadable manifest %s: %s", manifest_path, exc)
+            continue
+
+        test_id = manifest.get("flaky_test_path") or manifest.get("test_identifier")
+        if not test_id:
+            logger.warning("[INFERENCE] Skipping manifest without flaky_test_path: %s", manifest_path)
+            continue
+
+        cases.append({
+            "case_id": manifest_path.parent.name,
+            "repo_path": manifest_path.parent,
+            "manifest_path": manifest_path,
+            "test_id": str(test_id),
+            "repo_name": manifest.get("repo_name", manifest_path.parent.name),
+            "flake_category": manifest.get("flake_category", "UNKNOWN"),
+            "difficulty": manifest.get("difficulty", "medium"),
+        })
+
+    if not cases:
+        raise FileNotFoundError(f"No usable flake_manifest.json files found under {root}")
+    return cases
+
+
+def _ignore_episode_copy(_: str, names: List[str]) -> set[str]:
+    ignored = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"} & set(names)
+    ignored.update(name for name in names if name.endswith((".pyc", ".pyo")))
+    return ignored
+
+
+def _materialize_case_repo(case: Dict[str, Any], isolate: bool = True) -> Path:
+    repo_path = Path(case["repo_path"]).resolve()
+    if not isolate:
+        return repo_path
+
+    episode_root = Path(os.environ.get("FF_INFERENCE_REPO_ROOT", "outputs/inference_repos")).resolve()
+    episode_root.mkdir(parents=True, exist_ok=True)
+    worktree = episode_root / f"{case['case_id']}-{uuid.uuid4().hex[:8]}"
+    if worktree.exists():
+        shutil.rmtree(worktree)
+    shutil.copytree(repo_path, worktree, ignore=_ignore_episode_copy)
+    return worktree
+
+
+def _select_seed_cases(
+    cases: List[Dict[str, Any]],
+    *,
+    case: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    selected = cases
+    if case:
+        needle = case.lower()
+        selected = [
+            item for item in selected
+            if needle in item["case_id"].lower() or needle in str(item.get("repo_name", "")).lower()
+        ]
+        if not selected:
+            raise ValueError(f"No seed case matched {case!r}")
+
+    if limit is not None:
+        selected = selected[:max(limit, 0)]
+    return selected
+
+
+def run_seed_inference(
+    *,
+    seed_root: str | Path,
+    case: Optional[str],
+    limit: Optional[int],
+    isolate: bool,
+    model_name: Optional[str],
+    max_steps: Optional[int],
+    num_runs: int,
+    api_base: Optional[str],
+    api_key: Optional[str],
+    verbose: bool,
+) -> Dict[str, Any]:
+    cases = _select_seed_cases(_load_seed_cases(seed_root), case=case, limit=limit)
+    results: List[Dict[str, Any]] = []
+
+    for idx, seed_case in enumerate(cases, start=1):
+        worktree = _materialize_case_repo(seed_case, isolate=isolate)
+        if verbose:
+            logger.info(
+                "[INFERENCE] Seed case %d/%d id=%s category=%s test=%s repo=%s",
+                idx,
+                len(cases),
+                seed_case["case_id"],
+                seed_case["flake_category"],
+                seed_case["test_id"],
+                worktree,
+            )
+
+        try:
+            result = run_inference(
+                repo_path=str(worktree),
+                test_identifier=seed_case["test_id"],
+                model_name=model_name,
+                max_steps=max_steps,
+                num_runs=num_runs,
+                api_base=api_base,
+                api_key=api_key,
+                verbose=verbose,
+            )
+            results.append({
+                "case_id": seed_case["case_id"],
+                "repo_name": seed_case["repo_name"],
+                "flake_category": seed_case["flake_category"],
+                "difficulty": seed_case["difficulty"],
+                "test_id": seed_case["test_id"],
+                "source_repo_path": str(seed_case["repo_path"]),
+                "run_repo_path": str(worktree),
+                "result": result,
+            })
+        except Exception as exc:
+            logger.error("[INFERENCE] Seed case failed id=%s: %s", seed_case["case_id"], exc)
+            results.append({
+                "case_id": seed_case["case_id"],
+                "repo_name": seed_case["repo_name"],
+                "flake_category": seed_case["flake_category"],
+                "difficulty": seed_case["difficulty"],
+                "test_id": seed_case["test_id"],
+                "source_repo_path": str(seed_case["repo_path"]),
+                "run_repo_path": str(worktree),
+                "error": type(exc).__name__,
+                "message": str(exc),
+            })
+
+    return {
+        "seed_root": str(Path(seed_root).resolve()),
+        "count": len(results),
+        "results": results,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run FlakeForge unified inference episode")
     parser.add_argument("--repo-path", default=_default_repo_path(), help="Path to target repo")
     parser.add_argument("--test-id", default=_default_test_id(), help="Target test identifier")
+    parser.add_argument(
+        "--seed-root",
+        default=None,
+        help=f"Run manifest-backed local inference for repos under this seed root (default candidate: {_default_seed_root()})",
+    )
+    parser.add_argument("--case", default=None, help="Substring filter for seed case directory/repo_name")
+    parser.add_argument("--limit", type=int, default=None, help="Max seed cases to run")
+    parser.add_argument("--list-cases", action="store_true", help="List seed cases from --seed-root and exit")
+    parser.add_argument(
+        "--no-isolation",
+        action="store_true",
+        help="Patch seed repos in place instead of copying to outputs/inference_repos first",
+    )
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"), help="LLM model name")
     parser.add_argument("--max-steps", type=int, default=None, help="Max episode steps")
     parser.add_argument("--num-runs", type=int, default=int(os.environ.get("NUM_RUNS", 10)), help="Repeated test runs per step")
@@ -601,16 +781,49 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        result = run_inference(
-            repo_path=args.repo_path,
-            test_identifier=args.test_id,
-            model_name=args.model,
-            max_steps=args.max_steps,
-            num_runs=args.num_runs,
-            api_base=args.api_base,
-            api_key=args.api_key,
-            verbose=not args.quiet,
-        )
+        if args.seed_root or args.list_cases:
+            seed_root = args.seed_root or _default_seed_root()
+            if args.list_cases:
+                cases = _select_seed_cases(_load_seed_cases(seed_root), case=args.case, limit=args.limit)
+                result = {
+                    "seed_root": str(Path(seed_root).resolve()),
+                    "count": len(cases),
+                    "cases": [
+                        {
+                            "case_id": item["case_id"],
+                            "repo_name": item["repo_name"],
+                            "flake_category": item["flake_category"],
+                            "difficulty": item["difficulty"],
+                            "test_id": item["test_id"],
+                            "repo_path": str(item["repo_path"]),
+                        }
+                        for item in cases
+                    ],
+                }
+            else:
+                result = run_seed_inference(
+                    seed_root=seed_root,
+                    case=args.case,
+                    limit=args.limit,
+                    isolate=not args.no_isolation,
+                    model_name=args.model,
+                    max_steps=args.max_steps,
+                    num_runs=args.num_runs,
+                    api_base=args.api_base,
+                    api_key=args.api_key,
+                    verbose=not args.quiet,
+                )
+        else:
+            result = run_inference(
+                repo_path=args.repo_path,
+                test_identifier=args.test_id,
+                model_name=args.model,
+                max_steps=args.max_steps,
+                num_runs=args.num_runs,
+                api_base=args.api_base,
+                api_key=args.api_key,
+                verbose=not args.quiet,
+            )
         print(json.dumps(result, indent=2), flush=True)
     except Exception as exc:
         logger.error("[INFERENCE] FATAL: %s", exc)
