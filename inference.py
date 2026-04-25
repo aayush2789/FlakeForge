@@ -9,6 +9,7 @@ No judge calls. No hypothesis gating. Just execution-verified reward.
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import os
 import traceback
@@ -16,11 +17,21 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 try:
-    from models import FlakeForgeAction, FlakeForgeObservation
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    load_dotenv = None  # type: ignore[assignment]
+
+try:
+    from openenv.core import EnvClient
+except Exception:
+    EnvClient = None  # type: ignore[assignment]
+
+try:
+    from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
     from agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
     from server.FlakeForge_environment import FlakeForgeEnvironment
 except ImportError:
-    from .models import FlakeForgeAction, FlakeForgeObservation
+    from .models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
     from .agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
     from .server.FlakeForge_environment import FlakeForgeEnvironment
 
@@ -34,6 +45,38 @@ except ImportError:
         get_logger = lambda n, **kw: logging.getLogger(n)
 
 logger = get_logger(__name__)
+
+if load_dotenv is not None:
+    load_dotenv()
+
+
+def _as_step_output_like(value: Any) -> Any:
+    """Normalize env return values to a StepOutput-like object.
+
+    Supports both:
+    - OpenEnv client/server style return object with observation/reward/done/state/info
+    - Direct observation returns from local environment implementations
+    """
+    if hasattr(value, "observation") and hasattr(value, "done"):
+        return value
+
+    class _StepLike:
+        def __init__(self, observation: FlakeForgeObservation) -> None:
+            self.observation = observation
+            self.reward = float(getattr(observation, "reward", 0.0))
+            self.done = bool(getattr(observation, "done", False))
+            self.info = {}
+
+            self.state = FlakeForgeState(
+                episode_id=str(getattr(observation, "episode_id", "")),
+                step_count=int(getattr(observation, "step", 0)),
+                done=self.done,
+                current_pass_rate=float(getattr(observation, "current_pass_rate", 0.0)),
+                baseline_pass_rate=float(getattr(observation, "baseline_pass_rate", 0.0)),
+                regression_detected=False,
+            )
+
+    return _StepLike(value)
 
 
 class LLMBackend:
@@ -73,8 +116,45 @@ class LLMBackend:
             )
             return response.choices[0].message.content or ""
         except Exception as exc:
-            logger.error("[INFERENCE] LLM call failed: %s", exc)
+            logger.error(
+                "[INFERENCE] LLM call failed: %s (base=%s model=%s)",
+                exc,
+                self.api_base,
+                self.model_name,
+            )
             return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {exc}\nStrategy: Unable to generate fix.\n</think>\n<patch>\n</patch>"
+
+
+def _build_default_runner(repo_path: str) -> Optional[Any]:
+    """Create an environment runner adapter that exposes run_single()."""
+    try:
+        from server.docker_runner import DockerTestRunner
+    except Exception:
+        try:
+            from .server.docker_runner import DockerTestRunner
+        except Exception:
+            return None
+
+    base_runner = DockerTestRunner(repo_path)
+
+    class _RunnerAdapter:
+        def run_single(self, test_identifier: str) -> Dict[str, Any]:
+            record = base_runner.run_test(test_identifier)
+            return {
+                "passed": bool(record.passed),
+                "duration_ms": int(record.duration_ms),
+                "error_type": record.error_type,
+                "error_message": record.error_message,
+                "stderr": record.stderr_excerpt or "",
+            }
+
+    return _RunnerAdapter()
+
+
+def _should_use_remote_env() -> bool:
+    base_url = (os.environ.get("ENV_BASE_URL") or "").strip()
+    use_docker = os.environ.get("USE_DOCKER_IMAGE", "0").strip().lower() in {"1", "true", "yes"}
+    return bool(base_url) or use_docker
 
 
 async def run_episode(
@@ -97,7 +177,10 @@ async def run_episode(
     }
 
     # Reset environment
-    step_output = env.reset()
+    reset_result = env.reset()
+    if asyncio.iscoroutine(reset_result):
+        reset_result = await reset_result
+    step_output = _as_step_output_like(reset_result)
     observation = step_output.observation
 
     if verbose:
@@ -122,7 +205,10 @@ async def run_episode(
             )
 
         # Execute step
-        step_output = env.step(action)
+        step_result = env.step(action)
+        if asyncio.iscoroutine(step_result):
+            step_result = await step_result
+        step_output = _as_step_output_like(step_result)
         observation = step_output.observation
 
         # Track trajectory
@@ -180,14 +266,6 @@ def run_inference(
     """
     # Load defaults from environment
     max_steps = int(max_steps or os.environ.get("INFERENCE_MAX_STEPS", 8))
-    # Create environment
-    env = FlakeForgeEnvironment(
-        repo_path=repo_path,
-        test_identifier=test_identifier,
-        max_steps=max_steps,
-        num_runs=num_runs,
-    )
-
     # Create LLM backend
     backend = LLMBackend(
         model_name=model_name,
@@ -198,13 +276,55 @@ def run_inference(
     # Create unified agent
     agent = UnifiedFlakeForgeAgent(backend=backend)
 
-    # Run episode
-    try:
-        result = asyncio.run(run_episode(env, agent, verbose=verbose))
-    except RuntimeError:
-        # If event loop is already running (e.g., in Jupyter)
-        loop = asyncio.get_event_loop()
-        result = loop.run_until_complete(run_episode(env, agent, verbose=verbose))
+    if _should_use_remote_env():
+        env_url = (os.environ.get("ENV_BASE_URL") or "http://localhost:5000").strip()
+        if verbose:
+            logger.info("[INFERENCE] Using remote OpenEnv client at %s", env_url)
+        if EnvClient is None:
+            raise RuntimeError("Remote execution requested but openenv.core.EnvClient is unavailable")
+        env = EnvClient(base_url=env_url)
+
+        async def _run_remote() -> Dict[str, Any]:
+            connect = getattr(env, "connect", None)
+            if callable(connect):
+                maybe_connected = connect()
+                if asyncio.iscoroutine(maybe_connected):
+                    await maybe_connected
+            try:
+                return await run_episode(env, agent, verbose=verbose)
+            finally:
+                close = getattr(env, "close", None)
+                if callable(close):
+                    maybe_closed = close()
+                    if asyncio.iscoroutine(maybe_closed):
+                        await maybe_closed
+
+        try:
+            result = asyncio.run(_run_remote())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            result = loop.run_until_complete(_run_remote())
+    else:
+        runner = _build_default_runner(repo_path)
+        if runner is None and verbose:
+            logger.warning("[INFERENCE] Could not create DockerTestRunner adapter; environment will use synthetic runs.")
+
+        # Create environment
+        env = FlakeForgeEnvironment(
+            repo_path=repo_path,
+            test_identifier=test_identifier,
+            max_steps=max_steps,
+            num_runs=num_runs,
+            runner=runner,
+        )
+
+        # Run episode
+        try:
+            result = asyncio.run(run_episode(env, agent, verbose=verbose))
+        except RuntimeError:
+            # If event loop is already running (e.g., in Jupyter)
+            loop = asyncio.get_event_loop()
+            result = loop.run_until_complete(run_episode(env, agent, verbose=verbose))
 
     if verbose:
         logger.info(
@@ -216,6 +336,48 @@ def run_inference(
         )
 
     return result
+
+
+def _default_repo_path() -> str:
+    return os.environ.get("FF_REPO_PATH", str(Path("test_repos") / "timing_race_minimal"))
+
+
+def _default_test_id() -> str:
+    return os.environ.get("FF_TEST_ID", "tests/test_flaky.py::test_fetch_should_complete")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run FlakeForge V3 unified inference episode")
+    parser.add_argument("--repo-path", default=_default_repo_path(), help="Path to target repo")
+    parser.add_argument("--test-id", default=_default_test_id(), help="Target test identifier")
+    parser.add_argument("--model", default=os.environ.get("MODEL_NAME"), help="LLM model name")
+    parser.add_argument("--max-steps", type=int, default=None, help="Max episode steps")
+    parser.add_argument("--num-runs", type=int, default=10, help="Repeated test runs per step")
+    parser.add_argument("--api-base", default=os.environ.get("API_BASE_URL") or os.environ.get("OPENAI_API_BASE"), help="OpenAI-compatible base URL")
+    parser.add_argument("--api-key", default=os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY"), help="API key")
+    parser.add_argument("--quiet", action="store_true", help="Disable verbose logging")
+    args = parser.parse_args()
+
+    try:
+        result = run_inference(
+            repo_path=args.repo_path,
+            test_identifier=args.test_id,
+            model_name=args.model,
+            max_steps=args.max_steps,
+            num_runs=args.num_runs,
+            api_base=args.api_base,
+            api_key=args.api_key,
+            verbose=not args.quiet,
+        )
+        print(json.dumps(result, indent=2), flush=True)
+    except Exception as exc:
+        logger.error("[INFERENCE] FATAL: %s", exc)
+        traceback.print_exc()
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
 
 
 # ── Reward Function for GRPO Training ─────────────────────────────────────

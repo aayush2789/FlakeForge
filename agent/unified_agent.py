@@ -82,11 +82,7 @@ Strategy: Increase timeout to accommodate lock contention latency.
 
 <patch>
 --- tests/test_flaky.py
-<<<<<<< SEARCH
     result = await asyncio.wait_for(fetch_data_with_race(), timeout=0.05)
-=======
-    result = await asyncio.wait_for(fetch_data_with_race(), timeout=0.5)
->>>>>>> REPLACE
 </patch>"""
 
 
@@ -189,13 +185,24 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
 def extract_think(response: str) -> str:
     """Extract content between <think> and </think> tags."""
     match = re.search(r"<think>(.*?)</think>", response, re.DOTALL)
-    return match.group(1).strip() if match else ""
+    if match:
+        return match.group(1).strip()
+
+    # Fallback for model outputs that skip the exact XML wrapper.
+    return response.strip()
 
 
 def extract_patch(response: str) -> str:
     """Extract content between <patch> and </patch> tags."""
     match = re.search(r"<patch>(.*?)</patch>", response, re.DOTALL)
-    return match.group(1).strip() if match else ""
+    if match:
+        return match.group(1).strip()
+
+    fenced = re.search(r"```(?:patch|diff)?\s*(.*?)```", response, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+
+    return ""
 
 
 def extract_category_from_think(think_text: str) -> str:
@@ -322,6 +329,11 @@ class UnifiedFlakeForgeAgent:
         patch_text = extract_patch(raw_response)
         predicted_category = extract_category_from_think(think_text)
         predicted_confidence = extract_confidence_from_think(think_text)
+
+        if "<think>" not in raw_response or "<patch>" not in raw_response:
+            logger.warning(
+                "[UNIFIED_AGENT] Model output did not include expected tags; falling back to tolerant parsing."
+            )
 
         logger.info(
             "[UNIFIED_AGENT] category=%s confidence=%.2f patch_len=%d",
