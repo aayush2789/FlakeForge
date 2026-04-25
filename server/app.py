@@ -6,6 +6,15 @@
 
 """FastAPI application for the FlakeForge environment server."""
 
+import sys
+import os
+from pathlib import Path
+
+# Add project root to sys.path to resolve 'agent' and 'models' as top-level modules
+project_root = str(Path(__file__).parents[1])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 try:
     from openenv.core.env_server.http_server import create_app
 except Exception as e:  # pragma: no cover
