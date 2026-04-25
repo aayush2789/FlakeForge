@@ -31,7 +31,7 @@ class DockerTestRunner:
             )
             duration_ms = int((time.perf_counter() - start) * 1000)
             output = f"{proc.stdout}\n{proc.stderr}".strip()
-            passed = proc.returncode == 0 and "1 passed" in output
+            passed = proc.returncode == 0
             error_type = self._extract_error_type(output)
             error_message = self._extract_error_message(output)
             return RunRecord(

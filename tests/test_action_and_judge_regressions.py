@@ -12,6 +12,7 @@ import pytest
 
 from models import FlakeForgeAction, RunRecord, RewardBreakdown
 from agent.unified_agent import extract_patch, extract_think
+from server.docker_runner import DockerTestRunner
 from server.patch_applier import parse_search_replace_hunks, apply_search_replace_patch
 from server.reward import (
     compute_format_reward,
@@ -109,6 +110,26 @@ replacement
 >>>>>>> REPLACE"""
             result = apply_search_replace_patch(Path(tmpdir), patch)
             assert result["success"] is False
+
+
+class TestRunnerRegressions:
+    """Regression tests for pytest result parsing."""
+
+    def test_quiet_pytest_success_counts_as_passed(self):
+        """Quiet pytest output may omit '1 passed', but return code 0 is success."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            (root / "pytest.ini").write_text("[pytest]\naddopts = -q\n", encoding="utf-8")
+            (tests_dir / "test_ok.py").write_text(
+                "def test_ok():\n    assert True\n",
+                encoding="utf-8",
+            )
+
+            result = DockerTestRunner(str(root)).run_test("tests/test_ok.py::test_ok")
+
+            assert result.passed is True
 
 
 class TestRewardRegressions:
