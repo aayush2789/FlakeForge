@@ -1,16 +1,11 @@
 """Flaky test cases for timing race detection."""
 
 import asyncio
-import sys
-from pathlib import Path
 
-# Add parent directory to path
-# sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
 
 from source import fetch_data_with_race, sync_fetch_with_cache
 
-
-import asyncio
 
 @pytest.mark.asyncio
 async def test_fetch_should_complete():

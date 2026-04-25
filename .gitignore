@@ -7,3 +7,4 @@ seed_repos/
 .venv/
 .env
 outputs/
+docs/

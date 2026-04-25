@@ -1,0 +1,60 @@
+# VCS
+.git
+.gitattributes
+.gitignore
+
+# Secrets (never bake into images)
+.env
+.env.*
+!.env.template
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Packaging / local install metadata
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Project artifacts (see .gitignore)
+outputs/
+seed_repos/
+
+# Docs and notes — not needed in runtime images
+docs/
+
+# Editors / OS
+.cursor/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Optional frontend tooling if present
+node_modules/
+client/node_modules/
+.npm/

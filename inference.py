@@ -332,7 +332,7 @@ class LLMBackend:
 
 
 def _build_default_runner(repo_path: str) -> Optional[Any]:
-    """Create an environment runner adapter that exposes run_single()."""
+    """Wrap DockerTestRunner for FlakeForgeEnvironment (expects run_test)."""
     try:
         from server.docker_runner import DockerTestRunner
     except Exception:
@@ -344,8 +344,11 @@ def _build_default_runner(repo_path: str) -> Optional[Any]:
     base_runner = DockerTestRunner(repo_path)
 
     class _RunnerAdapter:
+        def run_test(self, test_identifier: str):
+            return base_runner.run_test(test_identifier)
+
         def run_single(self, test_identifier: str) -> Dict[str, Any]:
-            record = base_runner.run_test(test_identifier)
+            record = self.run_test(test_identifier)
             return {
                 "passed": bool(record.passed),
                 "duration_ms": int(record.duration_ms),
