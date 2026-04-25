@@ -41,17 +41,18 @@ class LLMBackend:
 
     def __init__(
         self,
-        model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+        model_name: Optional[str] = None,
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
-        max_tokens: int = 4096,
-        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
     ) -> None:
-        self.model_name = model_name
-        self.api_base = api_base or os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
-        self.max_tokens = max_tokens
-        self.temperature = temperature
+        self.model_name = model_name or os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
+        self.api_base = api_base or os.environ.get("API_BASE_URL") or os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+        self.api_key = api_key or os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY", "EMPTY")
+        
+        self.max_tokens = int(max_tokens or os.environ.get("MAX_TOKENS", 4096))
+        self.temperature = float(temperature or os.environ.get("TEMPERATURE", 0.7))
 
     def generate(self, prompt: str, *, system_prompt: str) -> str:
         """Generate a completion using an OpenAI-compatible API."""
@@ -164,8 +165,8 @@ async def run_episode(
 def run_inference(
     repo_path: str,
     test_identifier: str,
-    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
-    max_steps: int = 8,
+    model_name: Optional[str] = None,
+    max_steps: Optional[int] = None,
     num_runs: int = 10,
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -177,6 +178,8 @@ def run_inference(
     flaky test. It creates the environment and agent, runs an episode,
     and returns the result.
     """
+    # Load defaults from environment
+    max_steps = int(max_steps or os.environ.get("INFERENCE_MAX_STEPS", 8))
     # Create environment
     env = FlakeForgeEnvironment(
         repo_path=repo_path,

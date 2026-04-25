@@ -45,22 +45,30 @@ def check_requirements():
 
 
 def check_api_key():
-    """Check if NVIDIA API key is set."""
+    """Check if API keys and config are set."""
     print("🔑 Checking API Key...")
     
+    # Priority: NVIDIA_API_KEY then OPENAI_API_KEY
     api_key = os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY")
     
     if api_key:
         masked = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
         print(f"  ✓ API Key found: {masked}")
-        return True
     else:
         print("  ✗ API Key NOT found")
         print("\n  Set it with:")
         print("    export NVIDIA_API_KEY='your-key-here'")
-        print("  Or create a .env file:")
-        print("    export $(cat .env | xargs)")
-        return False
+
+    # Also check other active vars
+    model = os.getenv("MODEL_NAME")
+    if model:
+        print(f"  ✓ Model: {model}")
+    
+    base_url = os.getenv("ENV_BASE_URL")
+    if base_url:
+        print(f"  ✓ Server URL: {base_url}")
+
+    return bool(api_key)
 
 
 def show_timing_race():

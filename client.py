@@ -57,7 +57,7 @@ class FlakeForgeClient:
         env_url: Optional[str] = None,
     ) -> None:
         self.agent = agent
-        self.env_url = env_url or os.environ.get("FLAKEFORGE_ENV_URL", "http://localhost:8080")
+        self.env_url = env_url or os.environ.get("ENV_BASE_URL", "http://localhost:8080")
 
     def generate_action(self, observation: FlakeForgeObservation) -> FlakeForgeAction:
         """Generate a unified action from an observation."""

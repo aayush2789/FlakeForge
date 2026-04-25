@@ -19,13 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from openenv.core.env_server.types import (
-    Action,
-    EnvInfo,
-    Observation,
-    State,
-    StepOutput,
-)
+from openenv.core.env_server.interfaces import Environment
 
 try:
     from models import (
@@ -44,7 +38,7 @@ try:
     )
     from server.patch_applier import apply_search_replace_patch
     from server.reward import compute_verifiable_reward
-    from server.causal_graph import CausalGraphBuilder
+    from server.causal_graph import CrossRepoGraphBuilder
 except ImportError:
     from ..models import (
         FlakeForgeAction,
@@ -62,7 +56,7 @@ except ImportError:
     )
     from ..server.patch_applier import apply_search_replace_patch
     from ..server.reward import compute_verifiable_reward
-    from ..server.causal_graph import CausalGraphBuilder
+    from ..server.causal_graph import CrossRepoGraphBuilder
 
 try:
     from utils.logger import get_logger
@@ -76,7 +70,7 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-class FlakeForgeEnvironment:
+class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation, FlakeForgeState]):
     """V3 RL environment for flaky test repair.
 
     Unified step loop:
@@ -103,11 +97,18 @@ class FlakeForgeEnvironment:
         self.num_runs = num_runs
         self.runner = runner
         self.chaos_runner = chaos_runner
-        self.state: Optional[EpisodeState] = None
+        self._episode_state: Optional[EpisodeState] = None
+        self._openenv_state: Optional[FlakeForgeState] = None
 
-    def reset(self) -> StepOutput:
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> FlakeForgeObservation:
         """Initialize a new episode."""
-        episode_id = str(uuid.uuid4())[:8]
+        del seed, kwargs
+        episode_id = episode_id or str(uuid.uuid4())[:8]
         logger.info("[ENV] RESET episode=%s test=%s", episode_id, self.test_identifier)
 
         # Read source files
@@ -146,7 +147,7 @@ class FlakeForgeEnvironment:
         causal_graph_data, causal_hints = self._build_causal_graph(test_source)
 
         # Initialize state
-        self.state = EpisodeState(
+        self._episode_state = EpisodeState(
             episode_id=episode_id,
             test_identifier=self.test_identifier,
             repo_path=str(self.repo_path),
@@ -173,35 +174,32 @@ class FlakeForgeEnvironment:
         )
 
         observation = self._build_observation()
-
-        return StepOutput(
-            observation=observation,
-            state=FlakeForgeState(
-                episode_id=episode_id,
-                step_count=0,
-                done=False,
-                current_pass_rate=baseline_pass_rate,
-                baseline_pass_rate=baseline_pass_rate,
-            ),
-            reward=0.0,
+        observation.reward = 0.0
+        observation.done = False
+        self._openenv_state = FlakeForgeState(
+            episode_id=episode_id,
+            step_count=0,
             done=False,
-            info={
-                "episode_id": episode_id,
-                "baseline_pass_rate": baseline_pass_rate,
-                "baseline_entropy": baseline_entropy,
-                "deep_signals": {k: len(v) if isinstance(v, list) else v for k, v in deep_signals.items()},
-            },
+            current_pass_rate=baseline_pass_rate,
+            baseline_pass_rate=baseline_pass_rate,
         )
+        return observation
 
-    def step(self, action: FlakeForgeAction) -> StepOutput:
+    def step(
+        self,
+        action: FlakeForgeAction,
+        timeout_s: Optional[float] = None,
+        **kwargs: Any,
+    ) -> FlakeForgeObservation:
         """Execute one step of the unified agent loop."""
-        if self.state is None:
+        del timeout_s, kwargs
+        if self._episode_state is None:
             raise RuntimeError("Environment not initialized. Call reset() first.")
 
-        self.state.step_count += 1
+        self._episode_state.step_count += 1
         logger.info(
             "[ENV] STEP %d/%d category=%s",
-            self.state.step_count,
+            self._episode_state.step_count,
             self.max_steps,
             action.predicted_category,
         )
@@ -240,10 +238,10 @@ class FlakeForgeEnvironment:
             ]
             post_pass_rate = sum(1 for r in post_runs if r.passed) / max(len(post_runs), 1)
         else:
-            post_pass_rate = self.state.current_pass_rate
+            post_pass_rate = self._episode_state.current_pass_rate
 
         # --- 4. Compute reward ---
-        pre_entropy = failure_mode_entropy(self.state.run_history[-self.num_runs:])
+        pre_entropy = failure_mode_entropy(self._episode_state.run_history[-self.num_runs:])
         observation = self._build_observation()  # Build before reward for causal proximity
 
         reward_breakdown = compute_verifiable_reward(
@@ -251,90 +249,74 @@ class FlakeForgeEnvironment:
             observation=observation,
             patch_result=patch_result,
             post_run_results=post_run_dicts,
-            baseline_pass_rate=self.state.baseline_pass_rate,
+            baseline_pass_rate=self._episode_state.baseline_pass_rate,
             pre_entropy=pre_entropy,
         )
 
         # --- 5. Update state ---
-        self.state.current_pass_rate = post_pass_rate
-        self.state.run_history.extend(post_runs)
-        self.state.last_think_text = action.think_text
-        self.state.last_patch_text = action.patch_text
-        self.state.last_reward = reward_breakdown.total_reward
-        self.state.last_reward_breakdown = reward_breakdown.to_dict()
+        self._episode_state.current_pass_rate = post_pass_rate
+        self._episode_state.run_history.extend(post_runs)
+        self._episode_state.last_think_text = action.think_text
+        self._episode_state.last_patch_text = action.patch_text
+        self._episode_state.last_reward = reward_breakdown.total_reward
+        self._episode_state.last_reward_breakdown = reward_breakdown.to_dict()
 
         if patch_result["success"]:
-            self.state.patches_applied.append(PatchRecord(
+            self._episode_state.patches_applied.append(PatchRecord(
                 patch_text=action.patch_text,
                 target_files=patch_result.get("files_modified", []),
                 lines_changed=patch_result.get("lines_changed", 0),
                 pass_rate_after=post_pass_rate,
                 applied_successfully=True,
             ))
-            self.state.total_diff_lines += patch_result.get("lines_changed", 0)
+            self._episode_state.total_diff_lines += patch_result.get("lines_changed", 0)
 
         # Check for regression
-        if post_pass_rate < self.state.baseline_pass_rate - 0.1:
-            self.state.regression_detected = True
+        if post_pass_rate < self._episode_state.baseline_pass_rate - 0.1:
+            self._episode_state.regression_detected = True
 
         # Re-read modified sources
-        self.state.current_test_source, self.state.current_source_under_test = self._read_sources()
+        self._episode_state.current_test_source, self._episode_state.current_source_under_test = self._read_sources()
 
         # Determine if episode is terminal
         done = (
             post_pass_rate >= 1.0  # Full stability achieved
-            or self.state.step_count >= self.max_steps
-            or self.state.regression_detected
+            or self._episode_state.step_count >= self.max_steps
+            or self._episode_state.regression_detected
         )
-        self.state.done = done
+        self._episode_state.done = done
 
         # Build final observation with updated signals
         final_observation = self._build_observation()
         final_observation.reward = reward_breakdown.total_reward
         final_observation.done = done
+        self._openenv_state = FlakeForgeState(
+            episode_id=self._episode_state.episode_id,
+            step_count=self._episode_state.step_count,
+            done=done,
+            current_pass_rate=post_pass_rate,
+            baseline_pass_rate=self._episode_state.baseline_pass_rate,
+            regression_detected=self._episode_state.regression_detected,
+        )
 
         logger.info(
             "[ENV] REWARD total=%.4f breakdown=%s done=%s pass_rate=%.2f→%.2f",
             reward_breakdown.total_reward,
             {k: round(v, 3) for k, v in reward_breakdown.to_dict().items()},
             done,
-            self.state.baseline_pass_rate,
+            self._episode_state.baseline_pass_rate,
             post_pass_rate,
         )
 
-        return StepOutput(
-            observation=final_observation,
-            state=FlakeForgeState(
-                episode_id=self.state.episode_id,
-                step_count=self.state.step_count,
-                done=done,
-                current_pass_rate=post_pass_rate,
-                baseline_pass_rate=self.state.baseline_pass_rate,
-                regression_detected=self.state.regression_detected,
-            ),
-            reward=reward_breakdown.total_reward,
-            done=done,
-            info={
-                "reward_breakdown": reward_breakdown.to_dict(),
-                "patch_result": {
-                    "success": patch_result["success"],
-                    "error": patch_result.get("error"),
-                    "files_modified": patch_result.get("files_modified", []),
-                    "lines_changed": patch_result.get("lines_changed", 0),
-                },
-                "pass_rate_delta": round(post_pass_rate - self.state.baseline_pass_rate, 4),
-                "step": self.state.step_count,
-                "done_reason": self._done_reason(post_pass_rate, done),
-            },
-        )
+        return final_observation
 
     def _build_observation(self) -> FlakeForgeObservation:
         """Build a V3 observation from current state."""
-        if self.state is None:
+        if self._episode_state is None:
             raise RuntimeError("State not initialized")
 
         # Duration fingerprint
-        durations = [r.duration_ms for r in self.state.run_history[-self.num_runs:]]
+        durations = [r.duration_ms for r in self._episode_state.run_history[-self.num_runs:]]
         dur_mean = sum(durations) / max(len(durations), 1) if durations else 0
         dur_std = (
             math.sqrt(sum((d - dur_mean) ** 2 for d in durations) / max(len(durations), 1))
@@ -342,42 +324,42 @@ class FlakeForgeEnvironment:
         )
 
         return FlakeForgeObservation(
-            episode_id=self.state.episode_id,
-            test_identifier=self.state.test_identifier,
-            step=self.state.step_count,
-            steps_remaining=self.state.steps_remaining,
-            test_function_source=self.state.current_test_source,
-            source_under_test=self.state.current_source_under_test,
-            relevant_imports=self._extract_imports(self.state.current_test_source),
-            file_tree=self.state.file_tree,
-            run_history=self.state.run_history[-20:],
-            current_pass_rate=self.state.current_pass_rate,
-            baseline_pass_rate=self.state.baseline_pass_rate,
-            patches_applied=self.state.patches_applied,
-            total_diff_lines=self.state.total_diff_lines,
+            episode_id=self._episode_state.episode_id,
+            test_identifier=self._episode_state.test_identifier,
+            step=self._episode_state.step_count,
+            steps_remaining=self._episode_state.steps_remaining,
+            test_function_source=self._episode_state.current_test_source,
+            source_under_test=self._episode_state.current_source_under_test,
+            relevant_imports=self._extract_imports(self._episode_state.current_test_source),
+            file_tree=self._episode_state.file_tree,
+            run_history=self._episode_state.run_history[-20:],
+            current_pass_rate=self._episode_state.current_pass_rate,
+            baseline_pass_rate=self._episode_state.baseline_pass_rate,
+            patches_applied=self._episode_state.patches_applied,
+            total_diff_lines=self._episode_state.total_diff_lines,
             # V3 deep signals
-            module_cache_violations=self.state.module_cache_violations,
-            fixture_scope_risks=self.state.fixture_scope_risks,
-            mock_residue_sites=self.state.mock_residue_sites,
-            import_side_effect_files=self.state.import_side_effect_files,
-            async_contamination_alive=self.state.async_contamination_alive,
+            module_cache_violations=self._episode_state.module_cache_violations,
+            fixture_scope_risks=self._episode_state.fixture_scope_risks,
+            mock_residue_sites=self._episode_state.mock_residue_sites,
+            import_side_effect_files=self._episode_state.import_side_effect_files,
+            async_contamination_alive=self._episode_state.async_contamination_alive,
             # Causal frontier
-            failure_frontier=self.state.failure_frontier,
-            call_chain_to_frontier=self.state.call_chain_to_frontier,
-            boundary_crossings=self.state.boundary_crossings,
+            failure_frontier=self._episode_state.failure_frontier,
+            call_chain_to_frontier=self._episode_state.call_chain_to_frontier,
+            boundary_crossings=self._episode_state.boundary_crossings,
             # iDFlakies
-            order_dependency_detected=self.state.order_dependency_detected,
-            infrastructure_sensitive=self.state.infrastructure_sensitive,
+            order_dependency_detected=self._episode_state.order_dependency_detected,
+            infrastructure_sensitive=self._episode_state.infrastructure_sensitive,
             # Causal graph
-            causal_graph=self.state.causal_graph,
-            causal_hints=self.state.causal_hints,
+            causal_graph=self._episode_state.causal_graph,
+            causal_hints=self._episode_state.causal_hints,
             # Failure analysis
-            failing_stack_trace=self.state.failing_stack_trace,
+            failing_stack_trace=self._episode_state.failing_stack_trace,
             duration_fingerprint={"mean": dur_mean, "std": dur_std},
             # Episode context
-            last_think_text=self.state.last_think_text,
-            last_patch_text=self.state.last_patch_text,
-            last_reward=self.state.last_reward,
+            last_think_text=self._episode_state.last_think_text,
+            last_patch_text=self._episode_state.last_patch_text,
+            last_reward=self._episode_state.last_reward,
         )
 
     def _run_tests(self, n: int) -> List[RunRecord]:
@@ -529,11 +511,20 @@ class FlakeForgeEnvironment:
 
     def _build_causal_graph(self, test_source: str) -> Tuple[Optional[Dict], List[str]]:
         """Build causal graph for the test."""
+        del test_source
         try:
-            builder = CausalGraphBuilder(str(self.repo_path))
-            graph = builder.build(test_source, self.test_identifier)
-            hints = builder.get_hints() if hasattr(builder, "get_hints") else []
-            return graph, hints
+            test_file, _, test_func = self.test_identifier.partition("::")
+            entry_file = str(self.repo_path / test_file)
+            entry_function = test_func or ""
+
+            if not entry_function:
+                return None, []
+
+            builder = CrossRepoGraphBuilder(str(self.repo_path), max_depth=3)
+            graph = builder.build(entry_file=entry_file, entry_function=entry_function)
+            graph_dict = graph.to_observation_dict()
+            hints = list(graph_dict.get("boundary_warnings", []))[:5]
+            return graph_dict, hints
         except Exception as exc:
             logger.debug("[ENV] Causal graph construction failed: %s", exc)
             return None, []
@@ -548,11 +539,33 @@ class FlakeForgeEnvironment:
             return "in_progress"
         if pass_rate >= 1.0:
             return "fully_stable"
-        if self.state and self.state.regression_detected:
+        if self._episode_state and self._episode_state.regression_detected:
             return "regression_detected"
-        if self.state and self.state.step_count >= self.max_steps:
+        if self._episode_state and self._episode_state.step_count >= self.max_steps:
             return "max_steps_reached"
         return "unknown"
+
+    @property
+    def state(self) -> FlakeForgeState:
+        if self._openenv_state is not None:
+            return self._openenv_state
+        if self._episode_state is not None:
+            return FlakeForgeState(
+                episode_id=self._episode_state.episode_id,
+                step_count=self._episode_state.step_count,
+                done=self._episode_state.done,
+                current_pass_rate=self._episode_state.current_pass_rate,
+                baseline_pass_rate=self._episode_state.baseline_pass_rate,
+                regression_detected=self._episode_state.regression_detected,
+            )
+        return FlakeForgeState(
+            episode_id="",
+            step_count=0,
+            done=False,
+            current_pass_rate=0.0,
+            baseline_pass_rate=0.0,
+            regression_detected=False,
+        )
 
 
 # ── Factory for OpenEnv ──────────────────────────────────────────────────────
