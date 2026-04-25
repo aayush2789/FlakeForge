@@ -36,7 +36,7 @@ try:
         build_deep_observation_signals,
         extract_failure_frontier,
     )
-    from server.patch_applier import apply_search_replace_patch, restore_repo_files
+    from server.patch_applier import restore_repo_files, write_validated_sources
     from server.patch_validator import PatchValidator
     from server.reward import compute_verifiable_reward
     from server.oracle_engine import verify_structured_think
@@ -58,7 +58,7 @@ except ImportError:
             build_deep_observation_signals,
             extract_failure_frontier,
         )
-        from ..server.patch_applier import apply_search_replace_patch, restore_repo_files
+        from ..server.patch_applier import restore_repo_files, write_validated_sources
         from ..server.patch_validator import PatchValidator
         from ..server.reward import compute_verifiable_reward
         from ..server.oracle_engine import verify_structured_think
@@ -79,7 +79,7 @@ except ImportError:
             build_deep_observation_signals,
             extract_failure_frontier,
         )
-        from FlakeForge.server.patch_applier import apply_search_replace_patch, restore_repo_files
+        from FlakeForge.server.patch_applier import restore_repo_files, write_validated_sources
         from FlakeForge.server.patch_validator import PatchValidator
         from FlakeForge.server.reward import compute_verifiable_reward
         from FlakeForge.server.oracle_engine import verify_structured_think
@@ -272,15 +272,25 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 action.patch_text,
                 repo_path=self.repo_path,
                 pre_sources=pre_sources or None,
+                claims=(
+                    action.structured_think.claims
+                    if action.structured_think is not None and action.structured_think.claims
+                    else None
+                ),
                 default_target=self._resolve_default_target(),
                 failure_frontier=self._episode_state.failure_frontier,
                 call_chain=self._episode_state.call_chain_to_frontier,
             )
-            rollback_snapshots = dict(validation.simulate_result.get("rollback_snapshots") or {})
+            rollback_snapshots = dict(
+                validation.simulate_result.get("original_sources")
+                or validation.simulate_result.get("rollback_snapshots")
+                or {}
+            )
             if not validation.is_valid:
+                first_error = validation.errors[0] if validation.errors else "patch_validation_failed"
                 patch_result = {
                     "success": False,
-                    "error": "patch_validation_failed",
+                    "error": first_error,
                     "validation_errors": list(validation.errors),
                     "validation_warnings": list(validation.warnings),
                     "validation_score": validation.score,
@@ -298,11 +308,38 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                     validation.warnings,
                 )
             else:
-                patch_result = apply_search_replace_patch(
-                    repo_path=self.repo_path,
-                    patch_text=action.patch_text,
-                    default_target=self._resolve_default_target(),
-                )
+                sim = validation.simulate_result
+                try:
+                    write_validated_sources(
+                        self.repo_path,
+                        dict(sim.get("modified_sources") or {}),
+                    )
+                    patch_result = {
+                        "success": True,
+                        "files_modified": list(sim.get("files_modified") or []),
+                        "lines_changed": int(sim.get("lines_changed") or 0),
+                        "hunks_applied": int(sim.get("hunks_applied") or 0),
+                        "diff": sim.get("diff") or "",
+                        "error": None,
+                        "noop": bool(sim.get("noop", False)),
+                        "protected_file": bool(sim.get("protected_file", False)),
+                        "fuzzy_applied": bool(sim.get("fuzzy_applied", False)),
+                    }
+                except Exception as exc:
+                    if rollback_snapshots:
+                        restore_repo_files(self.repo_path, rollback_snapshots)
+                    patch_result = {
+                        "success": False,
+                        "files_modified": [],
+                        "lines_changed": 0,
+                        "hunks_applied": 0,
+                        "diff": "",
+                        "error": f"validated_write_failed: {exc}",
+                        "noop": False,
+                        "protected_file": False,
+                        "fuzzy_applied": False,
+                        "rolled_back": True,
+                    }
                 patch_result["validation_errors"] = []
                 patch_result["validation_warnings"] = list(validation.warnings)
                 patch_result["validation_score"] = validation.score

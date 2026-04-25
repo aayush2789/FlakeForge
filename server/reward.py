@@ -111,11 +111,13 @@ def compute_compile_reward(
         1.0 if patch applied + no syntax errors
         0.5 if patch applied but has warnings
        -1.0 if patch failed for generic reasons (not validator rejection)
-        0.0 if patch was rejected by PatchValidator (penalty lives in patch_validation_signal)
+       -0.5 if patch was rejected by PatchValidator (no filesystem mutation)
         0.0 if apply was rolled back after a sanity syntax check (disk restored)
        -0.5 if syntax error after successful apply
     """
-    if rejected_by_validator or rolled_back:
+    if rejected_by_validator:
+        return -0.5
+    if rolled_back:
         return 0.0
     if not patch_applied_successfully:
         return -1.0

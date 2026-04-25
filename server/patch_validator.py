@@ -149,7 +149,7 @@ def _hard_anti_hack_errors(hunks: Sequence[Any]) -> List[str]:
         search_lower = hunk.search_text.lower()
         replace_lower = hunk.replace_text.lower()
 
-        if hunk.replace_text.count("assert") < hunk.search_text.count("assert"):
+        if replace_lower.count("assert") < search_lower.count("assert"):
             errors.append("anti_hack_assertion_deletion")
 
         for pattern in _SLEEP_PATTERNS:
@@ -228,8 +228,9 @@ def _defined_names(tree: ast.AST) -> Set[str]:
                     names.add(alias.asname or alias.name)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
-            for arg in getattr(node, "args", ast.arguments()).args:
-                names.add(arg.arg)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for arg in node.args.args:
+                    names.add(arg.arg)
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 names.update(_target_names(target))
@@ -413,6 +414,7 @@ class PatchValidator:
         *,
         repo_path: Path,
         pre_sources: Optional[Dict[str, str]] = None,
+        claims: Optional[Sequence[Any]] = None,
         default_target: Optional[str] = None,
         failure_frontier: str = "",
         call_chain: Optional[List[str]] = None,
@@ -422,6 +424,7 @@ class PatchValidator:
         Args:
             patch_text: Raw model patch (SEARCH/REPLACE hunks).
             pre_sources: Optional snapshot rel path -> text; overrides disk for simulation.
+            claims: Optional structured think claims; used for reasoning-action alignment.
             repo_path: Repository root.
             default_target: File path when hunks omit ``---`` header.
             failure_frontier: From observation (for proximity warnings).
@@ -449,6 +452,9 @@ class PatchValidator:
         hunks = parse_search_replace_hunks(patch_text)
         if not hunks:
             errors.append("no_valid_hunks_found")
+
+        if hunks:
+            errors.extend(_hard_anti_hack_errors(hunks))
 
         if errors:
             return ValidationResult(
@@ -484,7 +490,9 @@ class PatchValidator:
             )
 
         modified_sources: Dict[str, str] = sim.get("modified_sources") or {}
+        original_sources: Dict[str, str] = sim.get("original_sources") or sim.get("rollback_snapshots") or {}
         lines_changed = int(sim.get("lines_changed") or 0)
+        added_lines = _added_lines_for_hunks(hunks)
 
         # ── Stage 5 (partial): minimal destructiveness ─────────────────────
         if lines_changed > 120:
@@ -496,6 +504,28 @@ class PatchValidator:
             return ValidationResult(
                 is_valid=False,
                 errors=errors,
+                warnings=warnings,
+                score=0.0,
+                simulate_result=sim,
+            )
+
+        # ── Stage 2b: reasoning-to-action semantic bridge ──────────────────
+        errors.extend(
+            _reasoning_alignment_errors(
+                claims=claims,
+                original_sources=original_sources,
+                modified_sources=modified_sources,
+            )
+        )
+
+        smell_errors, smell_warnings = _flakiness_smell_errors(added_lines)
+        errors.extend(smell_errors)
+        warnings.extend(smell_warnings)
+
+        if errors:
+            return ValidationResult(
+                is_valid=False,
+                errors=sorted(set(errors)),
                 warnings=warnings,
                 score=0.0,
                 simulate_result=sim,
@@ -520,10 +550,31 @@ class PatchValidator:
             for msg in issues:
                 errors.append(f"structure: {msg}")
 
+            errors.extend(_libcst_errors(src, rel))
+            errors.extend(_introduced_name_errors(src, added_lines, rel))
+
         if errors:
             return ValidationResult(
                 is_valid=False,
-                errors=errors,
+                errors=sorted(set(errors)),
+                warnings=warnings,
+                score=0.0,
+                simulate_result=sim,
+            )
+
+        idempotency_errors, idempotency_warnings = _idempotency_issues(
+            repo_path=repo_path,
+            patch_text=patch_text,
+            default_target=default_target,
+            modified_sources=modified_sources,
+        )
+        errors.extend(idempotency_errors)
+        warnings.extend(idempotency_warnings)
+
+        if errors:
+            return ValidationResult(
+                is_valid=False,
+                errors=sorted(set(errors)),
                 warnings=warnings,
                 score=0.0,
                 simulate_result=sim,
