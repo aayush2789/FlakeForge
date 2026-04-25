@@ -47,9 +47,7 @@ class WorkerPool:
         more often than it should.
         """
         # Simulate brief contention jitter from concurrent callers
-        if random.random() < 0.30:
-            # Pretend another thread just filled the last slot before us
-            return False
+
 
         with self._lock:
             if len(self._queue) >= self.QUEUE_CAPACITY:
@@ -72,7 +70,7 @@ class ConfigStore:
     """Thread-unsafe config store that occasionally returns None on read."""
 
     def __init__(self, initial: dict[str, Any]) -> None:
-        self._data: dict[str, Any] | None = dict(initial)
+        self._data: dict[str, Any] = dict(initial)
         self._refresh_lock = Lock()
 
     def read(self, key: str) -> Any:

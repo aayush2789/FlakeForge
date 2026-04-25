@@ -1,33 +1,4 @@
-"""Oracle Engine — libcst-based differential claim verification.
-
-Architecture
-------------
-OracleEngine takes a list of ThinkClaims plus pre/post-patch source strings
-and dispatches each claim to the correct OraclePlugin based on its category.
-
-Each plugin verifies the claim against the pre-patch AST (bug present?) and
-the post-patch AST (bug removed/fixed?).  Polarity decides which direction
-must hold:
-
-  polarity="present" → bug must be detectable in pre-patch; bonus if removed post.
-  polarity="absent"  → bug must NOT be present post-patch.
-
-Per-claim scores
-  confirmed    +1.0
-  inconclusive +0.2
-  refuted      -1.0
-  unverified    0.0  (oracle not registered, or analysis raised an error)
-
-The engine aggregates per-claim scores and returns a normalised value in
-[-1, 1] plus the annotated claim list.
-
-libcst usage
-------------
-Plugins use libcst.metadata.MetadataWrapper with QualifiedNameProvider and
-ScopeProvider so they handle import aliases and nested scopes correctly.
-Falls back to lightweight AST string analysis when libcst metadata resolution
-fails (e.g. missing stubs), keeping the engine safe even in partial envs.
-"""
+"""Oracle Engine — libcst-based differential claim verification."""
 
 from __future__ import annotations
 
@@ -51,8 +22,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-
-# ── Lightweight source wrapper ─────────────────────────────────────────────────
 
 class _SourcePair:
     """Pre-patch and post-patch source text for a single file."""
@@ -93,8 +62,6 @@ def _build_source_map(
     }
 
 
-# ── Oracle plugin base ─────────────────────────────────────────────────────────
-
 class OraclePlugin(ABC):
     """Base class for a single-category claim verifier."""
 
@@ -112,8 +79,6 @@ class OraclePlugin(ABC):
         reason_note: short string that will be logged.
         """
 
-
-# ── Shared libcst helpers ──────────────────────────────────────────────────────
 
 def _resolve_location(location: str) -> Tuple[str, str, str]:
     """Parse 'path/to/file.py::ClassName.method' → (file, class_name, func_name)."""
@@ -194,8 +159,6 @@ def _qualified_names_in_function(
         return []
 
 
-# ── Plugin: RaceCondition / async_wait ────────────────────────────────────────
-
 _SYNC_PRIMITIVES = {
     "asyncio.Lock", "asyncio.Semaphore", "asyncio.Event",
     "threading.Lock", "threading.RLock", "threading.Semaphore",
@@ -274,8 +237,6 @@ class RaceConditionOracle(OraclePlugin):
         return None
 
 
-# ── Plugin: LRUCache / module_cache_pollution ─────────────────────────────────
-
 class LRUCacheOracle(OraclePlugin):
     """Verify module_cache_pollution claims.
 
@@ -335,8 +296,6 @@ class LRUCacheOracle(OraclePlugin):
         return False
 
 
-# ── Plugin: MockLeak / mock_residue ──────────────────────────────────────────
-
 class MockLeakOracle(OraclePlugin):
     """Verify mock_residue claims.
 
@@ -380,13 +339,10 @@ class MockLeakOracle(OraclePlugin):
         has_patch = any(p in source for p in self._MOCK_PATTERNS)
         if not has_patch:
             return False
-        # Heuristic: if patch call is balanced with 'with' or .stop(), it's scoped.
         scoped = ("with mock.patch" in source or "with patch" in source or
                   ".stop()" in source or "addCleanup" in source)
         return not scoped
 
-
-# ── Plugin: SharedState / shared_state ───────────────────────────────────────
 
 class SharedStateOracle(OraclePlugin):
     """Verify shared_state / test_order_dependency claims.
@@ -448,8 +404,6 @@ class SharedStateOracle(OraclePlugin):
         return False
 
 
-# ── Plugin: FixtureScope / fixture_scope_leak ────────────────────────────────
-
 class FixtureScopeOracle(OraclePlugin):
     """Verify fixture_scope_leak claims.
 
@@ -509,16 +463,13 @@ class FixtureScopeOracle(OraclePlugin):
         return False
 
 
-# ── Plugin registry ───────────────────────────────────────────────────────────
-
 _PLUGIN_REGISTRY: Dict[str, OraclePlugin] = {}
 
 
 def _register(*plugins: OraclePlugin) -> None:
     for p in plugins:
         _PLUGIN_REGISTRY[p.category] = p
-        # Alias concurrency ↔ async_wait and test_order_dependency ↔ shared_state.
-    _PLUGIN_REGISTRY.setdefault("concurrency", RaceConditionOracle())
+        _PLUGIN_REGISTRY.setdefault("concurrency", RaceConditionOracle())
     _PLUGIN_REGISTRY.setdefault("test_order_dependency", SharedStateOracle())
 
 
@@ -531,8 +482,6 @@ _register(
 )
 
 
-# ── Score mapping ──────────────────────────────────────────────────────────────
-
 _VERDICT_SCORES: Dict[str, float] = {
     "confirmed": 1.0,
     "inconclusive": 0.2,
@@ -540,8 +489,6 @@ _VERDICT_SCORES: Dict[str, float] = {
     "unverified": 0.0,
 }
 
-
-# ── Public API ────────────────────────────────────────────────────────────────
 
 def verify_structured_think(
     structured: StructuredThink,
@@ -591,7 +538,6 @@ def verify_structured_think(
 
     mean_claim_score = sum(claim_scores) / len(claim_scores)
 
-    # Add format penalty (already ≤ 0).
     raw_score = mean_claim_score + structured.format_penalty
     oracle_score = float(max(-1.0, min(1.0, raw_score)))
 

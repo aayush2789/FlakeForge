@@ -1,18 +1,4 @@
-"""V3 Deep Flakiness Detection Layer.
-
-Implements the five deep flakiness patterns from SE literature:
-1. Module Cache Pollution — @lru_cache, mutable defaults, global mutations
-2. Fixture Scope Contamination — session/module fixtures without yield teardown
-3. Mock Residue — patch() without with-context or .stop()
-4. Import Side-Effects — top-level module code with non-constant expressions
-5. Async/Thread Contamination — tasks/threads surviving past test boundaries
-
-Research sources:
-- Kraken Engineering: Module cache pollution patterns
-- Luo FSE 2014: Flaky test root cause taxonomy
-- pytest internals: Fixture scope contamination
-- Parry survey: Import side-effect patterns
-- FlakyLens OOPSLA 2025: Async Wait vs Concurrency discrimination
+"""Deep Flakiness Detection — AST-based pattern detection for five flaky-test categories.
 """
 
 from __future__ import annotations

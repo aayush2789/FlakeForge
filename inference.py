@@ -1,10 +1,4 @@
-"""V3 Inference Loop — unified agent with verifiable reward.
-
-Replaces the V2 two-phase inference (analyze → fix) with a single
-unified loop: observe → think+patch → apply → verify → reward.
-
-No judge calls. No hypothesis gating. Just execution-verified reward.
-"""
+"""Inference loop — unified agent with verifiable reward."""
 
 from __future__ import annotations
 
@@ -169,7 +163,7 @@ class LLMBackend:
         self.temperature = float(temperature or os.environ.get("TEMPERATURE", 0.2))
 
     def _openai_json_schema_response_format(self) -> Dict[str, Any]:
-        """Strict response_format for OpenAI-compatible backends that support it."""
+        """Strict response_format for OpenAI-compatible backends."""
         return {
             "type": "json_schema",
             "json_schema": {
@@ -190,19 +184,15 @@ class LLMBackend:
                                     "minItems": 1,
                                     "items": {
                                         "type": "object",
-                                        "additionalProperties": False,
+                                        "additionalProperties": True,
                                         "required": [
-                                            "claim_id",
                                             "category",
                                             "entity",
                                             "location",
-                                            "ast_node_type",
                                             "polarity",
-                                            "predicted_effect",
                                             "reason",
                                         ],
                                         "properties": {
-                                            "claim_id": {"type": "string"},
                                             "category": {
                                                 "type": "string",
                                                 "enum": [
@@ -223,9 +213,7 @@ class LLMBackend:
                                             },
                                             "entity": {"type": "string"},
                                             "location": {"type": "string"},
-                                            "ast_node_type": {"type": "string"},
                                             "polarity": {"type": "string", "enum": ["present", "absent"]},
-                                            "predicted_effect": {"type": "string"},
                                             "reason": {"type": "string"},
                                         },
                                     },
@@ -243,25 +231,19 @@ class LLMBackend:
                                     "minItems": 1,
                                     "items": {
                                         "type": "object",
-                                        "additionalProperties": False,
+                                        "additionalProperties": True,
                                         "required": [
-                                            "hunk_id",
                                             "file",
                                             "search",
                                             "replace",
-                                            "rationale",
-                                            "addresses_claim",
                                         ],
                                         "properties": {
-                                            "hunk_id": {"type": "string"},
                                             "file": {"type": "string"},
                                             "search": {"type": "string"},
                                             "replace": {"type": "string"},
-                                            "rationale": {"type": "string"},
-                                            "addresses_claim": {"type": "string"},
                                         },
                                     },
-                                }
+                                },
                             },
                         },
                     },
@@ -275,14 +257,11 @@ class LLMBackend:
             "think": {
                 "claims": [
                     {
-                        "claim_id": "c1",
                         "category": "unknown",
                         "entity": "",
                         "location": "",
-                        "ast_node_type": "",
                         "polarity": "present",
-                        "predicted_effect": "No patch is proposed because the LLM call failed.",
-                        "reason": "The backend call failed before a root cause could be verified.",
+                        "reason": "LLM call failed before root cause could be verified.",
                     }
                 ],
                 "confidence": 0.1,
@@ -379,7 +358,6 @@ def _build_default_runner(repo_path: str) -> Optional[Any]:
 
 
 def _should_use_remote_env() -> bool:
-    # Force local environment for V3 evaluation
     return False
 
 
@@ -416,7 +394,6 @@ async def run_episode(
         "reward_breakdown_history": [],
     }
 
-    # Reset environment
     reset_result = env.reset(**(reset_kwargs or {}))
     if asyncio.iscoroutine(reset_result):
         reset_result = await reset_result
@@ -432,7 +409,6 @@ async def run_episode(
         )
 
     while not step_output.done:
-        # Generate unified think+patch
         action = agent.generate(observation)
 
         if verbose:
@@ -444,14 +420,12 @@ async def run_episode(
                 len(action.patch_text),
             )
 
-        # Execute step
         step_result = env.step(action)
         if asyncio.iscoroutine(step_result):
             step_result = await step_result
         step_output = _as_step_output_like(step_result)
         observation = step_output.observation
 
-        # Log result
         reward = step_output.reward
         breakdown = step_output.info.get("reward_breakdown", {})
         done = step_output.done
@@ -469,7 +443,6 @@ async def run_episode(
         if not step_output.info.get("patch_result", {}).get("success", False) and verbose:
             logger.warning(f"    [DEBUG] Patch failed to apply. Raw response excerpt: {action.raw_response[:200]}...")
 
-        # Track trajectory
         step_data = {
             "step": step_output.state.step_count,
             "predicted_category": action.predicted_category,
@@ -499,7 +472,6 @@ async def run_episode(
                 step_output.info.get("done_reason", ""),
             )
 
-    # Finalize
     episode_result["steps"] = step_output.state.step_count
     episode_result["final_pass_rate"] = step_output.state.current_pass_rate
     episode_result["done_reason"] = step_output.info.get("done_reason", "unknown")
@@ -517,22 +489,18 @@ def run_inference(
     api_key: Optional[str] = None,
     verbose: bool = True,
 ) -> Dict[str, Any]:
-    """Run a FlakeForge V3 inference episode.
+    """Run a FlakeForge inference episode.
 
-    This is the main entry point for running the unified agent on a
-    flaky test. It creates the environment and agent, runs an episode,
-    and returns the result.
+    Creates the environment and agent, runs an episode, and returns
+    the result dict with trajectory, rewards, and metadata.
     """
-    # Load defaults from environment
     max_steps = int(max_steps or os.environ.get("INFERENCE_MAX_STEPS", 8))
-    # Create LLM backend
     backend = LLMBackend(
         model_name=model_name,
         api_base=api_base,
         api_key=api_key,
     )
 
-    # Create unified agent
     agent = UnifiedFlakeForgeAgent(backend=backend)
 
     if _should_use_remote_env():
@@ -607,7 +575,7 @@ def _default_test_id() -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run FlakeForge V3 unified inference episode")
+    parser = argparse.ArgumentParser(description="Run FlakeForge unified inference episode")
     parser.add_argument("--repo-path", default=_default_repo_path(), help="Path to target repo")
     parser.add_argument("--test-id", default=_default_test_id(), help="Target test identifier")
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"), help="LLM model name")
@@ -640,8 +608,6 @@ if __name__ == "__main__":
     main()
 
 
-# ── Reward Function for GRPO Training ─────────────────────────────────────
-
 def flakeforge_reward_fn(
     prompts: list,
     completions: list,
@@ -672,7 +638,6 @@ def flakeforge_reward_fn(
     for prompt, completion in zip(prompts, completions):
         completion_text = completion if isinstance(completion, str) else str(completion)
 
-        # Parse the completion
         action = FlakeForgeAction(
             raw_response=completion_text,
             think_text=extract_think(completion_text),
@@ -681,16 +646,12 @@ def flakeforge_reward_fn(
             predicted_confidence=extract_confidence_from_think(extract_think(completion_text)),
         )
 
-        # Format reward
         format_score = compute_format_reward(action)
-
-        # Reasoning consistency
         inferred_cat = infer_category_from_patch(action.patch_text)
         consistency_score = compute_reasoning_consistency(
             action.predicted_category, inferred_cat, action.think_text, action.patch_text
         )
 
-        # Composite training reward (no execution signals in offline mode)
         total = format_score * 1.0 + consistency_score * 0.5
         rewards.append(total)
 

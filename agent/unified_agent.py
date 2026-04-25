@@ -1,10 +1,4 @@
-"""V3 Unified FlakeForge Agent — single model, single forward pass.
-
-The model response is now a single structured JSON object containing
-``think`` and ``patch`` keys. The parser keeps legacy XML-block support as a
-fallback, but the primary path is JSON-only so reasoning wrappers such as
-``<think>`` cannot leak into the validator input.
-"""
+"""Unified FlakeForge Agent — single model, single forward pass producing JSON."""
 
 from __future__ import annotations
 
@@ -37,26 +31,19 @@ except ImportError:
 logger = get_logger(__name__)
 
 
-# ── Protocol ─────────────────────────────────────────────────────────────────
-
 class ModelBackend(Protocol):
     def generate(self, prompt: str, *, system_prompt: str) -> str: ...
 
-
-# ── System prompt ─────────────────────────────────────────────────────────────
 
 _UNIFIED_RESPONSE_SCHEMA = """{
   "think": {
     "claims": [
       {
-        "claim_id": "c1",
-        "category": "<one of ROOT_CAUSE_TYPES>",
-        "entity": "<function / class / variable name>",
-        "location": "<path/to/file.py::ClassName.method OR path/to/file.py::function>",
-        "ast_node_type": "<optional libcst/ast node type, e.g. FunctionDef>",
+        "category": "async_wait",
+        "entity": "fetch",
+        "location": "tests/test_flaky.py::test_fetch",
         "polarity": "present",
-        "predicted_effect": "<one sentence: expected pass-rate change>",
-        "reason": "<40 words or fewer: causal justification>"
+        "reason": "timeout too aggressive"
       }
     ],
     "confidence": 0.85
@@ -64,59 +51,44 @@ _UNIFIED_RESPONSE_SCHEMA = """{
   "patch": {
     "hunks": [
       {
-        "hunk_id": "h1",
-        "file": "<repo-relative path, e.g. pybrake/notifier.py>",
-        "search": "<exact lines to find, verbatim including indentation>",
-        "replace": "<replacement lines; empty string deletes the block>",
-        "rationale": "<one sentence: why this fixes the root cause>",
-        "addresses_claim": "<claim_id from think.claims, e.g. c1>"
+        "file": "tests/test_flaky.py",
+        "search": "    result = await asyncio.wait_for(fetch(), timeout=0.05)",
+        "replace": "    result = await asyncio.wait_for(fetch(), timeout=0.5)"
       }
     ]
   }
 }"""
 
-UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that identifies and fixes unreliable tests.
+UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that fixes flaky tests.
 
-You MUST respond with EXACTLY ONE JSON object and nothing else.
-
-The object MUST match this schema and key names:
+Respond with EXACTLY ONE JSON object matching this schema:
 {_UNIFIED_RESPONSE_SCHEMA}
 
-ROOT_CAUSE_TYPES: async_wait, concurrency, test_order_dependency,
-resource_leak, shared_state, network, platform_dependency, nondeterminism,
-import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
+REQUIRED KEYS:
+  think.claims[]: category, entity, location, polarity, reason
+  think.confidence: number 0-1
+  patch.hunks[]: file, search, replace
 
-Rules for "think":
-- "think.claims" is a non-empty list.
-- Each claim object must use exactly these model-facing keys:
-  claim_id, category, entity, location, ast_node_type, polarity, predicted_effect, reason.
-- "category" must be one ROOT_CAUSE_TYPES value.
-- "polarity" is "present" when you assert the bug exists in the current code.
-- "predicted_effect" is mandatory; forecast the expected pass-rate change.
-- Do not include validator-filled keys such as verdict, oracle_score, format_penalty, applied, or apply_error.
+OPTIONAL KEYS (include if helpful):
+  think.claims[]: claim_id, ast_node_type, predicted_effect
+  patch.hunks[]: hunk_id, rationale, addresses_claim
 
-Rules for "patch":
-- "patch.hunks" is a non-empty list of search/replace operations.
-- Each hunk object must use exactly these model-facing keys:
-  hunk_id, file, search, replace, rationale, addresses_claim.
-- "file" must be a repo-relative path.
-- "search" must be copied verbatim from the source shown in the observation, preserving indentation.
-- "replace" is the fixed replacement; use an empty string "" to delete the search block.
-- "addresses_claim" must equal a claim_id from "think.claims".
+category must be one of: async_wait, concurrency, test_order_dependency,
+  resource_leak, shared_state, network, platform_dependency, nondeterminism,
+  import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
 
-GLOBAL RULES:
-- Do NOT output XML tags such as <think> or <patch>.
-- Do NOT wrap your answer in Markdown fences (no ```).
-- Do NOT add text before or after the JSON object.
-- Do NOT add sleep() calls, retry decorators, or @pytest.mark.skip.
-- Prefer minimal, surgical fixes that address the root cause.
-- If uncertain about root cause, use category "unknown" rather than guessing.
+polarity: "present" = bug exists now, "absent" = bug was removed
 
-PENALTY: Any response that is not one valid JSON object receives a format penalty that reduces your reward.
+search: copy EXACT lines from the source, preserving indentation.
+replace: the fixed code; use "" to delete the block.
+
+RULES:
+- No XML tags, no Markdown fences, no text outside the JSON.
+- No sleep() injection, no @pytest.mark.skip, no assert deletion.
+- Prefer minimal, surgical fixes.
+- If unsure, use category "unknown".
 """
 
-
-# ── Prompt builder ────────────────────────────────────────────────────────────
 
 def build_unified_prompt(observation: FlakeForgeObservation) -> str:
     parts = ["=== FLAKY TEST OBSERVATION ===\n"]
@@ -260,8 +232,6 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
     return "\n".join(parts)
 
 
-# ── Patch extraction (unchanged search/replace format) ────────────────────────
-
 def _strip_markdown_fence(text: str) -> str:
     stripped = text.strip()
     m = re.fullmatch(r"```(?:[A-Za-z0-9_-]+)?\s*(.*?)\s*```", stripped, re.DOTALL)
@@ -368,8 +338,6 @@ def extract_patch(response: str) -> str:
     return ""
 
 
-# ── Structured think parsing ──────────────────────────────────────────────────
-
 _VALID_CATEGORIES = {
     "async_wait", "concurrency", "test_order_dependency", "resource_leak",
     "shared_state", "network", "platform_dependency", "nondeterminism",
@@ -429,16 +397,12 @@ def _parse_structured_think(think_raw: Any) -> StructuredThink:
         if not isinstance(rc, dict):
             partial_penalty = -0.3
             continue
-        # Strip unknown keys (rather than erroring).
         clean = {k: v for k, v in rc.items() if k in _ALLOWED_CLAIM_KEYS}
-        # Normalise category.
         if "category" in clean:
             clean["category"] = _normalise_category(clean["category"])
-        # Ensure polarity is valid.
         if clean.get("polarity") not in ("present", "absent"):
             clean["polarity"] = "present"
             partial_penalty = min(partial_penalty, -0.1)
-        # Auto-fill missing optional fields.
         clean.setdefault("claim_id", f"c{i+1}")
         clean.setdefault("entity", "")
         clean.setdefault("location", "")
@@ -498,7 +462,6 @@ def _parse_structured_patch(patch_raw: Any) -> "StructuredPatch":
         clean.setdefault("hunk_id", f"h{i+1}")
         clean.setdefault("rationale", "")
         clean.setdefault("addresses_claim", "")
-        # Mandatory fields — skip hunk if missing.
         if "file" not in clean or "search" not in clean or "replace" not in clean:
             partial_penalty = min(partial_penalty, -0.3)
             continue
@@ -525,14 +488,11 @@ def extract_think(response: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-# ── Backward-compat helpers (still used by reward.py / tests) ─────────────────
-
 def extract_category_from_think(think_text: str) -> str:
     """Extract predicted root cause from structured JSON or legacy free-form text."""
     st = _parse_structured_think(think_text)
     if st.claims and st.format_penalty == 0.0:
         return st.primary_category
-    # Legacy path: regex on free-form text.
     m = re.search(r"Root\s*Cause:\s*(\w+)", think_text, re.IGNORECASE)
     if m:
         return _normalise_category(m.group(1))
@@ -544,7 +504,6 @@ def extract_confidence_from_think(think_text: str) -> float:
     st = _parse_structured_think(think_text)
     if st.claims and st.format_penalty == 0.0:
         return st.confidence
-    # Legacy regex fallback.
     m = re.search(r"confidence:\s*([\d.]+)", think_text, re.IGNORECASE)
     if m:
         try:
@@ -578,17 +537,8 @@ def infer_category_from_patch(patch_text: str) -> str:
     return "unknown"
 
 
-# ── Agent ─────────────────────────────────────────────────────────────────────
-
 class UnifiedFlakeForgeAgent:
-    """V3 Unified agent — one model, one forward pass.
-
-    The response is expected to be one structured JSON object. If the model
-    emits well-formed JSON, structured_think and structured_patch are populated
-    and the patch hunks are converted to validator-compatible search/replace
-    text. Legacy XML parsing remains as a fallback so older completions do not
-    crash an episode.
-    """
+    """Unified agent — one model, one JSON forward pass with XML fallback."""
 
     def __init__(self, backend: ModelBackend) -> None:
         self.backend = backend
@@ -610,11 +560,9 @@ class UnifiedFlakeForgeAgent:
         else:
             think_raw = extract_think(raw_response)
             patch_raw = extract_patch(raw_response)
-            # Try structured JSON parse for both legacy blocks; never raises.
             structured_think = _parse_structured_think(think_raw)
             structured_patch = _parse_structured_patch(patch_raw)
 
-        # Derive scalar fields from structured parse, falling back to regex.
         predicted_category = (
             structured_think.primary_category
             if structured_think.claims

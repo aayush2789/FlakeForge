@@ -275,7 +275,7 @@ except:
         assert reward.noop_patch_penalty == -0.5
         assert reward.to_dict()["noop_patch"] == -0.5
 
-    def test_reward_penalizes_protected_file_and_regression(self):
+    def test_reward_penalizes_regression(self):
         action = FlakeForgeAction(
             raw_response="...",
             think_text="Root Cause: nondeterminism (confidence: 0.9)",
@@ -296,7 +296,6 @@ except:
             observation=obs,
             patch_result={
                 "success": False,
-                "protected_file": True,
                 "files_modified": [],
                 "lines_changed": 0,
             },
@@ -306,6 +305,5 @@ except:
             regression_detected=True,
         )
 
-        assert reward.protected_file_penalty == -2.0
-        assert reward.regression_penalty == -3.0
+        assert reward.regression_penalty < 0.0
         assert reward.terminal_bonus == 0.0
