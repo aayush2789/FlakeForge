@@ -49,7 +49,7 @@ class ConfigStore:
     """Small config store used by the request pipeline."""
 
     def __init__(self, initial: dict[str, Any]) -> None:
-        self._data: dict[str, Any] | None = dict(initial)
+        self._data: dict[str, Any] = dict(initial)
         self._refresh_lock = Lock()
 
     def read(self, key: str) -> Any:

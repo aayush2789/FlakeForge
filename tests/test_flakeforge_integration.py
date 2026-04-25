@@ -1,12 +1,4 @@
-"""V3 FlakeForge Integration Tests.
-
-Tests the unified agent architecture end-to-end:
-- Observation building with deep flakiness signals
-- Unified agent prompt construction and response parsing
-- Patch application via search/replace hunks
-- Six-signal reward computation
-- Environment step loop
-"""
+"""FlakeForge Integration Tests."""
 
 import math
 import os
@@ -15,8 +7,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pytest
-
-# ── Test Imports ──────────────────────────────────────────────────────────────
 
 from models import (
     FlakeForgeAction,
@@ -47,8 +37,6 @@ from server.reward import (
     compute_reasoning_consistency,
 )
 
-
-# ── 1. Think/Patch Parsing ───────────────────────────────────────────────────
 
 class TestThinkPatchParsing:
     """Test extraction of <think> and <patch> blocks from model output."""
@@ -107,6 +95,37 @@ Strategy: Increase timeout
         assert "<<<<<<< SEARCH" in patch
         assert ">>>>>>> REPLACE" in patch
 
+    def test_extract_minimal_json_response(self):
+        """7B-model friendly: only required fields, no optional keys."""
+        response = """{
+  "think": {
+    "claims": [
+      {
+        "category": "async_wait",
+        "entity": "fetch",
+        "location": "tests/test_flaky.py::test_fetch",
+        "polarity": "present",
+        "reason": "Timeout too aggressive."
+      }
+    ],
+    "confidence": 0.85
+  },
+  "patch": {
+    "hunks": [
+      {
+        "file": "tests/test_flaky.py",
+        "search": "    result = await asyncio.wait_for(fetch(), timeout=0.05)",
+        "replace": "    result = await asyncio.wait_for(fetch(), timeout=0.5)"
+      }
+    ]
+  }
+}"""
+        assert '"claims"' in extract_think(response)
+        patch = extract_patch(response)
+        assert "--- tests/test_flaky.py" in patch
+        assert "<<<<<<< SEARCH" in patch
+        assert ">>>>>>> REPLACE" in patch
+
     def test_extract_empty_response(self):
         assert extract_think("") == ""
         assert extract_patch("") == ""
@@ -134,8 +153,6 @@ Strategy: Increase timeout
         assert extract_confidence_from_think("confidence: 1.5") == 1.0
         assert extract_confidence_from_think("confidence: -0.5") == 0.0
 
-
-# ── 2. Patch Parsing ────────────────────────────────────────────────────────
 
 class TestPatchParsing:
     """Test search/replace hunk parsing."""
@@ -196,8 +213,6 @@ y = 42
             assert "y = 42" in content
             assert "y = 2" not in content
 
-
-# ── 3. Reward Signals ───────────────────────────────────────────────────────
 
 class TestRewardSignals:
     """Test individual reward signal computation."""
@@ -300,8 +315,6 @@ timeout=0.5
         assert penalty == 0.0
 
 
-# ── 4. Reasoning Consistency ────────────────────────────────────────────────
-
 class TestReasoningConsistency:
     """Test reasoning-patch consistency verification."""
 
@@ -324,8 +337,6 @@ class TestReasoningConsistency:
         assert score == -0.5
 
 
-# ── 5. Category Inference from Patch ─────────────────────────────────────────
-
 class TestCategoryInference:
     """Test inferring root cause category from what the patch modifies."""
 
@@ -344,8 +355,6 @@ class TestCategoryInference:
     def test_infer_cache(self):
         assert infer_category_from_patch("cache_clear()") == "module_cache_pollution"
 
-
-# ── 6. Failure Mode Entropy ─────────────────────────────────────────────────
 
 class TestFailureModeEntropy:
     """Test Shannon entropy calculation."""
@@ -372,10 +381,8 @@ class TestFailureModeEntropy:
         assert failure_mode_entropy(runs) == 0.0
 
 
-# ── 7. Observation Building ─────────────────────────────────────────────────
-
 class TestObservationBuilding:
-    """Test V3 observation construction."""
+    """Test observation construction."""
 
     def test_observation_has_deep_signals(self):
         obs = FlakeForgeObservation(
@@ -420,8 +427,6 @@ class TestObservationBuilding:
         )
         assert len(obs.run_history) == 20  # Capped at 20
 
-
-# ── 8. Root Cause Types ─────────────────────────────────────────────────────
 
 class TestRootCauseTypes:
     """Verify root cause taxonomy is complete."""

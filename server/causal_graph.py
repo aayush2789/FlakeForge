@@ -1,18 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""
-Pillar 1 — Cross-Repository Causal Graph Engine.
-
-Traces function call chains across files and packages up to a configurable
-depth, detects external boundaries (HTTP / gRPC / DB / queue), and returns
-a compact, token-efficient graph summary for the LLM observation.
-
-Design inspired by AMER-RCL (ICSE 2026): recursiveness, multi-dimensional
-expansion, and cross-modal reasoning are the three pillars of real SRE RCA.
+"""Cross-Repository Causal Graph Engine — traces call chains and detects boundaries.
 """
 
 from __future__ import annotations

@@ -1,17 +1,4 @@
-"""V3 Patch Applier — Search/Replace hunk parser and applier.
-
-Replaces the old action_executor.py dispatch logic.
-The model outputs standard search/replace blocks, and this module
-applies them atomically with rollback on failure.
-
-Format:
-    --- path/to/file.py
-    <<<<<<< SEARCH
-    exact lines to find
-    =======
-    replacement lines
-    >>>>>>> REPLACE
-"""
+"""Patch Applier — search/replace hunk parser and atomic applier with rollback."""
 
 from __future__ import annotations
 
@@ -728,16 +715,30 @@ def apply_structured_patch(
 
 def _apply_single_hunk(original: str, search: str, replace: str) -> Optional[str]:
     """Apply a single search/replace hunk. Returns None if search text not found."""
-    # Exact match first
     if search in original:
         return original.replace(search, replace, 1)
+
+    # CRLF normalisation: model may emit \r\n while file uses \n (or vice-versa).
+    search_lf = search.replace("\r\n", "\n").replace("\r", "\n")
+    original_lf = original.replace("\r\n", "\n").replace("\r", "\n")
+    if search_lf in original_lf:
+        return original_lf.replace(search_lf, replace.replace("\r\n", "\n").replace("\r", "\n"), 1)
 
     return None
 
 
 def _normalise_line(line: str) -> str:
-    """Strip whitespace and trailing Python line-continuation backslashes."""
-    return line.strip().rstrip("\\").rstrip()
+    """Normalise a line for fuzzy comparison.
+
+    Handles common 7B-model hallucinations: trailing backslash continuations,
+    trailing semicolons (from C-style habits), trailing colons on non-block
+    statements, and multiple-space collapse.
+    """
+    s = line.strip()
+    s = s.rstrip("\\").rstrip()
+    s = s.rstrip(";")
+    s = re.sub(r"\s+", " ", s)
+    return s
 
 
 def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]:
@@ -749,7 +750,6 @@ def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]
     search_lines = [_normalise_line(line) for line in search.strip().split("\n")]
     original_lines = original.split("\n")
 
-    # Find the starting line
     for start_idx in range(len(original_lines)):
         if _normalise_line(original_lines[start_idx]) == search_lines[0]:
             # Check if all search lines match
@@ -772,7 +772,7 @@ def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]
                 result_lines = (
                     original_lines[:start_idx]
                     + indented_replace
-                    + original_lines[start_idx + len(search_lines):]
+                    + original_lines[start_idx + len(search_lines) :]
                 )
                 return "\n".join(result_lines)
 
