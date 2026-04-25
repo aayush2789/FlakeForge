@@ -18,7 +18,6 @@ async def fetch_data_with_race(timeout_override: float | None = None) -> dict[st
     Returns:
         A dictionary with the result.
     """
-    # Simulate the race: 80% of the time use a very tight timeout
     if timeout_override is not None:
         timeout = timeout_override
     else:

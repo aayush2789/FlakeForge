@@ -297,6 +297,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self._episode_state.last_patch_text = action.patch_text
         self._episode_state.last_reward = reward_breakdown.total_reward
         self._episode_state.last_reward_breakdown = reward_breakdown.to_dict()
+        self._episode_state.last_patch_result = patch_result
 
         if patch_result["success"]:
             self._episode_state.patches_applied.append(PatchRecord(
@@ -322,11 +323,14 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             or self._episode_state.regression_detected
         )
         self._episode_state.done = done
+        self._episode_state.last_done_reason = self._done_reason(post_pass_rate, done)
 
         # Build final observation with updated signals
         final_observation = self._build_observation()
         final_observation.reward = reward_breakdown.total_reward
         final_observation.done = done
+        final_observation.patch_result = patch_result
+        final_observation.done_reason = self._episode_state.last_done_reason
         self._openenv_state = FlakeForgeState(
             episode_id=self._episode_state.episode_id,
             step_count=self._episode_state.step_count,
@@ -398,6 +402,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             last_patch_text=self._episode_state.last_patch_text,
             last_reward=self._episode_state.last_reward,
             reward_breakdown=self._episode_state.last_reward_breakdown,
+            patch_result=self._episode_state.last_patch_result,
+            done_reason=self._episode_state.last_done_reason,
             reward=self._episode_state.last_reward,
         )
 

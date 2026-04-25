@@ -1,6 +1,8 @@
+QUICKSTART.py
 README.md
 __init__.py
 client.py
+inference.py
 models.py
 pyproject.toml
 ./QUICKSTART.py
@@ -16,11 +18,18 @@ openenv_FlakeForge.egg-info/requires.txt
 openenv_FlakeForge.egg-info/top_level.txt
 server/FlakeForge_environment.py
 server/__init__.py
+server/action_executor.py
 server/app.py
 server/causal_graph.py
 server/chaos_runner.py
+server/deep_flakiness.py
 server/docker_runner.py
+server/hypothesis_engine.py
+server/logger.py
+server/patch_applier.py
 server/perf_sentinel.py
 server/reward.py
+server/state.py
 server/tools.py
+tests/test_action_and_judge_regressions.py
 tests/test_flakeforge_integration.py

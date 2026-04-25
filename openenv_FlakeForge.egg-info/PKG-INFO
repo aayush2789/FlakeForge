@@ -15,6 +15,7 @@ Requires-Dist: tree-sitter-javascript>=0.21.0
 Requires-Dist: chromadb>=0.5.0
 Requires-Dist: sentence-transformers>=3.0.0
 Requires-Dist: openai>=2.32.0
+Requires-Dist: ollama>=0.3.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"

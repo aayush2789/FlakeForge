@@ -211,6 +211,8 @@ class FlakeForgeObservation(Observation):
     last_patch_text: str = ""
     last_reward: float = 0.0
     reward_breakdown: Dict[str, float] = Field(default_factory=dict)
+    patch_result: Dict[str, Any] = Field(default_factory=dict)
+    done_reason: str = ""
     reward: float = 0.0
     done: bool = False
 

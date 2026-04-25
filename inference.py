@@ -64,6 +64,7 @@ if EnvClient is not None:
             observation = FlakeForgeObservation.model_validate(observation_data)
             reward = payload.get("reward", getattr(observation, "reward", 0.0))
             done = payload.get("done", getattr(observation, "done", False))
+            info = payload.get("info") or _info_from_observation(observation)
 
             if StepResult is not None:
                 result = StepResult(
@@ -86,7 +87,7 @@ if EnvClient is not None:
                 baseline_pass_rate=float(getattr(observation, "baseline_pass_rate", 0.0)),
             )
             setattr(result, "state", state)
-            setattr(result, "info", {})
+            setattr(result, "info", info)
             return result
 
         def _parse_state(self, payload: Dict[str, Any]) -> FlakeForgeState:
@@ -108,6 +109,8 @@ def _as_step_output_like(value: Any) -> Any:
         and hasattr(value, "state")
         and hasattr(value, "info")
     ):
+        if not getattr(value, "info", None):
+            setattr(value, "info", _info_from_observation(value.observation))
         return value
 
     class _StepLike:
@@ -118,7 +121,7 @@ def _as_step_output_like(value: Any) -> Any:
                 getattr(source, "reward", getattr(observation, "reward", 0.0)) or 0.0
             )
             self.done = bool(getattr(source, "done", getattr(observation, "done", False)))
-            self.info = getattr(source, "info", {}) or {}
+            self.info = getattr(source, "info", {}) or _info_from_observation(observation)
 
             self.state = getattr(source, "state", None) or FlakeForgeState(
                 episode_id=str(getattr(observation, "episode_id", "")),
@@ -130,6 +133,21 @@ def _as_step_output_like(value: Any) -> Any:
             )
 
     return _StepLike(value)
+
+
+def _info_from_observation(observation: Any) -> Dict[str, Any]:
+    """Recover step metadata carried on plain OpenEnv observations."""
+    info: Dict[str, Any] = {}
+    patch_result = getattr(observation, "patch_result", None)
+    if patch_result:
+        info["patch_result"] = patch_result
+    reward_breakdown = getattr(observation, "reward_breakdown", None)
+    if reward_breakdown:
+        info["reward_breakdown"] = reward_breakdown
+    done_reason = getattr(observation, "done_reason", None)
+    if done_reason:
+        info["done_reason"] = done_reason
+    return info
 
 
 class LLMBackend:
@@ -151,7 +169,30 @@ class LLMBackend:
         self.temperature = float(temperature or os.environ.get("TEMPERATURE", 0.2))
 
     def generate(self, prompt: str, *, system_prompt: str) -> str:
-        """Generate a completion using an OpenAI-compatible API."""
+        """Generate a completion using either OpenAI or Ollama natively."""
+        # Use native Ollama if configured
+        if os.environ.get("OLLAMA_API_KEY") or "11434" in self.api_base:
+            try:
+                import ollama
+                response = ollama.chat(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ],
+                    options={
+                        "temperature": self.temperature,
+                        "num_predict": self.max_tokens,
+                    }
+                )
+                return response["message"]["content"] or ""
+            except ImportError:
+                logger.warning("[INFERENCE] ollama package not found, falling back to OpenAI compatibility layer")
+            except Exception as e:
+                logger.error(f"[INFERENCE] Ollama call failed: {e}")
+                return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {e}\nStrategy: Unable to generate fix."
+
+        # Default to OpenAI compatibility layer
         try:
             import openai
             client = openai.OpenAI(
@@ -168,14 +209,9 @@ class LLMBackend:
                 temperature=self.temperature,
             )
             return response.choices[0].message.content or ""
-        except Exception as exc:
-            logger.error(
-                "[INFERENCE] LLM call failed: %s (base=%s model=%s)",
-                exc,
-                self.api_base,
-                self.model_name,
-            )
-            return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {exc}\nStrategy: Unable to generate fix.\n</think>\n<patch>\n</patch>"
+        except Exception as e:
+            logger.error(f"[INFERENCE] LLM call failed: {e} (base={self.api_base} model={self.model_name})")
+            return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {e}\nStrategy: Unable to generate fix.\n</think>\n<patch>\n</patch>"
 
 
 def _build_default_runner(repo_path: str) -> Optional[Any]:
