@@ -492,7 +492,7 @@ _register(
 
 _VERDICT_SCORES: Dict[str, float] = {
     "confirmed": 1.0,
-    "inconclusive": 0.2,
+    "inconclusive": 0.0,
     "refuted": -1.0,
     "unverified": 0.0,
 }

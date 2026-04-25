@@ -315,11 +315,8 @@ class RewardBreakdown:
     anti_hack_penalty: float = 0.0
     reasoning_consistency_reward: float = 0.0
     oracle_reasoning_reward: float = 0.0
-    diversity_penalty: float = 0.0
-    claim_novelty_reward: float = 0.0
     patch_validation_signal: float = 0.0
     noop_patch_penalty: float = 0.0
-    regression_penalty: float = 0.0
     terminal_bonus: float = 0.0
     total_reward: float = 0.0
 
@@ -333,11 +330,8 @@ class RewardBreakdown:
             "anti_hack": self.anti_hack_penalty,
             "reasoning_consistency": self.reasoning_consistency_reward,
             "oracle_reasoning": self.oracle_reasoning_reward,
-            "diversity": self.diversity_penalty,
-            "claim_novelty": self.claim_novelty_reward,
             "patch_validation": self.patch_validation_signal,
             "noop_patch": self.noop_patch_penalty,
-            "regression": self.regression_penalty,
             "terminal_bonus": self.terminal_bonus,
             "total": self.total_reward,
         }

@@ -206,71 +206,6 @@ def compute_anti_hack_penalty(
     return round(max(penalty, -2.0), 2)
 
 
-def compute_diversity_penalty(
-    current_categories: List[str],
-    think_history: List[Dict[str, Any]],
-) -> float:
-    """Penalise repeating the same root-cause category across steps. Returns -1.8..0.0."""
-    if not think_history or not current_categories:
-        return 0.0
-
-    primary_cat = current_categories[0]
-    repeat_count = sum(
-        1 for h in think_history
-        if h.get("categories") and h["categories"][0] == primary_cat
-    )
-
-    if repeat_count == 0:
-        return 0.0
-    if repeat_count == 1:
-        return -0.4
-    if repeat_count == 2:
-        return -0.9
-    return -1.8
-
-
-def compute_claim_novelty_score(
-    current_claims: List[ThinkClaim],
-    think_history: List[Dict[str, Any]],
-) -> float:
-    """Reward genuinely new entities or reasoning. Returns -0.5..0.5."""
-    if not current_claims:
-        return 0.0
-
-    if not think_history:
-        return 0.3  # First step — reward the initial hypothesis attempt
-
-    prev_entities: set = set()
-    prev_reason_sigs: set = set()
-    for h in think_history:
-        for ent in h.get("entities", []):
-            prev_entities.add(ent.lower().strip())
-        for sig in h.get("reason_signatures", []):
-            prev_reason_sigs.add(sig)
-
-    current_entities = {c.entity.lower().strip() for c in current_claims if c.entity}
-    current_sigs = {c.reason[:35].lower().strip() for c in current_claims if c.reason}
-
-    novel_ents = current_entities - prev_entities
-    repeated_ents = current_entities & prev_entities
-    novel_sigs = current_sigs - prev_reason_sigs
-    repeated_sigs = current_sigs & prev_reason_sigs
-
-    score = 0.0
-
-    if novel_ents:
-        score += min(len(novel_ents) * 0.15, 0.3)
-    if novel_sigs:
-        score += min(len(novel_sigs) * 0.10, 0.2)
-
-    if repeated_ents and not novel_ents:
-        score -= min(len(repeated_ents) * 0.20, 0.4)
-    if repeated_sigs and not novel_sigs:
-        score -= 0.15
-
-    return round(max(-0.5, min(0.5, score)), 3)
-
-
 def compute_reasoning_consistency(
     predicted_category: str,
     inferred_category_from_patch: str,
@@ -332,6 +267,8 @@ def compute_verifiable_reward(
     inferred_cat = infer_category_from_patch(action.patch_text)
 
     breakdown = RewardBreakdown()
+
+    # ── Hard Gates Evaluation ─────────────────────────────────────────────────
     breakdown.format_reward = compute_format_reward(action)
     breakdown.compile_reward = compute_compile_reward(
         patch_applied,
@@ -339,19 +276,25 @@ def compute_verifiable_reward(
         rejected_by_validator=rejected_by_validator,
         rolled_back=rolled_back,
     )
+    breakdown.anti_hack_penalty = compute_anti_hack_penalty(
+        action.patch_text, files_modified, lines_changed,
+    )
 
-    if rejected_by_validator:
-        breakdown.patch_validation_signal = -0.8
-    elif patch_applied and patch_result.get("validation_score") is not None:
+    # Fast-fail short circuits if hard gates are violated (Requires >= 0.75 format reward)
+    if breakdown.format_reward < 0.75 or breakdown.compile_reward < 1.0 or breakdown.anti_hack_penalty < 0.0:
+        breakdown.total_reward = -2.0 if breakdown.anti_hack_penalty < 0.0 else -1.0
+        return breakdown
+
+    # PatchValidator positive shaping
+    if patch_applied and patch_result.get("validation_score") is not None:
         try:
             vs = float(patch_result["validation_score"])
             breakdown.patch_validation_signal = round(0.2 * max(0.0, min(1.0, vs)), 4)
         except (TypeError, ValueError):
             breakdown.patch_validation_signal = 0.0
-    elif patch_applied:
-        breakdown.patch_validation_signal = 0.0
     else:
         breakdown.patch_validation_signal = 0.0
+
     breakdown.stability_reward = compute_stability_reward(baseline_pass_rate, post_pass_rate)
     breakdown.causal_proximity_reward = compute_causal_proximity_reward(
         files_modified,
@@ -360,26 +303,11 @@ def compute_verifiable_reward(
         observation.boundary_crossings,
     )
     breakdown.failure_entropy_reward = compute_entropy_reward(pre_entropy, post_entropy)
-    breakdown.anti_hack_penalty = compute_anti_hack_penalty(
-        action.patch_text, files_modified, lines_changed,
-    )
     breakdown.noop_patch_penalty = -0.5 if patch_applied and noop_patch else 0.0
 
-
-    if regression_detected:
-        regression_magnitude = max(0.0, baseline_pass_rate - post_pass_rate)
-        severity_fraction = min(
-            regression_magnitude / max(baseline_pass_rate, 0.05), 1.0
-        )
-        breakdown.regression_penalty = round(-1.0 - severity_fraction * 1.5, 2)
-    else:
-        breakdown.regression_penalty = 0.0
-
+    # ── Oracle (mild reasoning reward) ──────────────
     if oracle_score is not None:
-        oracle_gate = 0.0
-        if oracle_score < -0.3:
-            oracle_gate = round(-1.0 * abs(oracle_score + 0.3) * 2.0, 3)
-        breakdown.oracle_reasoning_reward = round(float(oracle_score) + oracle_gate, 4)
+        breakdown.oracle_reasoning_reward = round(float(oracle_score), 4)
         breakdown.reasoning_consistency_reward = 0.0
     else:
         breakdown.reasoning_consistency_reward = compute_reasoning_consistency(
@@ -387,52 +315,33 @@ def compute_verifiable_reward(
         )
         breakdown.oracle_reasoning_reward = 0.0
 
-    current_cats: List[str] = []
-    if action.structured_think and action.structured_think.claims:
-        current_cats = [c.category for c in action.structured_think.claims]
-    elif action.predicted_category:
-        current_cats = [action.predicted_category]
-    breakdown.diversity_penalty = compute_diversity_penalty(current_cats, history)
-
-    current_claims: List[ThinkClaim] = (
-        action.structured_think.claims
-        if action.structured_think and action.structured_think.claims
-        else []
-    )
-    breakdown.claim_novelty_reward = compute_claim_novelty_score(current_claims, history)
-
-    if not regression_detected and patch_applied and post_run_results:
-        step = observation.step
-        max_steps = step + observation.steps_remaining
-        early_factor = 1.0 + 0.5 * max(0.0, 1.0 - step / max(max_steps, 1))
-
+    # ── Terminal bonus (scaled down to 4.0) ───────────────────────────────────
+    if patch_applied and post_run_results:
         if post_pass_rate >= 1.0:
-            breakdown.terminal_bonus = round(5.0 * early_factor, 2)
+            breakdown.terminal_bonus = 4.0   # Solving it = massive positive signal
         elif post_pass_rate > baseline_pass_rate + 0.5:
-            breakdown.terminal_bonus = round(2.0 * early_factor, 2)
+            breakdown.terminal_bonus = 2.0   # Major improvement
         elif post_pass_rate > baseline_pass_rate + 0.3:
-            breakdown.terminal_bonus = round(1.0 * early_factor, 2)
+            breakdown.terminal_bonus = 1.0   # Meaningful progress
 
+    # ── Total reward ──────────────────────────────────────────────────────────
     oracle_component = (
-        breakdown.oracle_reasoning_reward * 2.5
+        breakdown.oracle_reasoning_reward * 1.0      # reduced weight 1.0 (was 2.5)
         if oracle_score is not None
         else breakdown.reasoning_consistency_reward * 0.5
     )
 
     breakdown.total_reward = round(
-        breakdown.format_reward            * 0.5
-        + breakdown.compile_reward         * 1.0
-        + breakdown.stability_reward       * 2.0
+        breakdown.format_reward           * 0.5
+        + breakdown.compile_reward        * 1.0
+        + breakdown.stability_reward      * 3.0      # increased weight 3.0 (was 2.0)
         + breakdown.causal_proximity_reward * 0.5
         + breakdown.failure_entropy_reward * 0.5
-        + breakdown.anti_hack_penalty      * 1.5
+        + breakdown.anti_hack_penalty     * 1.5
         + oracle_component
-        + breakdown.diversity_penalty      * 1.0
-        + breakdown.claim_novelty_reward   * 1.0
         + breakdown.patch_validation_signal * 1.0
-        + breakdown.noop_patch_penalty     * 1.0
-        + breakdown.regression_penalty     * 1.5
-        + breakdown.terminal_bonus         * 1.0,
+        + breakdown.noop_patch_penalty    * 1.0
+        + breakdown.terminal_bonus        * 1.0,
         4,
     )
 
