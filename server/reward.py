@@ -426,17 +426,21 @@ def compute_verifiable_reward(
     regression_detected = bool(regression_detected or patch_result.get("regression_detected", False))
 
     post_pass_count = sum(1 for r in post_run_results if r.get("passed", False))
-    post_pass_rate = post_pass_count / max(len(post_run_results), 1)
-
-    post_errors = [r.get("error_type", "") for r in post_run_results if not r.get("passed", True)]
-    post_counter = Counter(e for e in post_errors if e)
-    if post_counter:
-        total = sum(post_counter.values())
-        post_entropy = -sum((c / total) * math.log2(c / total) for c in post_counter.values())
-        max_e = math.log2(len(post_counter)) if len(post_counter) > 1 else 1.0
-        post_entropy = post_entropy / max_e if max_e > 0 else 0.0
+    if post_run_results:
+        post_pass_rate = post_pass_count / len(post_run_results)
+        post_errors = [r.get("error_type", "") for r in post_run_results if not r.get("passed", True)]
+        post_counter = Counter(e for e in post_errors if e)
+        if post_counter:
+            total = sum(post_counter.values())
+            post_entropy = -sum((c / total) * math.log2(c / total) for c in post_counter.values())
+            max_e = math.log2(len(post_counter)) if len(post_counter) > 1 else 1.0
+            post_entropy = post_entropy / max_e if max_e > 0 else 0.0
+        else:
+            post_entropy = 0.0
     else:
-        post_entropy = 0.0
+        # If no tests were run, assume pass rate and entropy haven't changed
+        post_pass_rate = observation.current_pass_rate
+        post_entropy = pre_entropy
 
     from agent.unified_agent import infer_category_from_patch
     inferred_cat = infer_category_from_patch(action.patch_text)

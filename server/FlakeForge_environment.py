@@ -98,6 +98,15 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+_INFRA_ERROR_TYPES = {
+    "ImportError",
+    "ModuleNotFoundError",
+    "SyntaxError",
+    "IndentationError",
+    "FileNotFoundError",
+}
+
+
 class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation, FlakeForgeState]):
     """V3 RL environment for flaky test repair.
 
@@ -131,7 +140,6 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self.chaos_runner = chaos_runner
         self._episode_state: Optional[EpisodeState] = None
         self._openenv_state: Optional[FlakeForgeState] = None
-        print(f"[DEBUG] repo_path = {self.repo_path}")
 
     def reset(
         self,
@@ -159,10 +167,15 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         test_source, source_under_test = self._read_sources()
         file_tree = self._build_file_tree()
 
-        # Run baseline tests
-        baseline_runs = self._run_tests(self.num_runs)
-        baseline_pass_rate = sum(1 for r in baseline_runs if r.passed) / max(len(baseline_runs), 1)
-        baseline_entropy = failure_mode_entropy(baseline_runs)
+        # Three-stage gate: Sanity → Determinism → Flakiness.
+        preflight = self._preflight_gate(
+            quick_runs=int(kwargs.get("preflight_quick_runs", 5)),
+            confirm_runs=int(kwargs.get("preflight_confirm_runs", 10)),
+            drop_deterministic_bugs=bool(kwargs.get("drop_deterministic_bugs", True)),
+        )
+        baseline_runs = preflight["runs"]
+        baseline_pass_rate = preflight["pass_rate"]
+        baseline_entropy = preflight["failure_entropy"]
 
         # Extract failing stack trace
         failing_trace = ""
@@ -204,6 +217,9 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             baseline_pass_rate=baseline_pass_rate,
             current_pass_rate=baseline_pass_rate,
             baseline_entropy=baseline_entropy,
+            env_type=preflight["env_type"],
+            should_train=preflight["should_train"],
+            preflight_result=preflight["summary"],
             failing_stack_trace=failing_trace,
             last_error_type=last_error_type,
             failure_frontier=failure_frontier,
@@ -219,14 +235,21 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         observation = self._build_observation()
         observation.reward = 0.0
-        observation.done = False
+        observation.done = not preflight["should_train"]
         self._openenv_state = FlakeForgeState(
             episode_id=episode_id,
             step_count=0,
-            done=False,
+            done=not preflight["should_train"],
             current_pass_rate=baseline_pass_rate,
             baseline_pass_rate=baseline_pass_rate,
+            env_type=preflight["env_type"],
+            should_train=preflight["should_train"],
         )
+        if not preflight["should_train"]:
+            self._episode_state.done = True
+            self._episode_state.last_done_reason = preflight["summary"]["reason"]
+            observation.done = True
+            observation.done_reason = self._episode_state.last_done_reason
         return observation
 
     def step(
@@ -239,6 +262,11 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         del timeout_s, kwargs
         if self._episode_state is None:
             raise RuntimeError("Environment not initialized. Call reset() first.")
+        if self._episode_state.done and not self._episode_state.should_train:
+            observation = self._build_observation()
+            observation.done = True
+            observation.done_reason = self._episode_state.last_done_reason or "preflight_rejected"
+            return observation
 
         self._episode_state.step_count += 1
         logger.info(
@@ -481,6 +509,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             current_pass_rate=post_pass_rate,
             baseline_pass_rate=self._episode_state.baseline_pass_rate,
             regression_detected=self._episode_state.regression_detected,
+            env_type=self._episode_state.env_type,
+            should_train=self._episode_state.should_train,
         )
 
         logger.info(
@@ -519,6 +549,9 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             run_history=self._episode_state.run_history[-20:],
             current_pass_rate=self._episode_state.current_pass_rate,
             baseline_pass_rate=self._episode_state.baseline_pass_rate,
+            env_type=self._episode_state.env_type,
+            should_train=self._episode_state.should_train,
+            preflight_result=dict(self._episode_state.preflight_result),
             patches_applied=self._episode_state.patches_applied,
             total_diff_lines=self._episode_state.total_diff_lines,
             # V3 deep signals
@@ -582,6 +615,185 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             "pass_rate_after": round(pass_rate_after, 3),
             "reward": round(reward, 4),
         }
+
+    def _preflight_gate(
+        self,
+        *,
+        quick_runs: int = 5,
+        confirm_runs: int = 10,
+        drop_deterministic_bugs: bool = True,
+    ) -> Dict[str, Any]:
+        """Classify environment before training: sanity → determinism → flakiness.
+
+        Pass rate alone is not enough: 0/N can be a deterministic bug, infra
+        breakage, or a hard flaky case where success was not observed yet.
+        This gate separates those cases using error consistency/entropy.
+        """
+        quick_runs = max(1, quick_runs)
+        confirm_runs = max(1, confirm_runs)
+
+        sanity = self._run_tests(1)
+        runs: List[RunRecord] = list(sanity)
+        sanity_record = sanity[0] if sanity else RunRecord(
+            passed=False,
+            duration_ms=0,
+            error_type="RunnerError",
+            error_message="runner returned no result",
+        )
+
+        if self._is_infra_failure(sanity_record):
+            return self._preflight_result(
+                runs=runs,
+                env_type="infra_broken",
+                should_train=False,
+                reason="preflight_infra_broken",
+                stage="sanity",
+                quick_runs=quick_runs,
+                confirm_runs=confirm_runs,
+            )
+
+        # Stage 2: cheap deterministic baseline. We already ran one sanity pass.
+        remaining_quick = max(quick_runs - len(runs), 0)
+        if remaining_quick:
+            runs.extend(self._run_tests(remaining_quick))
+
+        quick_passes = sum(1 for r in runs[:quick_runs] if r.passed)
+        if quick_passes == quick_runs:
+            return self._preflight_result(
+                runs=runs[:quick_runs],
+                env_type="stable",
+                should_train=True,
+                reason="preflight_stable_pass",
+                stage="determinism",
+                quick_runs=quick_runs,
+                confirm_runs=confirm_runs,
+            )
+        if 0 < quick_passes < quick_runs:
+            return self._preflight_result(
+                runs=runs[:quick_runs],
+                env_type="flaky",
+                should_train=True,
+                reason="preflight_mixed_pass_fail",
+                stage="determinism",
+                quick_runs=quick_runs,
+                confirm_runs=confirm_runs,
+            )
+
+        # Stage 3: 0/N quick passes. Do not drop yet; confirm failure type.
+        runs.extend(self._run_tests(confirm_runs))
+        confirm_window = runs[quick_runs:quick_runs + confirm_runs]
+        confirm_passes = sum(1 for r in confirm_window if r.passed)
+        if confirm_passes > 0:
+            return self._preflight_result(
+                runs=runs,
+                env_type="flaky",
+                should_train=True,
+                reason="preflight_late_success_after_zero_quick_passes",
+                stage="flakiness_confirm",
+                quick_runs=quick_runs,
+                confirm_runs=confirm_runs,
+            )
+
+        failure_keys = self._failure_keys(runs)
+        unique_failures = set(failure_keys)
+        if len(unique_failures) <= 1:
+            return self._preflight_result(
+                runs=runs,
+                env_type="deterministic_bug",
+                should_train=not drop_deterministic_bugs,
+                reason=(
+                    "preflight_deterministic_bug_dropped"
+                    if drop_deterministic_bugs
+                    else "preflight_deterministic_bug_labeled"
+                ),
+                stage="flakiness_confirm",
+                quick_runs=quick_runs,
+                confirm_runs=confirm_runs,
+            )
+
+        return self._preflight_result(
+            runs=runs,
+            env_type="flaky",
+            should_train=True,
+            reason="preflight_zero_passes_but_failure_entropy_high",
+            stage="flakiness_confirm",
+            quick_runs=quick_runs,
+            confirm_runs=confirm_runs,
+        )
+
+    def _preflight_result(
+        self,
+        *,
+        runs: List[RunRecord],
+        env_type: str,
+        should_train: bool,
+        reason: str,
+        stage: str,
+        quick_runs: int,
+        confirm_runs: int,
+    ) -> Dict[str, Any]:
+        pass_count = sum(1 for r in runs if r.passed)
+        pass_rate = pass_count / max(len(runs), 1)
+        failure_keys = self._failure_keys(runs)
+        error_distribution = dict(Counter(failure_keys))
+        unique_failure_types = len(error_distribution)
+        entropy = failure_mode_entropy(runs)
+
+        summary = {
+            "env_type": env_type,
+            "should_train": should_train,
+            "reason": reason,
+            "stage": stage,
+            "runs": len(runs),
+            "passes": pass_count,
+            "pass_rate": round(pass_rate, 4),
+            "quick_runs": quick_runs,
+            "confirm_runs": confirm_runs,
+            "unique_failure_types": unique_failure_types,
+            "failure_entropy": entropy,
+            "error_distribution": error_distribution,
+        }
+        logger.info("[ENV] PREFLIGHT %s", summary)
+        return {
+            "runs": runs,
+            "pass_rate": pass_rate,
+            "failure_entropy": entropy,
+            "env_type": env_type,
+            "should_train": should_train,
+            "summary": summary,
+        }
+
+    def _failure_keys(self, runs: List[RunRecord]) -> List[str]:
+        keys: List[str] = []
+        for r in runs:
+            if r.passed:
+                continue
+            error_type = r.error_type or "UnknownError"
+            message = (r.error_message or r.stderr_excerpt or "").strip()
+            # Keep the type primary, but include a short message signature so
+            # same exception with different failure causes still has entropy.
+            msg_sig = message[:80] if message else ""
+            keys.append(f"{error_type}:{msg_sig}")
+        return keys
+
+    def _is_infra_failure(self, run: RunRecord) -> bool:
+        if run.passed:
+            return False
+        error_type = run.error_type or ""
+        message = f"{run.error_message or ''}\n{run.stderr_excerpt or ''}"
+        if error_type in _INFRA_ERROR_TYPES:
+            return True
+        infra_needles = (
+            "ImportError",
+            "ModuleNotFoundError",
+            "SyntaxError",
+            "IndentationError",
+            "ERROR collecting",
+            "collected 0 items",
+            "fixture",
+            "pytest timed out",
+        )
+        return any(needle in message for needle in infra_needles)
 
     def _run_tests(self, n: int) -> List[RunRecord]:
         """Run the target test n times, collecting results."""
@@ -846,6 +1058,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 current_pass_rate=self._episode_state.current_pass_rate,
                 baseline_pass_rate=self._episode_state.baseline_pass_rate,
                 regression_detected=self._episode_state.regression_detected,
+                env_type=self._episode_state.env_type,
+                should_train=self._episode_state.should_train,
             )
         return FlakeForgeState(
             episode_id="",
@@ -854,6 +1068,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             current_pass_rate=0.0,
             baseline_pass_rate=0.0,
             regression_detected=False,
+            env_type="unknown",
+            should_train=True,
         )
 
 

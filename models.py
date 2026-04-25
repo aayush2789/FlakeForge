@@ -249,6 +249,18 @@ class FlakeForgeObservation(Observation):
     run_history: List[RunRecord] = Field(default_factory=list)
     current_pass_rate: float = 0.0
     baseline_pass_rate: float = 0.0
+    env_type: str = Field(
+        default="unknown",
+        description="Preflight classification: stable, flaky, deterministic_bug, infra_broken, unknown",
+    )
+    should_train: bool = Field(
+        default=True,
+        description="False when preflight says this environment should be skipped for flaky-fixer training",
+    )
+    preflight_result: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Three-stage Sanity/Determinism/Flakiness gate summary",
+    )
 
     # Patch history
     patches_applied: List[PatchRecord] = Field(default_factory=list)
@@ -344,6 +356,8 @@ class FlakeForgeState(State):
     current_pass_rate: float = 0.0
     baseline_pass_rate: float = 0.0
     regression_detected: bool = False
+    env_type: str = "unknown"
+    should_train: bool = True
 
 
 # ── Reward Breakdown ──────────────────────────────────────────────────────────

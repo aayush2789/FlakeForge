@@ -44,6 +44,9 @@ class EpisodeState(BaseModel):
     baseline_pass_rate: float = 0.0
     current_pass_rate: float = 0.0
     baseline_entropy: float = 0.0
+    env_type: str = "unknown"
+    should_train: bool = True
+    preflight_result: Dict[str, Any] = Field(default_factory=dict)
 
     # Patch tracking
     patches_applied: List[PatchRecord] = Field(default_factory=list)
