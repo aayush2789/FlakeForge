@@ -100,9 +100,20 @@ Rules for "patch":
 - Each hunk object must use exactly these model-facing keys:
   hunk_id, file, search, replace, rationale, addresses_claim.
 - "file" must be a repo-relative path.
-- "search" must be copied verbatim from the source shown in the observation, preserving indentation.
-- "replace" is the fixed replacement; use an empty string "" to delete the search block.
+- "search" must be copied VERBATIM from the source shown in the observation,
+  including the EXACT leading whitespace of every line (do NOT trim or re-indent).
+- "replace" must use the SAME absolute indentation as the lines it replaces.
+  When patching a method body, every replacement line must start with the same
+  indentation as the corresponding lines in the source file (typically 4 or 8
+  spaces from the left margin). Do NOT add or remove leading whitespace.
+- Prefer SMALL hunks: target only the buggy lines, not the entire function.
+- "replace" may be an empty string "" to delete the search block.
 - "addresses_claim" must equal a claim_id from "think.claims".
+
+JSON STRING FORMAT FOR "search" / "replace":
+- Both fields are JSON strings. Use \\n for line breaks and \\\" for quotes.
+- Tabs are forbidden; use spaces only.
+- Never wrap "search" or "replace" in markdown fences or extra quotes.
 
 GLOBAL RULES:
 - Do NOT output XML tags such as <think> or <patch>.

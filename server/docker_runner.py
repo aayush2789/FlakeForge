@@ -66,7 +66,8 @@ class DockerTestRunner:
 
     def check_regressions(self, exclude_test_id: str, timeout_seconds: int = 30) -> bool:
         exclude_test_file = exclude_test_id.split("::", 1)[0]
-        tests_root = self.repo_path / "tests"
+        repo_root = self.repo_path.resolve()
+        tests_root = repo_root / "tests"
         if not tests_root.exists():
             return False
 
@@ -75,16 +76,19 @@ class DockerTestRunner:
                 [
                     "pytest",
                     str(tests_root),
-                    f"--ignore={exclude_test_file}",
+                    f"--ignore={repo_root / exclude_test_file}",
                     "-x",
                     "-q",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
-                cwd=self.repo_path,
+                cwd=repo_root,
             )
-            return proc.returncode != 0
+            # pytest exits with code 5 when every test file was excluded and
+            # no tests were collected. That is not a regression; it just means
+            # this tiny target repo only has the flaky test file.
+            return proc.returncode not in (0, 5)
         except subprocess.TimeoutExpired:
             return True
 
