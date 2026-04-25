@@ -54,15 +54,15 @@ def main(host: str = "0.0.0.0", port: int = 8000):
     multiple workers:
         uvicorn FlakeForge.server.app:app --workers 4
     """
+    import argparse
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--port", type=int, default=port)
+    args, _ = parser.parse_known_args()
+
+    uvicorn.run(app, host=host, port=args.port)
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    main(port=args.port)
+    main()

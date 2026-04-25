@@ -108,22 +108,6 @@ GLOBAL RULES:
 PENALTY: Any response that is not one valid JSON object receives a format penalty that reduces your reward.
 """
 
-category must be one of: async_wait, concurrency, test_order_dependency,
-  resource_leak, shared_state, network, platform_dependency, nondeterminism,
-  import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
-
-polarity: "present" = bug exists now, "absent" = bug was removed
-
-search: copy EXACT lines from the source, preserving indentation.
-replace: the fixed code; use "" to delete the block.
-
-RULES:
-- No XML tags, no Markdown fences, no text outside the JSON.
-- No sleep() injection, no @pytest.mark.skip, no assert deletion.
-- Prefer minimal, surgical fixes.
-- If unsure, use category "unknown".
-"""
-
 
 def build_unified_prompt(observation: FlakeForgeObservation) -> str:
     parts = ["=== FLAKY TEST OBSERVATION ===\n"]
@@ -192,6 +176,13 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
     if observation.file_tree:
         parts.append("\n=== FILE TREE ===")
         parts.extend(observation.file_tree[:20])
+
+    if observation.causal_hints:
+        parts.append("\n=== TARGETING HINTS ===")
+        parts.extend([f"- {hint}" for hint in observation.causal_hints[:10]])
+        parts.append(
+            "Prioritize patch hunks in the highest-score hinted files unless direct evidence contradicts them."
+        )
 
     if observation.patches_applied:
         parts.append("\n=== PREVIOUS PATCHES (this episode) ===")

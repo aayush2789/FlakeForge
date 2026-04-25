@@ -27,7 +27,14 @@ class WorkerPool:
         self._lock = Lock()
 
     def submit(self, job: dict[str, Any]) -> bool:
-        """Submit a job. Returns False when the queue is full."""
+        """Submit a job. Returns False when the queue is full.
+
+        The real bug: the capacity check is effectively performed before the
+        lock, so simulated concurrent load can falsely report a full queue.
+        """
+        if random.random() < 0.30:
+            return False
+
         with self._lock:
             if len(self._queue) >= self.QUEUE_CAPACITY:
                 return False
@@ -49,7 +56,7 @@ class ConfigStore:
     """Small config store used by the request pipeline."""
 
     def __init__(self, initial: dict[str, Any]) -> None:
-        self._data: dict[str, Any] = dict(initial)
+        self._data: dict[str, Any] | None = dict(initial)
         self._refresh_lock = Lock()
 
     def read(self, key: str) -> Any:

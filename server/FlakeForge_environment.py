@@ -42,6 +42,7 @@ try:
     from server.reward import compute_verifiable_reward
     from server.oracle_engine import verify_structured_think
     from server.causal_graph import CrossRepoGraphBuilder
+    from server.tools import build_agent_targeting_hints
     from server.docker_runner import DockerTestRunner
 except ImportError:
     try:
@@ -64,6 +65,7 @@ except ImportError:
         from ..server.reward import compute_verifiable_reward
         from ..server.oracle_engine import verify_structured_think
         from ..server.causal_graph import CrossRepoGraphBuilder
+        from ..server.tools import build_agent_targeting_hints
         from ..server.docker_runner import DockerTestRunner
     except (ImportError, ValueError):
         from FlakeForge.models import (
@@ -85,6 +87,7 @@ except ImportError:
         from FlakeForge.server.reward import compute_verifiable_reward
         from FlakeForge.server.oracle_engine import verify_structured_think
         from FlakeForge.server.causal_graph import CrossRepoGraphBuilder
+        from FlakeForge.server.tools import build_agent_targeting_hints
         from FlakeForge.server.docker_runner import DockerTestRunner
 
 try:
@@ -206,6 +209,18 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         # Build causal graph
         causal_graph_data, causal_hints = self._build_causal_graph(test_source)
 
+        # Build additional file-targeting hints from stack trace/imports/deep signals.
+        targeting_hints = build_agent_targeting_hints(
+            repo_path=str(self.repo_path),
+            test_identifier=self.test_identifier,
+            failing_stack_trace=failing_trace,
+            source_under_test=source_under_test,
+            causal_frontier=failure_frontier,
+            deep_signals=deep_signals,
+            max_hints=8,
+        )
+        merged_hints = list(dict.fromkeys([*causal_hints, *targeting_hints]))[:10]
+
         # Initialize state
         self._episode_state = EpisodeState(
             episode_id=episode_id,
@@ -231,7 +246,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             order_dependency_detected=order_dep,
             infrastructure_sensitive=infra_sensitive,
             causal_graph=causal_graph_data,
-            causal_hints=causal_hints,
+            causal_hints=merged_hints,
             file_tree=file_tree,
             **deep_signals,
         )
