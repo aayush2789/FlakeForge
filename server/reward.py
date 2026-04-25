@@ -376,14 +376,12 @@ def compute_verifiable_reward(
         )
         breakdown.oracle_reasoning_reward = 0.0
 
-    if patch_applied and post_run_results and post_pass_rate >= 1.0:
-        breakdown.terminal_bonus = 2.0
-    elif patch_applied and post_run_results and post_pass_rate > baseline_pass_rate + 0.3:
-    # Terminal bonus for full stability
-    if post_pass_rate >= 1.0 and not regression_detected:
-        breakdown.terminal_bonus = 2.0
-    elif post_pass_rate > baseline_pass_rate + 0.3 and not regression_detected:
-        breakdown.terminal_bonus = 1.0
+    # Terminal bonus for full stability (only if no regression)
+    if not regression_detected and patch_applied and post_run_results:
+        if post_pass_rate >= 1.0:
+            breakdown.terminal_bonus = 2.0
+        elif post_pass_rate > baseline_pass_rate + 0.3:
+            breakdown.terminal_bonus = 1.0
 
     breakdown.total_reward = round(
         breakdown.format_reward * 0.5
@@ -392,9 +390,7 @@ def compute_verifiable_reward(
         + breakdown.causal_proximity_reward * 0.5
         + breakdown.failure_entropy_reward * 0.5
         + breakdown.anti_hack_penalty * 1.5
-        + breakdown.reasoning_consistency_reward * 0.5   # fallback path only
-        + breakdown.oracle_reasoning_reward * 1.0        # structured-claim oracle
-        + breakdown.reasoning_consistency_reward * 0.5
+        + (breakdown.oracle_reasoning_reward * 1.0 if oracle_score is not None else breakdown.reasoning_consistency_reward * 0.5)
         + breakdown.noop_patch_penalty * 1.0
         + breakdown.protected_file_penalty * 1.0
         + breakdown.regression_penalty * 2.0
