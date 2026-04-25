@@ -13,7 +13,11 @@ import re
 from typing import Any, Dict, List, Optional, Protocol
 
 try:
-    from models import FlakeForgeAction, FlakeForgeObservation, StructuredThink, ThinkClaim
+    from models import (
+        FlakeForgeAction, FlakeForgeObservation, 
+        StructuredThink, ThinkClaim,
+        StructuredPatch, PatchHunk,
+    )
 except ImportError:
     from ..models import (
         FlakeForgeAction, FlakeForgeObservation,
