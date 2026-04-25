@@ -245,6 +245,9 @@ class RewardBreakdown:
     failure_entropy_reward: float = 0.0
     anti_hack_penalty: float = 0.0
     reasoning_consistency_reward: float = 0.0
+    noop_patch_penalty: float = 0.0
+    protected_file_penalty: float = 0.0
+    regression_penalty: float = 0.0
     terminal_bonus: float = 0.0
     total_reward: float = 0.0
 
@@ -257,6 +260,9 @@ class RewardBreakdown:
             "failure_entropy": self.failure_entropy_reward,
             "anti_hack": self.anti_hack_penalty,
             "reasoning_consistency": self.reasoning_consistency_reward,
+            "noop_patch": self.noop_patch_penalty,
+            "protected_file": self.protected_file_penalty,
+            "regression": self.regression_penalty,
             "terminal_bonus": self.terminal_bonus,
             "total": self.total_reward,
         }

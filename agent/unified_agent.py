@@ -205,8 +205,7 @@ def extract_think(response: str) -> str:
     if match:
         return match.group(1).strip()
 
-    # Fallback for model outputs that skip the exact XML wrapper.
-    return response.strip()
+    return ""
 
 
 def extract_patch(response: str) -> str:
@@ -285,7 +284,7 @@ def extract_category_from_think(think_text: str) -> str:
 
 def extract_confidence_from_think(think_text: str) -> float:
     """Extract confidence value from think block."""
-    match = re.search(r"confidence:\s*([\d.]+)", think_text, re.IGNORECASE)
+    match = re.search(r"confidence:\s*(-?[\d.]+)", think_text, re.IGNORECASE)
     if match:
         try:
             return max(0.0, min(1.0, float(match.group(1))))

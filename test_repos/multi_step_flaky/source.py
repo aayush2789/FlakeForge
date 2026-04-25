@@ -16,7 +16,7 @@ async def fetch_profile(timeout_override: float | None = None) -> dict[str, Any]
     if timeout_override is not None:
         timeout = timeout_override
     else:
-        timeout = 0.03 if random.random() < 0.75 else 0.5
+        timeout = 0.5
 
     try:
         payload = await asyncio.wait_for(_network_payload(), timeout=timeout)
@@ -42,7 +42,7 @@ async def _network_payload() -> dict[str, Any]:
 
 def build_payload() -> dict[str, Any]:
     """Build the response payload with nondeterministic state."""
-    request_id = random.choice(["stable-request", "stale-request"])
+    request_id = "stable-request"
     return {
         "request_id": request_id,
         "data": "completed",
