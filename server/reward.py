@@ -1,20 +1,34 @@
-"""V3 Reward Architecture — seven-signal verifiable reward, no LLM judge.
+"""V3.1 Reward Architecture — ten-signal verifiable reward, no LLM judge.
 
 Signals
 -------
-1. Format Compliance: valid JSON <think> + valid <patch> structure
-2. Compile/Syntax: modified file parses without errors
-3. Stability Delta: pass-rate improvement over baseline          (weight 0.60)
-4. Causal Proximity: patch touches causal frontier
-5. Failure Entropy Reduction: fewer distinct error modes
-6. Anti-Hack Penalty: sleep injection, test deletion, skip decorators
-7. Oracle Reasoning: structured-claim differential verification   (weight 0.25)
-   (replaces the old free-form reasoning_consistency keyword check)
+1.  Format Compliance:       valid JSON <think> + valid <patch> structure
+2.  Compile/Syntax:          modified file parses without errors
+3.  Stability Delta:         pass-rate improvement over baseline            (weight 2.0)
+4.  Causal Proximity:        patch touches causal frontier
+5.  Failure Entropy:         fewer distinct error modes
+6.  Anti-Hack Penalty:       sleep injection, test deletion, skip decorators
+7.  Oracle Reasoning:        structured-claim differential verification     (weight 2.5)
+8.  Oracle Gate Penalty:     hard amplification when oracle strongly refutes
+9.  Diversity Penalty:       penalise repeating same root-cause category    (NEW)
+10. Claim Novelty Reward:    bonus for genuinely new entities / reasoning   (NEW)
 
-Research basis:
+Key fixes vs V3.0
+-----------------
+- Oracle weight 1.0 → 2.5  (oracle now dominates over stability on short episodes)
+- Oracle gate: if oracle_score < -0.3, additional -1.0 applied after weighting
+- Regression penalty: was fixed -3.0 × 2.0 = -6.0; now scaled by magnitude (-0.75 → -3.75)
+- Terminal bonus: 2.0 → 5.0 for pass_rate == 1.0 (agent MUST learn success = big reward)
+- Diversity penalty: forces exploration when same category is repeated across steps
+- Claim novelty: rewards the agent for introducing fresh entities and reasoning
+
+Research basis
+--------------
 - DeepSeek R1: format+correctness reward (no human prefs)
 - RLEF: execution-verified compilability
 - Reflexion NeurIPS 2023: self-consistency for reasoning
+- DIVER (2025): diversity-incentivised exploration via intrinsic diversity reward
+- UCAS (2025): uncertainty-aware advantage shaping, entropy-collapse prevention
 """
 
 from __future__ import annotations
@@ -31,6 +45,7 @@ try:
         RewardBreakdown,
         ROOT_CAUSE_TYPES,
         RELATED_CATEGORIES,
+        ThinkClaim,
         failure_mode_entropy,
     )
 except ImportError:
@@ -40,6 +55,7 @@ except ImportError:
         RewardBreakdown,
         ROOT_CAUSE_TYPES,
         RELATED_CATEGORIES,
+        ThinkClaim,
         failure_mode_entropy,
     )
 
@@ -62,15 +78,12 @@ def compute_format_reward(action: FlakeForgeAction) -> float:
             score += 0.5
         elif st.claims and st.format_penalty > -0.5:
             score += 0.25
-        # fully unparseable → 0.0 from think
     else:
-        # Fallback: legacy keyword check for un-structured output.
         if action.think_text:
             think = action.think_text.lower()
             if ("root cause:" in think or '"category"' in think) and "confidence" in think:
                 score += 0.25
 
-    # Patch block (search/replace structure check).
     if action.patch_text:
         has_search = "<<<<<<< SEARCH" in action.patch_text or "<<<<<<<" in action.patch_text
         has_replace = ">>>>>>> REPLACE" in action.patch_text or ">>>>>>>" in action.patch_text
@@ -111,24 +124,19 @@ def compute_stability_reward(
 ) -> float:
     """Reward proportional to pass-rate improvement.
 
-    Uses a clipped linear reward:
-    - Positive if pass rate improved
-    - Negative if pass rate regressed
-    - Bonus for reaching 100%
-
     Returns:
         Float in [-1.0, 2.0]
     """
     delta = current_pass_rate - baseline_pass_rate
 
     if current_pass_rate >= 1.0:
-        return 2.0  # Full stability achieved — terminal bonus
+        return 2.0
     elif delta > 0:
-        return round(min(delta * 3.0, 1.5), 4)  # Scale positives
+        return round(min(delta * 3.0, 1.5), 4)
     elif delta < 0:
-        return round(max(delta * 5.0, -1.0), 4)  # Harsher penalty for regression
+        return round(max(delta * 5.0, -1.0), 4)
     else:
-        return -0.1  # No change — slight penalty for wasted step
+        return -0.1
 
 
 # ── Signal 4: Causal Proximity ──────────────────────────────────────────────
@@ -141,9 +149,6 @@ def compute_causal_proximity_reward(
 ) -> float:
     """Reward patches that touch code near the failure site.
 
-    Patches to files far from the causal frontier are likely
-    noise or workarounds, not root-cause fixes.
-
     Returns:
         Float in [-0.5, 1.0]
     """
@@ -153,7 +158,6 @@ def compute_causal_proximity_reward(
     score = 0.0
     frontier_file = failure_frontier.split(":")[0] if ":" in failure_frontier else failure_frontier
 
-    # Direct hit — same file as failure frontier
     for pf in patch_files:
         pf_name = pf.split("/")[-1] if "/" in pf else pf
         frontier_name = frontier_file.split("/")[-1] if "/" in frontier_file else frontier_file
@@ -162,7 +166,6 @@ def compute_causal_proximity_reward(
             break
 
     if score == 0.0:
-        # Check if patch file is in the call chain
         for pf in patch_files:
             pf_name = pf.split("/")[-1].replace(".py", "")
             for frame in call_chain:
@@ -171,10 +174,8 @@ def compute_causal_proximity_reward(
                     break
 
     if score == 0.0:
-        # Patch is far from causal frontier — penalize
         score = -0.3
 
-    # Bonus if patch crosses a known boundary (meaningful infrastructure fix)
     if boundary_crossings and score > 0:
         score = min(score + 0.2, 1.0)
 
@@ -189,14 +190,11 @@ def compute_entropy_reward(
 ) -> float:
     """Reward reduction in failure mode entropy.
 
-    Lower entropy = more deterministic = closer to fixing root cause.
-    If all errors converge to one type (or zero), the fix is targeted.
-
     Returns:
         Float in [-0.5, 1.0]
     """
     if pre_entropy <= 0 and post_entropy <= 0:
-        return 0.5  # No errors at all — good
+        return 0.5
 
     delta = pre_entropy - post_entropy
     if delta > 0:
@@ -215,22 +213,13 @@ def compute_anti_hack_penalty(
 ) -> float:
     """Penalize common reward-hacking patterns.
 
-    Catches:
-    - Test deletion (removing assertions or entire test)
-    - Sleep injection (masking timing issues)
-    - Broad try/except (masking errors)
-    - Excessive changes (> 50 lines = shotgun fix)
-    - Skip decorators (@pytest.mark.skip)
-
     Returns:
-        Float in [-2.0, 0.0] (always non-positive)
+        Float in [-2.0, 0.0]
     """
     penalty = 0.0
     patch_lower = patch_text.lower()
 
-    # Test deletion — deleting assertions
     if "assert" in patch_lower:
-        # Check if assertions are being removed (in SEARCH but not in REPLACE)
         search_blocks = re.findall(r"<<<<<<< SEARCH\n(.*?)=======", patch_text, re.DOTALL)
         replace_blocks = re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
 
@@ -240,11 +229,9 @@ def compute_anti_hack_penalty(
             if search_asserts > replace_asserts:
                 penalty -= 0.5 * (search_asserts - replace_asserts)
 
-    # Sleep injection
     sleep_patterns = ["time.sleep(", "await asyncio.sleep(", "sleep("]
     for pattern in sleep_patterns:
         if pattern in patch_lower:
-            # Only penalize if sleep is being ADDED (in replace but not search)
             replace_count = sum(
                 1 for b in re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
                 if pattern in b.lower()
@@ -256,27 +243,113 @@ def compute_anti_hack_penalty(
             if replace_count > search_count:
                 penalty -= 0.3 * (replace_count - search_count)
 
-    # Broad try/except
     if "except:" in patch_lower or "except Exception:" in patch_lower:
         replace_blocks = re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
         for block in replace_blocks:
             if "except:" in block.lower() or "except exception:" in block.lower():
                 penalty -= 0.5
 
-    # Skip decorator injection
     skip_patterns = ["@pytest.mark.skip", "@unittest.skip", "pytest.skip("]
     for pattern in skip_patterns:
         if pattern in patch_lower:
             penalty -= 1.0
 
-    # Excessive changes
     if lines_changed > 50:
         penalty -= min((lines_changed - 50) / 100.0, 0.5)
 
     return round(max(penalty, -2.0), 2)
 
 
-# ── Reasoning Consistency (legacy fallback — kept for backward compat) ────────
+# ── Signal 9: Diversity Penalty ──────────────────────────────────────────────
+
+def compute_diversity_penalty(
+    current_categories: List[str],
+    think_history: List[Dict[str, Any]],
+) -> float:
+    """Penalise repeating the same root-cause category across episode steps.
+
+    Inspired by DIVER (2025): diversity-incentivised exploration prevents the
+    agent from getting stuck in a local search loop over one category.
+
+    Penalty schedule:
+      0 prior uses  →  0.0    (fresh exploration — no penalty)
+      1 prior use   → -0.4    (mild nudge)
+      2 prior uses  → -0.9    (strong nudge)
+      3+ prior uses → -1.8    (force branch — agent should try something new)
+
+    Returns: float in [-1.8, 0.0]
+    """
+    if not think_history or not current_categories:
+        return 0.0
+
+    primary_cat = current_categories[0]
+    repeat_count = sum(
+        1 for h in think_history
+        if h.get("categories") and h["categories"][0] == primary_cat
+    )
+
+    if repeat_count == 0:
+        return 0.0
+    if repeat_count == 1:
+        return -0.4
+    if repeat_count == 2:
+        return -0.9
+    return -1.8
+
+
+# ── Signal 10: Claim Novelty Reward ──────────────────────────────────────────
+
+def compute_claim_novelty_score(
+    current_claims: List[ThinkClaim],
+    think_history: List[Dict[str, Any]],
+) -> float:
+    """Reward claims that introduce genuinely new entities or reasoning.
+
+    Prevents the agent from copy-pasting its previous think block with only
+    minor tweaks (e.g. timeout = 0.2 → 0.25).  Novel entity names and
+    distinct causal reasoning earn a positive score; repeated ones earn a
+    penalty.
+
+    Returns: float in [-0.5, 0.5]
+    """
+    if not current_claims:
+        return 0.0
+
+    if not think_history:
+        return 0.3  # First step — reward the initial hypothesis attempt
+
+    prev_entities: set = set()
+    prev_reason_sigs: set = set()
+    for h in think_history:
+        for ent in h.get("entities", []):
+            prev_entities.add(ent.lower().strip())
+        for sig in h.get("reason_signatures", []):
+            prev_reason_sigs.add(sig)
+
+    current_entities = {c.entity.lower().strip() for c in current_claims if c.entity}
+    current_sigs = {c.reason[:35].lower().strip() for c in current_claims if c.reason}
+
+    novel_ents = current_entities - prev_entities
+    repeated_ents = current_entities & prev_entities
+    novel_sigs = current_sigs - prev_reason_sigs
+    repeated_sigs = current_sigs & prev_reason_sigs
+
+    score = 0.0
+
+    if novel_ents:
+        score += min(len(novel_ents) * 0.15, 0.3)
+    if novel_sigs:
+        score += min(len(novel_sigs) * 0.10, 0.2)
+
+    if repeated_ents and not novel_ents:
+        score -= min(len(repeated_ents) * 0.20, 0.4)
+    if repeated_sigs and not novel_sigs:
+        score -= 0.15
+
+    return round(max(-0.5, min(0.5, score)), 3)
+
+
+# ── Reasoning Consistency (legacy fallback) ───────────────────────────────────
 
 def compute_reasoning_consistency(
     predicted_category: str,
@@ -310,21 +383,28 @@ def compute_verifiable_reward(
     pre_entropy: float,
     oracle_score: Optional[float] = None,
     regression_detected: bool = False,
+    think_history: Optional[List[Dict[str, Any]]] = None,
 ) -> RewardBreakdown:
-    """Compute the full seven-signal verifiable reward.
+    """Compute the full ten-signal verifiable reward.
 
     Weight allocation (oracle path):
-      stability_reward        × 2.0   (~0.60 of practical range)
-      oracle_reasoning_reward × 1.0   (~0.25)
+      stability_reward        × 2.0   (~0.45 of practical range)
+      oracle_reasoning_reward × 2.5   (~0.35)  ← amplified from 1.0
+      oracle_gate_penalty     × 1.0   (hard gate, fires if oracle < -0.3)
+      compile_reward          × 1.0
+      anti_hack_penalty       × 1.5
       causal_proximity        × 0.5
       failure_entropy         × 0.5
       format_reward           × 0.5
-      compile_reward          × 1.0
-      anti_hack_penalty       × 1.5
-      terminal_bonus          × 1.0
+      diversity_penalty       × 1.0   (NEW)
+      claim_novelty_reward    × 1.0   (NEW)
+      terminal_bonus          × 1.0   (5.0 for full solve, was 2.0)
+      regression_penalty      × 1.5   (scaled, was hard -3.0 × 2.0)
 
     When oracle_score is None the legacy reasoning_consistency signal runs.
     """
+    history: List[Dict[str, Any]] = think_history or []
+
     patch_applied = patch_result.get("success", False)
     syntax_error = patch_result.get("error") if not patch_applied else None
     files_modified = patch_result.get("files_modified", [])
@@ -365,36 +445,81 @@ def compute_verifiable_reward(
     )
     breakdown.noop_patch_penalty = -0.5 if patch_applied and noop_patch else 0.0
     breakdown.protected_file_penalty = -2.0 if protected_file else 0.0
-    breakdown.regression_penalty = -3.0 if regression_detected else 0.0
 
+    # ── Scaled regression penalty (was hard -3.0 × 2.0 = -6.0) ──────────────
+    if regression_detected:
+        regression_magnitude = max(0.0, baseline_pass_rate - post_pass_rate)
+        severity_fraction = min(
+            regression_magnitude / max(baseline_pass_rate, 0.05), 1.0
+        )
+        # Ranges from -1.0 (tiny regression) to -2.5 (catastrophic)
+        breakdown.regression_penalty = round(-1.0 - severity_fraction * 1.5, 2)
+    else:
+        breakdown.regression_penalty = 0.0
+
+    # ── Oracle (amplified weight + hard gate) ─────────────────────────────────
     if oracle_score is not None:
         breakdown.oracle_reasoning_reward = round(float(oracle_score), 4)
         breakdown.reasoning_consistency_reward = 0.0
+
+        # Hard gate: if oracle strongly disagrees (< -0.3), apply extra penalty.
+        # This ensures the oracle can't be drowned out by a good pass-rate.
+        if oracle_score < -0.3:
+            breakdown.oracle_gate_penalty = round(-1.0 * abs(oracle_score + 0.3) * 2.0, 3)
     else:
         breakdown.reasoning_consistency_reward = compute_reasoning_consistency(
             action.predicted_category, inferred_cat, action.think_text, action.patch_text,
         )
         breakdown.oracle_reasoning_reward = 0.0
+        breakdown.oracle_gate_penalty = 0.0
 
-    # Terminal bonus for full stability (only if no regression)
+    # ── Diversity penalty — repeat-category suppression ───────────────────────
+    current_cats: List[str] = []
+    if action.structured_think and action.structured_think.claims:
+        current_cats = [c.category for c in action.structured_think.claims]
+    elif action.predicted_category:
+        current_cats = [action.predicted_category]
+    breakdown.diversity_penalty = compute_diversity_penalty(current_cats, history)
+
+    # ── Claim novelty reward — encourage fresh reasoning ──────────────────────
+    current_claims: List[ThinkClaim] = (
+        action.structured_think.claims
+        if action.structured_think and action.structured_think.claims
+        else []
+    )
+    breakdown.claim_novelty_reward = compute_claim_novelty_score(current_claims, history)
+
+    # ── Terminal bonus (greatly amplified — success MUST be strongly rewarded) ─
     if not regression_detected and patch_applied and post_run_results:
         if post_pass_rate >= 1.0:
-            breakdown.terminal_bonus = 2.0
+            breakdown.terminal_bonus = 5.0   # Solving it = massive positive signal
+        elif post_pass_rate > baseline_pass_rate + 0.5:
+            breakdown.terminal_bonus = 2.0   # Major improvement
         elif post_pass_rate > baseline_pass_rate + 0.3:
-            breakdown.terminal_bonus = 1.0
+            breakdown.terminal_bonus = 1.0   # Meaningful progress
+
+    # ── Total reward ──────────────────────────────────────────────────────────
+    oracle_component = (
+        breakdown.oracle_reasoning_reward * 2.5      # weight × 2.5 (was 1.0)
+        + breakdown.oracle_gate_penalty * 1.0
+        if oracle_score is not None
+        else breakdown.reasoning_consistency_reward * 0.5
+    )
 
     breakdown.total_reward = round(
-        breakdown.format_reward * 0.5
-        + breakdown.compile_reward * 1.0
-        + breakdown.stability_reward * 2.0
+        breakdown.format_reward           * 0.5
+        + breakdown.compile_reward        * 1.0
+        + breakdown.stability_reward      * 2.0
         + breakdown.causal_proximity_reward * 0.5
         + breakdown.failure_entropy_reward * 0.5
-        + breakdown.anti_hack_penalty * 1.5
-        + (breakdown.oracle_reasoning_reward * 1.0 if oracle_score is not None else breakdown.reasoning_consistency_reward * 0.5)
-        + breakdown.noop_patch_penalty * 1.0
+        + breakdown.anti_hack_penalty     * 1.5
+        + oracle_component
+        + breakdown.diversity_penalty     * 1.0
+        + breakdown.claim_novelty_reward  * 1.0
+        + breakdown.noop_patch_penalty    * 1.0
         + breakdown.protected_file_penalty * 1.0
-        + breakdown.regression_penalty * 2.0
-        + breakdown.terminal_bonus * 1.0,
+        + breakdown.regression_penalty    * 1.5     # scaled, not fixed -6
+        + breakdown.terminal_bonus        * 1.0,
         4,
     )
 

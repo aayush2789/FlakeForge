@@ -329,6 +329,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             pre_entropy=pre_entropy,
             oracle_score=oracle_score,
             regression_detected=regression_detected,
+            think_history=self._episode_state.step_think_history,
         )
 
         # --- 5. Update state ---
@@ -339,6 +340,15 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self._episode_state.last_reward = reward_breakdown.total_reward
         self._episode_state.last_reward_breakdown = reward_breakdown.to_dict()
         self._episode_state.last_patch_result = patch_result
+
+        # Build and store per-step think summary for diversity tracking.
+        think_summary = self._build_think_summary(
+            action=action,
+            oracle_score=oracle_score,
+            pass_rate_after=post_pass_rate,
+            reward=reward_breakdown.total_reward,
+        )
+        self._episode_state.step_think_history.append(think_summary)
 
         if patch_result["success"]:
             self._episode_state.patches_applied.append(PatchRecord(
@@ -445,7 +455,40 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             patch_result=self._episode_state.last_patch_result,
             done_reason=self._episode_state.last_done_reason,
             reward=self._episode_state.last_reward,
+            think_history=list(self._episode_state.step_think_history),
         )
+
+    def _build_think_summary(
+        self,
+        action: FlakeForgeAction,
+        oracle_score: Optional[float],
+        pass_rate_after: float,
+        reward: float,
+    ) -> Dict[str, Any]:
+        """Build a compact think summary dict for history tracking."""
+        categories: List[str] = []
+        entities: List[str] = []
+        reason_signatures: List[str] = []
+
+        if action.structured_think and action.structured_think.claims:
+            for claim in action.structured_think.claims:
+                categories.append(claim.category)
+                if claim.entity:
+                    entities.append(claim.entity)
+                if claim.reason:
+                    reason_signatures.append(claim.reason[:35].lower().strip())
+        elif action.predicted_category:
+            categories = [action.predicted_category]
+
+        return {
+            "step": self._episode_state.step_count,
+            "categories": categories,
+            "entities": entities,
+            "reason_signatures": reason_signatures,
+            "oracle_score": round(oracle_score, 3) if oracle_score is not None else None,
+            "pass_rate_after": round(pass_rate_after, 3),
+            "reward": round(reward, 4),
+        }
 
     def _run_tests(self, n: int) -> List[RunRecord]:
         """Run the target test n times, collecting results."""
