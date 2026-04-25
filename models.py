@@ -113,6 +113,53 @@ class StructuredThink(BaseModel):
         return self.claims[0].category
 
 
+# ── Structured Patch: machine-readable hunk list ────────────────────────────
+
+class PatchHunk(BaseModel):
+    """One search/replace hunk expressed as structured fields.
+
+    The agent must produce a *list* of these inside its <patch> block (as JSON).
+    Each hunk is independently applied and diffed; the oracle can verify
+    whether the replaced fragment addresses the claim in StructuredThink.
+    """
+
+    hunk_id: str = Field(description="Unique ID within this patch block, e.g. 'h1'")
+    file: str = Field(
+        description="Repo-relative path to the file being patched, e.g. 'pybrake/notifier.py'"
+    )
+    search: str = Field(
+        description="Exact lines to find in the file (copied verbatim, preserving indentation)"
+    )
+    replace: str = Field(
+        description="Lines that replace the search block (may be empty string to delete)"
+    )
+    rationale: str = Field(
+        default="",
+        description="One sentence explaining why this specific change fixes the root cause",
+    )
+    # Claim this hunk addresses — links to ThinkClaim.claim_id
+    addresses_claim: str = Field(
+        default="",
+        description="claim_id from StructuredThink.claims that this hunk resolves",
+    )
+
+    # Filled in by the patch applier after execution — never set by the model.
+    applied: bool = False
+    apply_error: str = ""
+
+
+class StructuredPatch(BaseModel):
+    """Full structured patch block: a list of hunks."""
+
+    hunks: List[PatchHunk] = Field(default_factory=list)
+    # Format penalty injected by the parser (0.0 = perfect JSON, -1.0 = parse error)
+    format_penalty: float = Field(default=0.0, ge=-1.0, le=0.0)
+
+    @property
+    def files_targeted(self) -> List[str]:
+        return list({h.file for h in self.hunks})
+
+
 # ── V3 Unified Action: <think> + <patch> ──────────────────────────────────────
 
 class FlakeForgeAction(Action):
@@ -122,9 +169,10 @@ class FlakeForgeAction(Action):
     raw_response: str = ""
     # Parsed fields (populated by the environment after parsing raw_response)
     think_text: str = ""
-    patch_text: str = ""
-    # Structured think block (parsed from JSON inside think_text)
+    patch_text: str = ""  # kept as raw fallback for legacy parser
+    # Structured blocks (parsed from JSON inside think/patch tags)
     structured_think: Optional[StructuredThink] = None
+    structured_patch: Optional[StructuredPatch] = None
     # Inferred category from think block
     predicted_category: str = "unknown"
     predicted_confidence: float = 0.0

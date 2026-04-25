@@ -313,6 +313,188 @@ def apply_search_replace_patch(
         }
 
 
+def apply_structured_patch(
+    repo_path: Path,
+    structured_patch: Any,  # models.StructuredPatch
+    default_target: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Apply a StructuredPatch (typed Pydantic model) atomically.
+
+    This is the preferred entry point when the agent emits valid JSON.
+    Each hunk's `file`, `search`, and `replace` fields are used directly —
+    no text parsing required. Falls back to ``apply_search_replace_patch``
+    when ``structured_patch`` has no hunks or is None.
+
+    Args:
+        repo_path: Root of the repository (Path).
+        structured_patch: ``models.StructuredPatch`` with a ``hunks`` list.
+        default_target: Fallback file if a hunk has no ``file`` set.
+
+    Returns:
+        Same dict shape as ``apply_search_replace_patch``.
+    """
+    if structured_patch is None or not structured_patch.hunks:
+        return {
+            "success": False,
+            "error": "no_structured_hunks",
+            "files_modified": [],
+            "lines_changed": 0,
+            "hunks_applied": 0,
+            "diff": "",
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": False,
+        }
+
+    # Convert StructuredPatch.hunks → internal PatchHunk dataclass list.
+    internal_hunks: List[PatchHunk] = []
+    for h in structured_patch.hunks:
+        file_path = h.file or default_target or ""
+        if not file_path or not h.search:
+            continue  # skip mal-formed hunks
+        internal_hunks.append(PatchHunk(
+            file_path=file_path,
+            search_text=h.search,
+            replace_text=h.replace,
+        ))
+
+    if not internal_hunks:
+        return {
+            "success": False,
+            "error": "no_valid_structured_hunks_after_filter",
+            "files_modified": [],
+            "lines_changed": 0,
+            "hunks_applied": 0,
+            "diff": "",
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": False,
+        }
+
+    # ---- Core apply logic (mirrors apply_search_replace_patch) ----
+    files_modified: List[str] = []
+    total_lines_changed = 0
+    hunks_applied = 0
+    all_diffs: List[str] = []
+    originals: Dict[Path, str] = {}
+    fuzzy_applied = False
+
+    def rollback() -> None:
+        for path, content in originals.items():
+            path.write_text(content, encoding="utf-8")
+
+    try:
+        for hunk in internal_hunks:
+            file_path = hunk.file_path
+            if _is_protected_path(file_path):
+                rollback()
+                return {
+                    "success": False,
+                    "error": f"protected_file_{file_path}",
+                    "files_modified": files_modified,
+                    "lines_changed": total_lines_changed,
+                    "hunks_applied": hunks_applied,
+                    "diff": "\n".join(all_diffs),
+                    "noop": False,
+                    "protected_file": True,
+                    "fuzzy_applied": fuzzy_applied,
+                }
+
+            target = repo_path / file_path
+            if not target.exists():
+                candidates = [
+                    c for c in repo_path.rglob(Path(file_path).name)
+                    if not _is_protected_path(str(c.relative_to(repo_path)))
+                ]
+                if candidates:
+                    target = candidates[0]
+                else:
+                    rollback()
+                    return {
+                        "success": False,
+                        "error": f"target_file_not_found_{file_path}",
+                        "files_modified": files_modified,
+                        "lines_changed": total_lines_changed,
+                        "hunks_applied": hunks_applied,
+                        "diff": "\n".join(all_diffs),
+                        "noop": False,
+                        "protected_file": False,
+                        "fuzzy_applied": fuzzy_applied,
+                    }
+
+            original = target.read_text(encoding="utf-8", errors="ignore")
+            originals.setdefault(target, original)
+
+            modified = _apply_single_hunk(original, hunk.search_text, hunk.replace_text)
+            if modified is None:
+                modified = _apply_fuzzy_hunk(original, hunk.search_text, hunk.replace_text)
+                if modified is None:
+                    rollback()
+                    return {
+                        "success": False,
+                        "error": f"search_text_not_found_in_{target.name}",
+                        "files_modified": files_modified,
+                        "lines_changed": total_lines_changed,
+                        "hunks_applied": hunks_applied,
+                        "diff": "\n".join(all_diffs),
+                        "noop": False,
+                        "protected_file": False,
+                        "fuzzy_applied": fuzzy_applied,
+                    }
+                fuzzy_applied = True
+
+            target.write_text(modified, encoding="utf-8")
+            lines_changed = _count_lines_changed(original, modified)
+            total_lines_changed += lines_changed
+            hunks_applied += 1
+            if str(target) not in files_modified:
+                files_modified.append(str(target))
+            diff_text = _make_unified_diff(original, modified, str(target.relative_to(repo_path)))
+            if diff_text:
+                all_diffs.append(diff_text)
+
+        if hunks_applied != len(internal_hunks):
+            rollback()
+            return {
+                "success": False,
+                "error": "not_all_structured_hunks_applied",
+                "files_modified": files_modified,
+                "lines_changed": total_lines_changed,
+                "hunks_applied": hunks_applied,
+                "diff": "\n".join(all_diffs),
+                "noop": False,
+                "protected_file": False,
+                "fuzzy_applied": fuzzy_applied,
+            }
+
+        noop = total_lines_changed == 0 or not "\n".join(all_diffs).strip()
+        return {
+            "success": True,
+            "files_modified": files_modified,
+            "lines_changed": total_lines_changed,
+            "hunks_applied": hunks_applied,
+            "diff": "\n".join(all_diffs),
+            "error": None,
+            "noop": noop,
+            "protected_file": False,
+            "fuzzy_applied": fuzzy_applied,
+        }
+
+    except Exception as exc:
+        rollback()
+        return {
+            "success": False,
+            "error": str(exc),
+            "files_modified": [],
+            "lines_changed": 0,
+            "hunks_applied": 0,
+            "diff": "",
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": fuzzy_applied,
+        }
+
+
 def _apply_single_hunk(original: str, search: str, replace: str) -> Optional[str]:
     """Apply a single search/replace hunk. Returns None if search text not found."""
     # Exact match first

@@ -15,7 +15,11 @@ from typing import Any, Dict, List, Optional, Protocol
 try:
     from models import FlakeForgeAction, FlakeForgeObservation, StructuredThink, ThinkClaim
 except ImportError:
-    from ..models import FlakeForgeAction, FlakeForgeObservation, StructuredThink, ThinkClaim
+    from ..models import (
+        FlakeForgeAction, FlakeForgeObservation,
+        StructuredThink, ThinkClaim,
+        StructuredPatch, PatchHunk,
+    )
 
 try:
     from utils.logger import get_logger
@@ -53,7 +57,20 @@ _CLAIM_SCHEMA = """{
   "confidence": 0.85
 }"""
 
-UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that fixes flaky tests.
+_HUNK_SCHEMA = """{
+  "hunks": [
+    {
+      "hunk_id": "h1",
+      "file": "<repo-relative path, e.g. pybrake/notifier.py>",
+      "search": "<exact lines to find, verbatim including indentation>",
+      "replace": "<replacement lines (empty string to delete the block)>",
+      "rationale": "<one sentence: why does this fix the root cause?>",
+      "addresses_claim": "<claim_id from the think block, e.g. c1>"
+    }
+  ]
+}"""
+
+UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that identifies and fixes unreliable tests.
 
 You MUST respond with EXACTLY two XML blocks and no Markdown fences:
 
@@ -64,29 +81,29 @@ You MUST respond with EXACTLY two XML blocks and no Markdown fences:
    resource_leak, shared_state, network, platform_dependency, nondeterminism,
    import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
 
-   Rules for the JSON:
+   Rules for the <think> JSON:
    - claims is a non-empty list.
    - polarity is "present" when you assert the bug exists in the current code.
    - predicted_effect is mandatory; forecast the expected pass-rate change.
    - Do NOT add extra keys; they will be stripped.
 
-2. <patch> block — code fix using search/replace format:
-   --- path/to/file.py
-   <<<<<<< SEARCH
-   exact lines to find (copy from source, preserve indentation)
-   =======
-   replacement lines
-   >>>>>>> REPLACE
+2. <patch> block — MUST be valid JSON matching this schema exactly:
+{_HUNK_SCHEMA}
 
-RULES:
+   Rules for the <patch> JSON:
+   - hunks is a non-empty list of search/replace operations.
+   - search must be copied verbatim from the source shown in the observation (preserve indentation).
+   - replace is the fixed replacement; use an empty string "" to delete the search block.
+   - addresses_claim links this hunk to a claim_id from the <think> block.
+   - Do NOT add extra keys.
+
+GLOBAL RULES:
 - Do NOT wrap your answer in Markdown fences (no ```).
-- SEARCH text must be copied verbatim from the observation.
 - Do NOT add sleep() calls, retry decorators, or @pytest.mark.skip.
 - Prefer minimal, surgical fixes that address the root cause.
-- If uncertain, use category "unknown" rather than guessing.
+- If uncertain about root cause, use category "unknown" rather than guessing.
 
-PENALTY: Any <think> block that is not valid JSON receives a format penalty
-that reduces your reward. Partial JSON (truncated) is treated the same way.
+PENALTY: Any block that is not valid JSON receives a format penalty that reduces your reward.
 """
 
 
@@ -239,9 +256,8 @@ _NORM_MAP: Dict[str, str] = {
     "mock": "mock_residue", "monkeypatch": "mock_residue",
 }
 
-_ALLOWED_CLAIM_KEYS = {
-    "claim_id", "category", "entity", "location",
-    "ast_node_type", "polarity", "predicted_effect", "reason",
+_ALLOWED_HUNK_KEYS = {
+    "hunk_id", "file", "search", "replace", "rationale", "addresses_claim",
 }
 
 
@@ -318,6 +334,62 @@ def _parse_structured_think(think_raw: str) -> StructuredThink:
         return StructuredThink(confidence=confidence, format_penalty=-1.0)
 
     return StructuredThink(claims=claims, confidence=confidence, format_penalty=partial_penalty)
+
+
+_ALLOWED_CLAIM_KEYS = {
+    "claim_id", "category", "entity", "location",
+    "ast_node_type", "polarity", "predicted_effect", "reason",
+}
+
+
+def _parse_structured_patch(patch_raw: str) -> "StructuredPatch":
+    """Try to parse patch_raw as JSON StructuredPatch.
+
+    On any failure: return a StructuredPatch with format_penalty=-1.0 and
+    whatever hunks could be salvaged.  Never raises.
+    """
+    text = patch_raw.strip()
+    text = _strip_markdown_fence(text)
+
+    json_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not json_match:
+        return StructuredPatch(format_penalty=-1.0)
+
+    try:
+        data = json.loads(json_match.group(0))
+    except json.JSONDecodeError:
+        return StructuredPatch(format_penalty=-1.0)
+
+    hunks: List[PatchHunk] = []
+    raw_hunks = data.get("hunks", [])
+
+    if not isinstance(raw_hunks, list):
+        return StructuredPatch(format_penalty=-1.0)
+
+    partial_penalty = 0.0
+    for i, rh in enumerate(raw_hunks):
+        if not isinstance(rh, dict):
+            partial_penalty = -0.3
+            continue
+        clean = {k: v for k, v in rh.items() if k in _ALLOWED_HUNK_KEYS}
+        clean.setdefault("hunk_id", f"h{i+1}")
+        clean.setdefault("rationale", "")
+        clean.setdefault("addresses_claim", "")
+        # Mandatory fields — skip hunk if missing.
+        if "file" not in clean or "search" not in clean or "replace" not in clean:
+            partial_penalty = min(partial_penalty, -0.3)
+            continue
+        try:
+            hunks.append(PatchHunk(**clean))
+        except Exception:
+            partial_penalty = -0.3
+            continue
+
+    if not hunks:
+        return StructuredPatch(format_penalty=-1.0)
+
+    return StructuredPatch(hunks=hunks, format_penalty=partial_penalty)
+
 
 
 def extract_think(response: str) -> str:
@@ -401,20 +473,21 @@ class UnifiedFlakeForgeAgent:
         raw_response = self.backend.generate(prompt, system_prompt=self.system_prompt)
 
         think_raw = extract_think(raw_response)
-        patch_text = extract_patch(raw_response)
+        patch_raw = extract_patch(raw_response)
 
-        # Try structured JSON parse; never raises.
-        structured = _parse_structured_think(think_raw)
+        # Try structured JSON parse for both blocks; never raises.
+        structured_think = _parse_structured_think(think_raw)
+        structured_patch = _parse_structured_patch(patch_raw)
 
         # Derive scalar fields from structured parse, falling back to regex.
         predicted_category = (
-            structured.primary_category
-            if structured.claims
+            structured_think.primary_category
+            if structured_think.claims
             else extract_category_from_think(think_raw)
         )
         predicted_confidence = (
-            structured.confidence
-            if structured.claims
+            structured_think.confidence
+            if structured_think.claims
             else extract_confidence_from_think(think_raw)
         )
 
@@ -423,26 +496,35 @@ class UnifiedFlakeForgeAgent:
                 "[UNIFIED_AGENT] Model output missing expected XML tags; using tolerant parsing."
             )
 
-        if structured.format_penalty < 0.0:
+        if structured_think.format_penalty < 0.0:
             logger.warning(
                 "[UNIFIED_AGENT] <think> block is not valid JSON (penalty=%.1f); "
                 "falling back to legacy parsing.",
-                structured.format_penalty,
+                structured_think.format_penalty,
+            )
+
+        if structured_patch.format_penalty < 0.0:
+            logger.warning(
+                "[UNIFIED_AGENT] <patch> block is not valid JSON (penalty=%.1f); "
+                "patch will not have structured hunk fields.",
+                structured_patch.format_penalty,
             )
 
         logger.info(
-            "[UNIFIED_AGENT] category=%s confidence=%.2f patch_len=%d json_ok=%s",
+            "[UNIFIED_AGENT] category=%s confidence=%.2f patch_hunks=%d think_json=%s patch_json=%s",
             predicted_category,
             predicted_confidence,
-            len(patch_text),
-            structured.format_penalty == 0.0,
+            len(structured_patch.hunks),
+            structured_think.format_penalty == 0.0,
+            structured_patch.format_penalty == 0.0,
         )
 
         return FlakeForgeAction(
             raw_response=raw_response,
             think_text=think_raw,
-            patch_text=patch_text,
-            structured_think=structured,
+            patch_text=patch_raw,  # raw fallback
+            structured_think=structured_think,
+            structured_patch=structured_patch,
             predicted_category=predicted_category,
             predicted_confidence=predicted_confidence,
             action_type="UNIFIED_PATCH",
