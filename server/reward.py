@@ -29,32 +29,76 @@ except ImportError:
     )
 
 
+def _claim_has_required_format(claim: Any) -> bool:
+    return (
+        getattr(claim, "category", "") in ROOT_CAUSE_TYPES
+        and bool(str(getattr(claim, "entity", "")).strip())
+        and bool(str(getattr(claim, "location", "")).strip())
+        and getattr(claim, "polarity", "") in ("present", "absent")
+        and bool(str(getattr(claim, "reason", "")).strip())
+    )
+
+
+def _hunk_has_required_format(hunk: Any) -> bool:
+    return (
+        bool(str(getattr(hunk, "file", "")).strip())
+        and bool(str(getattr(hunk, "search", "")).strip())
+        and isinstance(getattr(hunk, "replace", None), str)
+    )
+
+
 def compute_format_reward(action: FlakeForgeAction) -> float:
-    """Score format compliance of think JSON and patch structure. Returns 0..1."""
+    """Score current JSON-first action format. Returns 0..1.
+
+    The model-facing schema now requires only:
+    - claim: category, entity, location, polarity, reason
+    - hunk: file, search, replace
+    Optional metadata such as claim_id, ast_node_type, hunk_id, rationale, and
+    addresses_claim should not affect format reward.
+    """
     score = 0.0
 
+    think_score = 0.0
     st = action.structured_think
     if st is not None:
-        if st.claims and st.format_penalty == 0.0:
-            score += 0.5
-        elif st.claims and st.format_penalty > -0.5:
-            score += 0.25
-    else:
-        if action.think_text:
-            think = action.think_text.lower()
-            if ("root cause:" in think or '"category"' in think) and "confidence" in think:
-                score += 0.25
+        valid_claims = [claim for claim in st.claims if _claim_has_required_format(claim)]
+        if valid_claims and st.format_penalty == 0.0:
+            think_score = 0.5
+        elif valid_claims and st.format_penalty > -0.5:
+            think_score = 0.4
+        elif st.claims:
+            think_score = 0.25
 
-    if action.patch_text:
+    if think_score == 0.0 and action.think_text:
+        think = action.think_text.lower()
+        if ("root cause:" in think or '"category"' in think) and (
+            "confidence" in think or '"reason"' in think
+        ):
+            think_score = 0.5
+    score += think_score
+
+    patch_score = 0.0
+    sp = action.structured_patch
+    if sp is not None:
+        valid_hunks = [hunk for hunk in sp.hunks if _hunk_has_required_format(hunk)]
+        if valid_hunks and sp.format_penalty == 0.0:
+            patch_score = 0.5
+        elif valid_hunks and sp.format_penalty > -0.5:
+            patch_score = 0.4
+        elif sp.hunks:
+            patch_score = 0.25
+
+    if patch_score == 0.0 and action.patch_text:
         has_search = "<<<<<<< SEARCH" in action.patch_text or "<<<<<<<" in action.patch_text
         has_replace = ">>>>>>> REPLACE" in action.patch_text or ">>>>>>>" in action.patch_text
         has_sep = "=======" in action.patch_text
         if has_search and has_replace and has_sep:
-            score += 0.5
+            patch_score = 0.5
         elif has_search or has_replace:
-            score += 0.25
+            patch_score = 0.25
+    score += patch_score
 
-    return round(score, 2)
+    return round(min(score, 1.0), 2)
 
 
 def compute_compile_reward(

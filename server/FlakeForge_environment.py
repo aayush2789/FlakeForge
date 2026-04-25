@@ -465,6 +465,11 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                     action.structured_think,
                     pre_sources=pre_sources,
                     post_sources=post_sources,
+                    patch_hunks=(
+                        action.structured_patch.hunks
+                        if action.structured_patch is not None
+                        else ()
+                    ),
                 )
                 action = action.model_copy(update={"structured_think": annotated_think})
                 logger.info("[ENV] ORACLE score=%.3f claims=%d", oracle_score, len(annotated_think.claims))

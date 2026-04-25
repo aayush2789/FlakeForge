@@ -549,12 +549,21 @@ def run_inference(
             test_identifier=test_identifier,
             max_steps=max_steps,
             num_runs=num_runs,
+            runner=runner,
         )
-        # Force preflight to use the requested num_runs for confirm stage
-        env._preflight_gate(confirm_runs=num_runs)
 
         # Run episode
-        result = _run_async(run_episode(env, agent, verbose=verbose))
+        result = _run_async(
+            run_episode(
+                env,
+                agent,
+                verbose=verbose,
+                reset_kwargs={
+                    "preflight_quick_runs": max(3, min(num_runs, 10)),
+                    "preflight_confirm_runs": num_runs,
+                },
+            )
+        )
 
     if verbose:
         logger.info(
