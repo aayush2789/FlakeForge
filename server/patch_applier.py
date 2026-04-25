@@ -22,6 +22,30 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+PROTECTED_EXACT_NAMES = {
+    "conftest.py",
+    "pytest.ini",
+    "setup.cfg",
+    "tox.ini",
+    "pyproject.toml",
+    "requirements.txt",
+}
+
+PROTECTED_DIR_PREFIXES = {
+    "agent/",
+    "server/",
+    "training/",
+    ".github/",
+    ".cursor/",
+}
+
+PROTECTED_SUFFIXES = {
+    ".yaml",
+    ".yml",
+    ".toml",
+}
+
+
 @dataclass
 class PatchHunk:
     """A single search/replace hunk."""
@@ -119,6 +143,9 @@ def apply_search_replace_patch(
             "lines_changed": 0,
             "hunks_applied": 0,
             "diff": "",
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": False,
         }
 
     files_modified: List[str] = []
@@ -126,6 +153,7 @@ def apply_search_replace_patch(
     hunks_applied = 0
     all_diffs: List[str] = []
     originals: Dict[Path, str] = {}
+    fuzzy_applied = False
 
     def rollback() -> None:
         for path, content in originals.items():
@@ -137,11 +165,28 @@ def apply_search_replace_patch(
             file_path = hunk.file_path or default_target or ""
             if not file_path:
                 continue
+            if _is_protected_path(file_path):
+                rollback()
+                return {
+                    "success": False,
+                    "error": f"protected_file_{file_path}",
+                    "files_modified": files_modified,
+                    "lines_changed": total_lines_changed,
+                    "hunks_applied": hunks_applied,
+                    "diff": "\n".join(all_diffs),
+                    "noop": False,
+                    "protected_file": True,
+                    "fuzzy_applied": fuzzy_applied,
+                }
 
             target = repo_path / file_path
             if not target.exists():
                 # Try to find the file
-                candidates = list(repo_path.rglob(Path(file_path).name))
+                candidates = [
+                    candidate
+                    for candidate in repo_path.rglob(Path(file_path).name)
+                    if not _is_protected_path(str(candidate.relative_to(repo_path)))
+                ]
                 if candidates:
                     target = candidates[0]
                 else:
@@ -153,6 +198,38 @@ def apply_search_replace_patch(
                         "lines_changed": total_lines_changed,
                         "hunks_applied": hunks_applied,
                         "diff": "\n".join(all_diffs),
+                        "noop": False,
+                        "protected_file": False,
+                        "fuzzy_applied": fuzzy_applied,
+                    }
+            else:
+                try:
+                    resolved_relative = str(target.resolve().relative_to(repo_path.resolve())).replace("\\", "/")
+                except ValueError:
+                    rollback()
+                    return {
+                        "success": False,
+                        "error": f"target_outside_repo_{file_path}",
+                        "files_modified": files_modified,
+                        "lines_changed": total_lines_changed,
+                        "hunks_applied": hunks_applied,
+                        "diff": "\n".join(all_diffs),
+                        "noop": False,
+                        "protected_file": True,
+                        "fuzzy_applied": fuzzy_applied,
+                    }
+                if _is_protected_path(resolved_relative):
+                    rollback()
+                    return {
+                        "success": False,
+                        "error": f"protected_file_{resolved_relative}",
+                        "files_modified": files_modified,
+                        "lines_changed": total_lines_changed,
+                        "hunks_applied": hunks_applied,
+                        "diff": "\n".join(all_diffs),
+                        "noop": False,
+                        "protected_file": True,
+                        "fuzzy_applied": fuzzy_applied,
                     }
 
             original = target.read_text(encoding="utf-8", errors="ignore")
@@ -161,7 +238,7 @@ def apply_search_replace_patch(
             # Apply the hunk
             modified = _apply_single_hunk(original, hunk.search_text, hunk.replace_text)
             if modified is None:
-                # Search text not found — try fuzzy match
+                # Search text not found — try conservative indentation-only matching.
                 modified = _apply_fuzzy_hunk(original, hunk.search_text, hunk.replace_text)
                 if modified is None:
                     rollback()
@@ -172,7 +249,11 @@ def apply_search_replace_patch(
                         "lines_changed": total_lines_changed,
                         "hunks_applied": hunks_applied,
                         "diff": "\n".join(all_diffs),
+                        "noop": False,
+                        "protected_file": False,
+                        "fuzzy_applied": fuzzy_applied,
                     }
+                fuzzy_applied = True
 
             # Write modified content
             target.write_text(modified, encoding="utf-8")
@@ -198,8 +279,12 @@ def apply_search_replace_patch(
                 "lines_changed": total_lines_changed,
                 "hunks_applied": hunks_applied,
                 "diff": "\n".join(all_diffs),
+                "noop": False,
+                "protected_file": False,
+                "fuzzy_applied": fuzzy_applied,
             }
 
+        noop = total_lines_changed == 0 or not "\n".join(all_diffs).strip()
         return {
             "success": True,
             "files_modified": files_modified,
@@ -207,6 +292,9 @@ def apply_search_replace_patch(
             "hunks_applied": hunks_applied,
             "diff": "\n".join(all_diffs),
             "error": None,
+            "noop": noop,
+            "protected_file": False,
+            "fuzzy_applied": fuzzy_applied,
         }
 
     except Exception as exc:
@@ -219,6 +307,9 @@ def apply_search_replace_patch(
             "lines_changed": 0,
             "hunks_applied": 0,
             "diff": "",
+            "noop": False,
+            "protected_file": False,
+            "fuzzy_applied": fuzzy_applied,
         }
 
 
@@ -227,25 +318,12 @@ def _apply_single_hunk(original: str, search: str, replace: str) -> Optional[str
     # Exact match first
     if search in original:
         return original.replace(search, replace, 1)
-    
-    # Try with normalized whitespace
-    search_stripped = _normalize_whitespace(search)
-    lines = original.split("\n")
-    original_stripped_lines = [_normalize_whitespace(line) for line in lines]
-    original_stripped = "\n".join(original_stripped_lines)
-    
-    if search_stripped in original_stripped:
-        return original.replace(search.strip(), replace.strip(), 1)
-    
+
     return None
 
 
 def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]:
-    """Try fuzzy matching when exact match fails.
-    
-    Attempts to find the search text with minor whitespace differences.
-    """
-    # Strip leading/trailing whitespace from each line
+    """Try conservative indentation-only matching when exact match fails."""
     search_lines = [line.strip() for line in search.strip().split("\n")]
     original_lines = original.split("\n")
 
@@ -264,7 +342,6 @@ def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]
 
             if match:
                 # Determine indentation from original
-                indent = ""
                 first_orig = original_lines[start_idx]
                 indent = first_orig[:len(first_orig) - len(first_orig.lstrip())]
 
@@ -286,6 +363,17 @@ def _apply_fuzzy_hunk(original: str, search: str, replace: str) -> Optional[str]
 def _normalize_whitespace(text: str) -> str:
     """Normalize whitespace for fuzzy matching."""
     return re.sub(r'\s+', ' ', text.strip())
+
+
+def _is_protected_path(path: str) -> bool:
+    """Return True when a model patch targets infrastructure/config files."""
+    normalized = path.replace("\\", "/").lstrip("./")
+    name = Path(normalized).name
+    if name in PROTECTED_EXACT_NAMES:
+        return True
+    if any(normalized.startswith(prefix) for prefix in PROTECTED_DIR_PREFIXES):
+        return True
+    return any(normalized.endswith(suffix) for suffix in PROTECTED_SUFFIXES)
 
 
 def _count_lines_changed(original: str, modified: str) -> int:

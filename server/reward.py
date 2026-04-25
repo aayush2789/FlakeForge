@@ -309,6 +309,7 @@ def compute_verifiable_reward(
     baseline_pass_rate: float,
     pre_entropy: float,
     oracle_score: Optional[float] = None,
+    regression_detected: bool = False,
 ) -> RewardBreakdown:
     """Compute the full seven-signal verifiable reward.
 
@@ -328,6 +329,9 @@ def compute_verifiable_reward(
     syntax_error = patch_result.get("error") if not patch_applied else None
     files_modified = patch_result.get("files_modified", [])
     lines_changed = patch_result.get("lines_changed", 0)
+    noop_patch = bool(patch_result.get("noop", False))
+    protected_file = bool(patch_result.get("protected_file", False))
+    regression_detected = bool(regression_detected or patch_result.get("regression_detected", False))
 
     post_pass_count = sum(1 for r in post_run_results if r.get("passed", False))
     post_pass_rate = post_pass_count / max(len(post_run_results), 1)
@@ -359,6 +363,9 @@ def compute_verifiable_reward(
     breakdown.anti_hack_penalty = compute_anti_hack_penalty(
         action.patch_text, files_modified, lines_changed,
     )
+    breakdown.noop_patch_penalty = -0.5 if patch_applied and noop_patch else 0.0
+    breakdown.protected_file_penalty = -2.0 if protected_file else 0.0
+    breakdown.regression_penalty = -3.0 if regression_detected else 0.0
 
     if oracle_score is not None:
         breakdown.oracle_reasoning_reward = round(float(oracle_score), 4)
@@ -372,6 +379,10 @@ def compute_verifiable_reward(
     if patch_applied and post_run_results and post_pass_rate >= 1.0:
         breakdown.terminal_bonus = 2.0
     elif patch_applied and post_run_results and post_pass_rate > baseline_pass_rate + 0.3:
+    # Terminal bonus for full stability
+    if post_pass_rate >= 1.0 and not regression_detected:
+        breakdown.terminal_bonus = 2.0
+    elif post_pass_rate > baseline_pass_rate + 0.3 and not regression_detected:
         breakdown.terminal_bonus = 1.0
 
     breakdown.total_reward = round(
@@ -383,6 +394,10 @@ def compute_verifiable_reward(
         + breakdown.anti_hack_penalty * 1.5
         + breakdown.reasoning_consistency_reward * 0.5   # fallback path only
         + breakdown.oracle_reasoning_reward * 1.0        # structured-claim oracle
+        + breakdown.reasoning_consistency_reward * 0.5
+        + breakdown.noop_patch_penalty * 1.0
+        + breakdown.protected_file_penalty * 1.0
+        + breakdown.regression_penalty * 2.0
         + breakdown.terminal_bonus * 1.0,
         4,
     )

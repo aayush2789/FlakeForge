@@ -290,6 +290,18 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             post_pass_rate = self._episode_state.current_pass_rate
 
         # --- 4. Compute reward (oracle first, then reward) ---
+        regression_detected = post_pass_rate < self._episode_state.baseline_pass_rate - 0.1
+        if patch_result["success"] and not syntax_error and self.runner is not None:
+            try:
+                if hasattr(self.runner, "check_regressions"):
+                    regression_detected = regression_detected or bool(
+                        self.runner.check_regressions(self.test_identifier)
+                    )
+            except Exception as exc:
+                logger.debug("[ENV] Regression check failed: %s", exc)
+        patch_result["regression_detected"] = regression_detected
+
+        # --- 4. Compute reward ---
         pre_entropy = failure_mode_entropy(self._episode_state.run_history[-self.num_runs:])
         observation = self._build_observation()  # Build before reward for causal proximity
 
@@ -316,6 +328,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             baseline_pass_rate=self._episode_state.baseline_pass_rate,
             pre_entropy=pre_entropy,
             oracle_score=oracle_score,
+            regression_detected=regression_detected,
         )
 
         # --- 5. Update state ---
@@ -338,7 +351,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             self._episode_state.total_diff_lines += patch_result.get("lines_changed", 0)
 
         # Check for regression
-        if post_pass_rate < self._episode_state.baseline_pass_rate - 0.1:
+        if regression_detected:
             self._episode_state.regression_detected = True
 
         # Re-read modified sources
@@ -348,7 +361,6 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         done = (
             post_pass_rate >= 1.0  # Full stability achieved
             or self._episode_state.step_count >= self.max_steps
-            or self._episode_state.regression_detected
         )
         self._episode_state.done = done
         self._episode_state.last_done_reason = self._done_reason(post_pass_rate, done)
@@ -490,25 +502,73 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         # Try to find source under test from imports
         if test_source:
-            imports = self._extract_imports(test_source)
-            for imp in imports:
-                # Convert import to file path
-                parts = imp.replace(".", "/")
-                candidates = [
-                    self.repo_path / f"{parts}.py",
-                    self.repo_path / "src" / f"{parts}.py",
-                ]
-                for candidate in candidates:
-                    if candidate.exists():
-                        try:
-                            source_under_test = candidate.read_text(encoding="utf-8", errors="ignore")[:8000]
-                            break
-                        except Exception:
-                            pass
-                if source_under_test:
-                    break
+            for candidate in self._source_candidates_from_test(test_source, test_file_hint):
+                if candidate.exists() and candidate.is_file():
+                    try:
+                        source_under_test = candidate.read_text(encoding="utf-8", errors="ignore")[:8000]
+                        break
+                    except Exception:
+                        pass
 
         return test_source, source_under_test
+
+    def _source_candidates_from_test(self, test_source: str, test_file_hint: str) -> List[Path]:
+        """Resolve likely source files from imports in the target test."""
+        candidates: List[Path] = []
+        test_dir = (self.repo_path / test_file_hint).parent if test_file_hint else self.repo_path
+
+        def add_module_candidates(module: str) -> None:
+            if not module:
+                return
+            parts = module.replace(".", "/")
+            candidates.extend([
+                self.repo_path / f"{parts}.py",
+                self.repo_path / parts / "__init__.py",
+                self.repo_path / "src" / f"{parts}.py",
+                self.repo_path / "src" / parts / "__init__.py",
+            ])
+
+        try:
+            tree = ast.parse(test_source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        add_module_candidates(alias.name)
+                elif isinstance(node, ast.ImportFrom):
+                    base_module = node.module or ""
+                    if node.level:
+                        base_dir = test_dir
+                        for _ in range(max(node.level - 1, 0)):
+                            base_dir = base_dir.parent
+                        if base_module:
+                            candidates.extend([
+                                base_dir / f"{base_module.replace('.', '/')}.py",
+                                base_dir / base_module.replace(".", "/") / "__init__.py",
+                            ])
+                        for alias in node.names:
+                            if alias.name != "*":
+                                candidates.append(base_dir / f"{alias.name}.py")
+                    else:
+                        add_module_candidates(base_module)
+                        for alias in node.names:
+                            if alias.name != "*":
+                                add_module_candidates(f"{base_module}.{alias.name}" if base_module else alias.name)
+        except Exception:
+            for imp in self._extract_imports(test_source):
+                add_module_candidates(imp)
+
+        seen = set()
+        unique_candidates: List[Path] = []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique_candidates.append(candidate)
+        return unique_candidates
 
     def _build_file_tree(self) -> List[str]:
         """Build a compact file tree of the repo."""
