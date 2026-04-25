@@ -52,6 +52,26 @@ if load_dotenv is not None:
     load_dotenv()
 
 
+def _observation_info(observation: FlakeForgeObservation) -> Dict[str, Any]:
+    """Extract step metadata carried inside OpenEnv observations."""
+    patch_result = getattr(observation, "patch_result", {}) or {}
+    if not patch_result and getattr(observation, "patches_applied", None):
+        patch_result = {"success": True}
+
+    return {
+        "reward_breakdown": getattr(observation, "reward_breakdown", {}) or {},
+        "patch_result": patch_result,
+        "done_reason": getattr(observation, "done_reason", "") or "",
+        "deep_signals": {
+            "module_cache_violations": getattr(observation, "module_cache_violations", []),
+            "fixture_scope_risks": getattr(observation, "fixture_scope_risks", []),
+            "mock_residue_sites": getattr(observation, "mock_residue_sites", []),
+            "import_side_effect_files": getattr(observation, "import_side_effect_files", []),
+            "async_contamination_alive": getattr(observation, "async_contamination_alive", False),
+        },
+    }
+
+
 if EnvClient is not None:
     class FlakeForgeEnvClient(EnvClient[FlakeForgeAction, FlakeForgeObservation, FlakeForgeState]):
         """Concrete OpenEnv client for FlakeForge's action/observation models."""
@@ -86,7 +106,7 @@ if EnvClient is not None:
                 baseline_pass_rate=float(getattr(observation, "baseline_pass_rate", 0.0)),
             )
             setattr(result, "state", state)
-            setattr(result, "info", {})
+            setattr(result, "info", _observation_info(observation))
             return result
 
         def _parse_state(self, payload: Dict[str, Any]) -> FlakeForgeState:
@@ -118,7 +138,7 @@ def _as_step_output_like(value: Any) -> Any:
                 getattr(source, "reward", getattr(observation, "reward", 0.0)) or 0.0
             )
             self.done = bool(getattr(source, "done", getattr(observation, "done", False)))
-            self.info = getattr(source, "info", {}) or {}
+            self.info = getattr(source, "info", None) or _observation_info(observation)
 
             self.state = getattr(source, "state", None) or FlakeForgeState(
                 episode_id=str(getattr(observation, "episode_id", "")),
@@ -281,6 +301,7 @@ async def run_episode(
         # Log result
         reward = step_output.reward
         breakdown = step_output.info.get("reward_breakdown", {})
+        patch_result = step_output.info.get("patch_result", {})
         done = step_output.done
         pass_rate_after = step_output.state.current_pass_rate
         pass_rate_before = observation.baseline_pass_rate
@@ -293,7 +314,7 @@ async def run_episode(
         if breakdown and verbose:
             logger.info(f"    Breakdown: {breakdown}")
 
-        if not step_output.info.get("patch_result", {}).get("success", False) and verbose:
+        if action.patch_text.strip() and not patch_result.get("success", False) and verbose:
             logger.warning(f"    [DEBUG] Patch failed to apply. Raw response excerpt: {action.raw_response[:200]}...")
 
         # Track trajectory
@@ -302,28 +323,16 @@ async def run_episode(
             "predicted_category": action.predicted_category,
             "predicted_confidence": action.predicted_confidence,
             "think_text": action.think_text[:500],
-            "patch_applied": step_output.info.get("patch_result", {}).get("success", False),
+            "patch_applied": patch_result.get("success", False) and not patch_result.get("rolled_back", False),
+            "patch_rolled_back": patch_result.get("rolled_back", False),
             "reward": step_output.reward,
-            "reward_breakdown": step_output.info.get("reward_breakdown", {}),
+            "reward_breakdown": breakdown,
             "pass_rate": step_output.state.current_pass_rate,
             "done": step_output.done,
         }
         episode_result["trajectory"].append(step_data)
         episode_result["total_reward"] += step_output.reward
-        episode_result["reward_breakdown_history"].append(
-            step_output.info.get("reward_breakdown", {})
-        )
-
-        if verbose:
-            logger.info(
-                "[EPISODE] RESULT step=%d reward=%.4f pass_rate=%.2f→%.2f done=%s reason=%s",
-                step_data["step"],
-                step_output.reward,
-                observation.baseline_pass_rate,
-                step_output.state.current_pass_rate,
-                step_output.done,
-                step_output.info.get("done_reason", ""),
-            )
+        episode_result["reward_breakdown_history"].append(breakdown)
 
     # Finalize
     episode_result["steps"] = step_output.state.step_count

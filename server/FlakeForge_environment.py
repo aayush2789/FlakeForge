@@ -36,7 +36,7 @@ try:
         build_deep_observation_signals,
         extract_failure_frontier,
     )
-    from server.patch_applier import apply_search_replace_patch
+    from server.patch_applier import apply_search_replace_patch, parse_search_replace_hunks
     from server.reward import compute_verifiable_reward
     from server.causal_graph import CrossRepoGraphBuilder
     from server.docker_runner import DockerTestRunner
@@ -56,7 +56,7 @@ except ImportError:
             build_deep_observation_signals,
             extract_failure_frontier,
         )
-        from ..server.patch_applier import apply_search_replace_patch
+        from ..server.patch_applier import apply_search_replace_patch, parse_search_replace_hunks
         from ..server.reward import compute_verifiable_reward
         from ..server.causal_graph import CrossRepoGraphBuilder
         from ..server.docker_runner import DockerTestRunner
@@ -75,7 +75,7 @@ except ImportError:
             build_deep_observation_signals,
             extract_failure_frontier,
         )
-        from FlakeForge.server.patch_applier import apply_search_replace_patch
+        from FlakeForge.server.patch_applier import apply_search_replace_patch, parse_search_replace_hunks
         from FlakeForge.server.reward import compute_verifiable_reward
         from FlakeForge.server.causal_graph import CrossRepoGraphBuilder
         from FlakeForge.server.docker_runner import DockerTestRunner
@@ -243,7 +243,9 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         # --- 1. Apply patch ---
         patch_result = {"success": False, "error": "empty_patch", "files_modified": [], "lines_changed": 0, "diff": ""}
+        patch_snapshots: Dict[Path, str] = {}
         if action.patch_text.strip():
+            patch_snapshots = self._snapshot_patch_targets(action.patch_text)
             patch_result = apply_search_replace_patch(
                 repo_path=self.repo_path,
                 patch_text=action.patch_text,
@@ -298,7 +300,22 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self._episode_state.last_reward = reward_breakdown.total_reward
         self._episode_state.last_reward_breakdown = reward_breakdown.to_dict()
 
-        if patch_result["success"]:
+        # Check for regression
+        if post_pass_rate < self._episode_state.baseline_pass_rate - 0.1:
+            self._episode_state.regression_detected = True
+
+        should_rollback_patch = bool(patch_result["success"]) and (
+            syntax_error is not None or self._episode_state.regression_detected
+        )
+        if should_rollback_patch:
+            self._restore_patch_snapshots(patch_snapshots)
+            patch_result["rolled_back"] = True
+            patch_result["rollback_reason"] = (
+                "syntax_error" if syntax_error is not None else "regression_detected"
+            )
+            logger.info("[ENV] PATCH rolled back reason=%s", patch_result["rollback_reason"])
+
+        if patch_result["success"] and not should_rollback_patch:
             self._episode_state.patches_applied.append(PatchRecord(
                 patch_text=action.patch_text,
                 target_files=patch_result.get("files_modified", []),
@@ -308,16 +325,13 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             ))
             self._episode_state.total_diff_lines += patch_result.get("lines_changed", 0)
 
-        # Check for regression
-        if post_pass_rate < self._episode_state.baseline_pass_rate - 0.1:
-            self._episode_state.regression_detected = True
-
         # Re-read modified sources
         self._episode_state.current_test_source, self._episode_state.current_source_under_test = self._read_sources()
 
         # Determine if episode is terminal
+        patch_verified = bool(patch_result["success"]) and syntax_error is None
         done = (
-            post_pass_rate >= 1.0  # Full stability achieved
+            (patch_verified and post_pass_rate >= 1.0)  # Full stability achieved by a real patch
             or self._episode_state.step_count >= self.max_steps
             or self._episode_state.regression_detected
         )
@@ -326,6 +340,9 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         # Build final observation with updated signals
         final_observation = self._build_observation()
         final_observation.reward = reward_breakdown.total_reward
+        final_observation.reward_breakdown = reward_breakdown.to_dict()
+        final_observation.patch_result = patch_result
+        final_observation.done_reason = self._done_reason(post_pass_rate, done, patch_verified)
         final_observation.done = done
         self._openenv_state = FlakeForgeState(
             episode_id=self._episode_state.episode_id,
@@ -569,10 +586,41 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         test_parts = self.test_identifier.split("::")
         return test_parts[0] if test_parts else ""
 
-    def _done_reason(self, pass_rate: float, done: bool) -> str:
+    def _snapshot_patch_targets(self, patch_text: str) -> Dict[Path, str]:
+        """Capture target file contents so failed/regressing patches can be reverted."""
+        snapshots: Dict[Path, str] = {}
+        default_target = self._resolve_default_target()
+        for hunk in parse_search_replace_hunks(patch_text):
+            file_path = hunk.file_path or default_target
+            if not file_path:
+                continue
+            target = self.repo_path / file_path
+            if not target.exists():
+                candidates = list(self.repo_path.rglob(Path(file_path).name))
+                if not candidates:
+                    continue
+                target = candidates[0]
+            try:
+                resolved = target.resolve()
+                repo_root = self.repo_path.resolve()
+                resolved.relative_to(repo_root)
+                snapshots.setdefault(resolved, resolved.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+        return snapshots
+
+    def _restore_patch_snapshots(self, snapshots: Dict[Path, str]) -> None:
+        """Best-effort rollback for candidate patches that fail verification."""
+        for path, content in snapshots.items():
+            try:
+                path.write_text(content, encoding="utf-8")
+            except Exception as exc:
+                logger.warning("[ENV] Failed to restore %s after patch rollback: %s", path, exc)
+
+    def _done_reason(self, pass_rate: float, done: bool, patch_verified: bool = False) -> str:
         if not done:
             return "in_progress"
-        if pass_rate >= 1.0:
+        if patch_verified and pass_rate >= 1.0:
             return "fully_stable"
         if self._episode_state and self._episode_state.regression_detected:
             return "regression_detected"

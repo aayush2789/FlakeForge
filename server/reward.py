@@ -370,9 +370,9 @@ def compute_verifiable_reward(
     )
 
     # Terminal bonus for full stability
-    if post_pass_rate >= 1.0:
+    if patch_applied and post_run_results and post_pass_rate >= 1.0:
         breakdown.terminal_bonus = 2.0
-    elif post_pass_rate > baseline_pass_rate + 0.3:
+    elif patch_applied and post_run_results and post_pass_rate > baseline_pass_rate + 0.3:
         breakdown.terminal_bonus = 1.0
 
     # Weighted total
