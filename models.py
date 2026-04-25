@@ -362,6 +362,7 @@ class RewardBreakdown:
     oracle_gate_penalty: float = 0.0       # hard gate when oracle strongly disagrees
     diversity_penalty: float = 0.0         # penalise repeating same category across steps
     claim_novelty_reward: float = 0.0      # reward genuinely new entities / reasoning
+    patch_validation_signal: float = 0.0   # PatchValidator: -0.3 invalid, +0.2×score when valid
     noop_patch_penalty: float = 0.0
     protected_file_penalty: float = 0.0
     regression_penalty: float = 0.0        # scaled by regression magnitude, not fixed
@@ -381,6 +382,7 @@ class RewardBreakdown:
             "oracle_gate": self.oracle_gate_penalty,
             "diversity": self.diversity_penalty,
             "claim_novelty": self.claim_novelty_reward,
+            "patch_validation": self.patch_validation_signal,
             "noop_patch": self.noop_patch_penalty,
             "protected_file": self.protected_file_penalty,
             "regression": self.regression_penalty,
