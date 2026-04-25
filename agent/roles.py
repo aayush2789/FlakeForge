@@ -186,10 +186,17 @@ class AnalyzerRole:
                 if heuristic_hypothesis and heuristic_hypothesis.root_cause_category != "unknown":
                     return heuristic_hypothesis
             
+            # Fix: LLM may return evidence as a raw string instead of a list.
+            # Calling list() on a string iterates characters, producing ["T","h","e",...].
+            raw_ev = parsed.get("evidence", [])
+            if isinstance(raw_ev, str):
+                raw_ev = [raw_ev] if raw_ev.strip() else []
+            elif not isinstance(raw_ev, list):
+                raw_ev = [str(raw_ev)] if raw_ev else []
             return Hypothesis(
                 root_cause_category=category,
                 confidence=float(parsed.get("confidence", 0.1)),
-                evidence=list(parsed.get("evidence", []))[:5],
+                evidence=raw_ev[:5],
                 suggested_action=parsed.get("next_best_action") or parsed.get("suggested_action"),
                 reasoning_steps=list([str(s) for s in reasoning])[:3],
                 uncertainty=str(parsed.get("uncertainty", ""))[:240] or None,
@@ -349,21 +356,24 @@ class FixerRole:
         parsed = _parse_json(raw)
         try:
             # Match the new "chosen_action" field from the senior engineer prompt
-            action_type = str(parsed.get("chosen_action") or parsed.get("action_type", "analyze_logs"))
+            raw_action_type = str(parsed.get("chosen_action") or parsed.get("action_type", "analyze_logs"))
+            # CRITICAL: Normalize action_type BEFORE constructing FlakeForgeAction.
+            # Unknown types (e.g. "FIX", "fix_timeout") cause Pydantic ValidationError
+            # on the server side, which drops the WebSocket/HTTP connection entirely.
+            action_type = _normalize_fixer_action(raw_action_type, hypothesis)
             justification_text = str(parsed.get("reasoning") or parsed.get("justification", ""))[:500] or None
 
-            if action_type in {"analyze_logs", "detect_flakiness"} and hypothesis.suggested_action:
-                action_type = str(hypothesis.suggested_action)
-                if not justification_text:
-                    justification_text = f"Promoted from diagnostic to {action_type} based on the current hypothesis."
-            
             logger.info(f"[TOOL_USAGE] [FIXER] Using chosen tool/action <{action_type}> based on root cause hypothesis.")
             if justification_text:
                 logger.info(f"[TOOL_USAGE] [FIXER] Reasoning/Purpose for using tool: {justification_text}")
-            
+
+            # Sanitize parameters — strip unexpected keys that would fail server validation
+            raw_params = dict(parsed.get("parameters", {}))
+            safe_params = _sanitize_params(action_type, raw_params)
+
             return FlakeForgeAction(
                 action_type=action_type,
-                parameters=dict(parsed.get("parameters", {})),
+                parameters=safe_params,
                 hypothesis=_hypothesis_payload(hypothesis),
                 predicted_pass_rate_after=(
                     float(parsed["predicted_pass_rate_after"])
@@ -390,7 +400,7 @@ class FixerRole:
 
             return FlakeForgeAction(
                 action_type=fallback_type,
-                parameters={},
+                parameters=_sanitize_params(fallback_type, {}),
                 hypothesis=_hypothesis_payload(hypothesis),
                 justification=f"JSON parsing failed; falling back to heuristic {fallback_type}",
                 expected_outcome="Fallback recovery",
@@ -485,3 +495,127 @@ def _normalize_root_cause(value: Any) -> str:
         "unknown": "unknown",
     }
     return mapping.get(key, "unknown")
+
+
+def _normalize_fixer_action(raw: str, hypothesis: "Hypothesis") -> str:
+    """Map any LLM-generated action string to a valid ACTION_TYPES value.
+
+    The LLM may output things like 'FIX', 'fix_timeout', 'ADD_SLEEP',
+    'increase_timeout', etc. We apply a priority cascade:
+
+    1. Direct match (already a known alias or canonical type).
+    2. Keyword-based fuzzy match.
+    3. Category-based fallback from hypothesis.
+    """
+    # All valid values accepted by FlakeForgeAction.action_type
+    VALID = {
+        "GATHER_EVIDENCE", "ADD_TIMING_GUARD", "ADD_SYNCHRONIZATION",
+        "MOCK_DEPENDENCY", "RESET_STATE", "ADD_RETRY", "REVERT_LAST_PATCH",
+        "SEED_RANDOMNESS", "DIAGNOSE_BOUNDARY", "REFACTOR_CONCURRENCY",
+        "ISOLATE_BOUNDARY", "EXTRACT_ASYNC_SCOPE", "HARDEN_IDEMPOTENCY",
+        "CHAOS_PROBE",
+        # lowercase aliases
+        "detect_flakiness", "analyze_logs", "add_sleep", "add_lock",
+        "mock_dependency", "isolate_state", "reorder_execution", "retry_test",
+    }
+
+    cleaned = raw.strip()
+    # 1. Direct hit
+    if cleaned in VALID:
+        return cleaned
+
+    # 2. Case-insensitive direct hit
+    upper = cleaned.upper()
+    lower = cleaned.lower()
+    for v in VALID:
+        if v.upper() == upper:
+            return v
+
+    # 3. Keyword fuzzy mapping
+    keyword_map = [
+        (["sleep", "timeout", "delay", "wait", "timing"], "add_sleep"),
+        (["lock", "sync", "synchron", "barrier"], "add_lock"),
+        (["mock", "stub", "patch", "dependency", "external"], "mock_dependency"),
+        (["state", "reset", "isolate", "fixture"], "isolate_state"),
+        (["retry", "attempt", "flak"], "retry_test"),
+        (["log", "evidence", "gather", "detect", "diagnose", "observe"], "analyze_logs"),
+        (["reorder", "order", "sequence"], "reorder_execution"),
+        (["seed", "random"], "SEED_RANDOMNESS"),
+        (["refactor", "concurren", "async"], "REFACTOR_CONCURRENCY"),
+        (["chaos", "probe"], "CHAOS_PROBE"),
+        (["revert", "undo"], "REVERT_LAST_PATCH"),
+    ]
+    for keywords, action in keyword_map:
+        if any(kw in lower for kw in keywords):
+            return action
+
+    # 4. Category-driven fallback
+    cat = getattr(hypothesis, "root_cause_category", "unknown")
+    category_defaults = {
+        "timing": "add_sleep",
+        "race": "add_lock",
+        "shared_state": "isolate_state",
+        "network": "mock_dependency",
+        "order": "reorder_execution",
+    }
+    return category_defaults.get(cat, "analyze_logs")
+
+
+def _sanitize_params(action_type: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of params containing only keys allowed by the server validator.
+
+    This prevents Pydantic ValidationError from 'Unexpected parameter keys'
+    that would crash the HTTP request and manifest as a ConnectionClosedError.
+    """
+    # Map from alias → canonical
+    alias_to_canonical = {
+        "detect_flakiness": "GATHER_EVIDENCE",
+        "analyze_logs": "GATHER_EVIDENCE",
+        "add_sleep": "ADD_TIMING_GUARD",
+        "add_lock": "ADD_SYNCHRONIZATION",
+        "mock_dependency": "MOCK_DEPENDENCY",
+        "isolate_state": "RESET_STATE",
+        "reorder_execution": "RESET_STATE",
+        "retry_test": "ADD_RETRY",
+    }
+    canonical = alias_to_canonical.get(action_type, action_type)
+
+    allowed_map: Dict[str, set] = {
+        "GATHER_EVIDENCE": {"injection_target"},
+        "ADD_TIMING_GUARD": {"delay_ms"},
+        "ADD_SYNCHRONIZATION": {"primitive"},
+        "MOCK_DEPENDENCY": {"target"},
+        "RESET_STATE": {"scope"},
+        "ADD_RETRY": {"max_attempts", "backoff_ms"},
+        "REVERT_LAST_PATCH": set(),
+        "SEED_RANDOMNESS": {"library"},
+        "DIAGNOSE_BOUNDARY": {"boundary_node"},
+        "REFACTOR_CONCURRENCY": {"from_primitive", "to_primitive", "target_function"},
+        "ISOLATE_BOUNDARY": {"boundary_call", "pattern"},
+        "EXTRACT_ASYNC_SCOPE": {"target_function", "direction"},
+        "HARDEN_IDEMPOTENCY": {"state_target", "key_strategy"},
+        "CHAOS_PROBE": {"profile", "n_runs"},
+    }
+    allowed = allowed_map.get(canonical, set())
+
+    # Supply required defaults for certain actions when key is missing
+    defaults: Dict[str, Any] = {}
+    if canonical == "GATHER_EVIDENCE" and "injection_target" not in params:
+        defaults["injection_target"] = "test"
+    elif canonical == "ADD_TIMING_GUARD" and "delay_ms" not in params:
+        defaults["delay_ms"] = 100
+    elif canonical == "ADD_SYNCHRONIZATION" and "primitive" not in params:
+        defaults["primitive"] = "lock"
+    elif canonical == "MOCK_DEPENDENCY" and "target" not in params:
+        defaults["target"] = "requests.get"
+    elif canonical == "RESET_STATE" and "scope" not in params:
+        defaults["scope"] = "function"
+    elif canonical == "ADD_RETRY":
+        defaults.setdefault("max_attempts", 2)
+        defaults.setdefault("backoff_ms", 100)
+    elif canonical == "SEED_RANDOMNESS" and "library" not in params:
+        defaults["library"] = "random"
+
+    merged = {**defaults, **{k: v for k, v in params.items() if k in allowed}}
+    return merged
+

@@ -54,7 +54,7 @@ def parse_ast_summary(path: str) -> ASTSummary:
         return _parse_js_ts_summary(p)
 
     source = p.read_text(encoding="utf-8", errors="ignore")
-    return _parse_python_ast_summary(source)
+    return _safe_summary_from_source(source)
 
 
 def resolve_target_from_evidence(path: str, evidence: List[str]) -> Dict[str, Any]:
@@ -588,11 +588,10 @@ def _apply_insert_in_function(source: str, target: Dict[str, Any], rendered: str
     module = cst.parse_module(source)
 
     class InsertTransformer(cst.CSTTransformer):
-        def leave_FunctionDef(self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef) -> cst.FunctionDef:
-            if fn_name and fn_name not in original_node.name.value and fn_name != "test":
-                return updated_node
+        def _insert_into(self, updated_node: cst.FunctionDef) -> cst.FunctionDef:
             body = list(updated_node.body.body)
-            if any(getattr(stmt, "code", "") == statement.code for stmt in body):
+            stmt_code = statement.code if hasattr(statement, "code") else rendered
+            if any((getattr(stmt, "code", None) or "") == stmt_code for stmt in body):
                 return updated_node
             if operation == "insert_before":
                 body = [statement, *body]
@@ -600,7 +599,27 @@ def _apply_insert_in_function(source: str, target: Dict[str, Any], rendered: str
                 body = [*body, statement]
             return updated_node.with_changes(body=updated_node.body.with_changes(body=body))
 
-    return module.visit(InsertTransformer()).code
+        def leave_FunctionDef(
+            self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+        ) -> cst.FunctionDef:
+            if fn_name and fn_name not in original_node.name.value and fn_name != "test":
+                return updated_node
+            return self._insert_into(updated_node)
+
+        def leave_AsyncFunctionDef(
+            self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+        ) -> cst.FunctionDef:
+            if fn_name and fn_name not in original_node.name.value and fn_name != "test":
+                return updated_node
+            return self._insert_into(updated_node)
+
+    patched = module.visit(InsertTransformer()).code
+
+    # Auto-inject `import asyncio` if the rendered snippet uses it and it's not present
+    if "asyncio" in rendered and "import asyncio" not in patched:
+        patched = "import asyncio\n" + patched
+
+    return patched
 
 
 def _apply_textual_operation_idempotent(source: str, operation: str, identifier: str, rendered: str) -> str:
@@ -608,14 +627,24 @@ def _apply_textual_operation_idempotent(source: str, operation: str, identifier:
         return source
 
     if operation in {"insert_before", "insert_after"} and identifier:
-        match = re.search(re.escape(identifier), source)
-        if not match:
-            raise ValueError(f"Target identifier not found: {identifier}")
-
-        insert = rendered + "\n"
-        if operation == "insert_before":
-            return source[: match.start()] + insert + source[match.start() :]
-        return source[: match.end()] + "\n" + rendered + source[match.end() :]
+        lines = source.splitlines()
+        for i, line in enumerate(lines):
+            if identifier in line:
+                indent = len(line) - len(line.lstrip())
+                indented_rendered = "\n".join((" " * indent) + r for r in rendered.splitlines())
+                
+                if operation == "insert_before":
+                    lines.insert(i, indented_rendered)
+                else:
+                    lines.insert(i + 1, indented_rendered)
+                
+                # Auto-inject asyncio import if missing and needed
+                patched = "\n".join(lines) + "\n"
+                if "asyncio" in rendered and "import asyncio" not in patched:
+                    patched = "import asyncio\n" + patched
+                return patched
+                
+        raise ValueError(f"Target identifier not found: {identifier}")
 
     raise ValueError(f"Unsupported textual operation: {operation}")
 
