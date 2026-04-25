@@ -18,7 +18,6 @@ openenv_FlakeForge.egg-info/requires.txt
 openenv_FlakeForge.egg-info/top_level.txt
 server/FlakeForge_environment.py
 server/__init__.py
-server/action_executor.py
 server/app.py
 server/causal_graph.py
 server/chaos_runner.py
@@ -26,7 +25,9 @@ server/deep_flakiness.py
 server/docker_runner.py
 server/hypothesis_engine.py
 server/logger.py
+server/oracle_engine.py
 server/patch_applier.py
+server/patch_validator.py
 server/perf_sentinel.py
 server/reward.py
 server/state.py
