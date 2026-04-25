@@ -1,13 +1,9 @@
-#!/usr/bin/env python3
-"""FlakeForge inference script with strict Analyzer -> Fixer execution flow.
+"""V3 Inference Loop — unified agent with verifiable reward.
 
-Key change from original:
-  - REMOVED the duplicate FrozenJudge / OpenAIJudgeBackend path that was
-    firing two extra LLM calls (128–136 s each) PER STEP.
-  - Judge scores are now ONLY computed by client.py's async _run_judge()
-    which already had a 60-second asyncio.wait_for guard.
-  - Judge scores (including critique + prediction_error) are read from the
-    StepResult returned by env.step(), which the client populates internally.
+Replaces the V2 two-phase inference (analyze → fix) with a single
+unified loop: observe → think+patch → apply → verify → reward.
+
+No judge calls. No hypothesis gating. Just execution-verified reward.
 """
 
 from __future__ import annotations
@@ -15,358 +11,262 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
-from datetime import datetime
+import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-from openai import OpenAI
+from typing import Any, Dict, Optional
 
 try:
-    from dotenv import load_dotenv
-except Exception:  # pragma: no cover
-    load_dotenv = None  # type: ignore[assignment]
-
-try:
-    from agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
-    from client import FlakeForgeEnv
-    from models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+    from models import FlakeForgeAction, FlakeForgeObservation
+    from agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
+    from server.FlakeForge_environment import FlakeForgeEnvironment
 except ImportError:
-    # This might happen if running from within a subfolder
-    from .agent.roles import AnalyzerRole, FixerRole, LoRAAdapterSpec, ModelBackend
-    from .client import FlakeForgeEnv
-    from .models import FlakeForgeAction, FlakeForgeObservation, Hypothesis
+    from .models import FlakeForgeAction, FlakeForgeObservation
+    from .agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
+    from .server.FlakeForge_environment import FlakeForgeEnvironment
 
-
-if load_dotenv:
-    load_dotenv()
-
-
-API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.3-70b-instruct")
-JUDGE_MODEL = os.getenv("JUDGE_MODEL", "minimaxai/minimax-m2.7")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY")
-
-ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
-USE_DOCKER_IMAGE = os.getenv("USE_DOCKER_IMAGE", "0").strip().lower() in {"1", "true", "yes"}
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "flakeforge-env:latest")
-
-MAX_STEPS = int(os.getenv("INFERENCE_MAX_STEPS", "14"))
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "900"))
-REQUEST_TIMEOUT_S = float(os.getenv("REQUEST_TIMEOUT_S", "45"))
-ENV_MESSAGE_TIMEOUT_S = float(os.getenv("ENV_MESSAGE_TIMEOUT_S", "180"))
-VERBOSE_PROMPTS = os.getenv("VERBOSE_PROMPTS", "0").strip().lower() in {"1", "true", "yes"}
-
-OUTPUT_DIR = Path("outputs")
-OUTPUT_DIR.mkdir(exist_ok=True)
-RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")
-LOG_FILE = OUTPUT_DIR / f"flakeforge_inference_{RUN_TS}.log"
-SUMMARY_FILE = OUTPUT_DIR / f"flakeforge_summary_{RUN_TS}.json"
-
-
-import sys
-sys.path.append(str(Path(__file__).resolve().parent))
 try:
     from utils.logger import get_logger
 except ImportError:
-    # fallback if module not found for some reason
-    logging = __import__('logging')
-    get_logger = lambda n, log_file=None: logging.getLogger(n)
-
-logger = get_logger(__name__, log_file=LOG_FILE)
-
-
-def _log(message: str) -> None:
-    if "[WARN]" in message or "[ERROR]" in message:
-        logger.error(message)
-    else:
-        logger.info(message)
-
-
-class OpenAIModelBackend(ModelBackend):
-    """Text backend for Analyzer/Fixer calls through chat completions."""
-
-    def __init__(self, model: str, base_url: str, api_key: Optional[str]) -> None:
-        self.model = model
-        self.client = OpenAI(base_url=base_url, api_key=api_key or "")
-
-    def generate(self, prompt: str, *, system_prompt: str, adapter_name: str) -> str:
-        role_hint = (
-            "You are in ANALYZER mode." if "analyzer" in adapter_name.lower() else "You are in FIXER mode."
-        )
-        messages = [
-            {"role": "system", "content": f"{system_prompt}\n{role_hint}\nReturn only JSON."},
-            {"role": "user", "content": prompt},
-        ]
-        t_start = time.time()
-        _log(f"[LLM] Backend request start: adapter={adapter_name}")
-        if VERBOSE_PROMPTS:
-            _log(f"[LLM_PROMPT] adapter={adapter_name}\n{'='*40}\n{prompt}\n{'='*40}")
-        try:
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=TEMPERATURE,
-                top_p=0.95,
-                max_tokens=MAX_TOKENS,
-                timeout=REQUEST_TIMEOUT_S,
-            )
-            raw_content = completion.choices[0].message.content or "{}"
-            if VERBOSE_PROMPTS:
-                _log(f"[LLM_RAW_RESPONSE] adapter={adapter_name}\n{'-'*40}\n{raw_content}\n{'-'*40}")
-            elapsed = time.time() - t_start
-            _log(f"[LLM] Backend request success: adapter={adapter_name} elapsed={elapsed:.2f}s")
-            return raw_content
-        except Exception as exc:
-            elapsed = time.time() - t_start
-            _log(f"[WARN] model backend failure adapter={adapter_name} elapsed={elapsed:.2f}s: {exc}")
-            return "{}"
-
-
-def _extract_observation(reset_or_step_result: Any) -> FlakeForgeObservation:
-    if isinstance(reset_or_step_result, FlakeForgeObservation):
-        return reset_or_step_result
-    return reset_or_step_result.observation
-
-
-def _attach_hypothesis_to_action(action: FlakeForgeAction, hypothesis: Hypothesis) -> FlakeForgeAction:
-    h_payload = {
-        "root_cause_category": hypothesis.root_cause_category,
-        "confidence": float(hypothesis.confidence),
-        "evidence": list(hypothesis.evidence),
-        "suggested_action": hypothesis.suggested_action,
-        "reasoning_steps": list(hypothesis.reasoning_steps),
-        "uncertainty": hypothesis.uncertainty,
-        "next_best_action": hypothesis.next_best_action,
-        "predicted_effect": hypothesis.predicted_effect,
-    }
-    return FlakeForgeAction(
-        action_type=action.action_type,
-        parameters=action.parameters,
-        hypothesis=h_payload,
-        predicted_pass_rate_after=action.predicted_pass_rate_after,
-    )
-
-
-async def _build_env() -> FlakeForgeEnv:
-    if USE_DOCKER_IMAGE:
-        _log(f"[INIT] Using Docker image env: {LOCAL_IMAGE_NAME}")
-        return await FlakeForgeEnv.from_docker_image(
-            LOCAL_IMAGE_NAME,
-            message_timeout_s=ENV_MESSAGE_TIMEOUT_S,
-        )
-    _log(f"[INIT] Using HTTP env: {ENV_BASE_URL}")
-    return FlakeForgeEnv(base_url=ENV_BASE_URL, message_timeout_s=ENV_MESSAGE_TIMEOUT_S)
-
-
-def _log_run_history(obs: FlakeForgeObservation) -> None:
-    if not obs.run_history:
-        return
-    history = []
-    for r in obs.run_history:
-        status = "PASS" if r.passed else f"FAIL ({r.error_type})"
-        history.append(f"{status} [{r.duration_ms}ms]")
-    _log(f"[RUN_HISTORY] {', '.join(history)}")
-
-
-async def run_inference() -> Dict[str, Any]:
-    if not NVIDIA_API_KEY:
-        raise RuntimeError("Missing API key. Set NVIDIA_API_KEY or OPENAI_API_KEY.")
-
-    model_backend = OpenAIModelBackend(MODEL_NAME, API_BASE_URL, NVIDIA_API_KEY)
-
-    # NOTE: No FrozenJudge constructed here. Judging is fully owned by
-    # FlakeForgeEnv.step() (client.py) which runs the two judge calls
-    # concurrently with a 60 s asyncio.wait_for guard. This eliminates
-    # the 256+ s per-step overhead from the duplicate synchronous judge calls.
-
-    analyzer = AnalyzerRole(
-        backend=model_backend,
-        adapter=LoRAAdapterSpec(name="analyzer_lora", adapter_path="lora/analyzer"),
-    )
-    fixer = FixerRole(
-        backend=model_backend,
-        adapter=LoRAAdapterSpec(name="fixer_lora", adapter_path="lora/fixer"),
-    )
-
-    env = await _build_env()
-    started_at = time.time()
-    steps: List[Dict[str, Any]] = []
-
     try:
-        reset_result = await env.reset()
-        obs = _extract_observation(reset_result)
+        from .utils.logger import get_logger
+    except ImportError:
+        import logging
+        get_logger = lambda n, **kw: logging.getLogger(n)
 
-        _log(f"[START] episode={obs.episode_id} test={obs.test_identifier} max_steps={MAX_STEPS}")
-        _log(f"[BASELINE] pass_rate={obs.baseline_pass_rate:.3f}")
-        if obs.duration_fingerprint:
-            fp = obs.duration_fingerprint
-            _log(
-                f"[FINGERPRINT] mean={fp.get('mean_ms', 0):.0f}ms "
-                f"cv={fp.get('cv', 0):.3f} flakiness={fp.get('flakiness_score', 0):.3f}"
+logger = get_logger(__name__)
+
+
+class LLMBackend:
+    """LLM backend that calls OpenAI-compatible APIs."""
+
+    def __init__(
+        self,
+        model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+        api_base: Optional[str] = None,
+        api_key: Optional[str] = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+    ) -> None:
+        self.model_name = model_name
+        self.api_base = api_base or os.environ.get("OPENAI_API_BASE", "http://localhost:8000/v1")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "EMPTY")
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+
+    def generate(self, prompt: str, *, system_prompt: str) -> str:
+        """Generate a completion using an OpenAI-compatible API."""
+        try:
+            import openai
+            client = openai.OpenAI(
+                base_url=self.api_base,
+                api_key=self.api_key,
             )
-
-        for step_idx in range(1, MAX_STEPS + 1):
-            step_t0 = time.time()
-
-            # Phase 0: Sync with previous step's background assessment to get critique/feedback.
-            await env.wait_for_previous_judge()
-
-            # Phase 1: Analysis (Analyzer role).
-            hypothesis = analyzer.produce_hypothesis(obs)
-
-            # Phase 2: Execution (Fixer role) using Analyzer context.
-            proposed_action = fixer.produce_action(obs, hypothesis)
-            action = _attach_hypothesis_to_action(proposed_action, hypothesis)
-
-            try:
-                step_result = await env.step(action)
-            except Exception as exc:
-                _log(f"[ERROR] env.step failed at step={step_idx}: {type(exc).__name__}: {exc}")
-                break
-
-            next_obs = _extract_observation(step_result)
-            reward = float(getattr(step_result, "reward", next_obs.reward or 0.0))
-
-            # Judge scores now come from client.py's async _run_judge().
-            # They are stored in env._judge_scores[-1] after step() completes.
-            latest_scores = env.get_judge_scores()[-1] if env.get_judge_scores() else {}
-            hypothesis_score = int(latest_scores.get("judge_hypothesis_score", 0))
-            patch_score = int(latest_scores.get("judge_patch_score", 0))
-            critique = str(latest_scores.get("critique", ""))
-            prediction_error = str(latest_scores.get("prediction_error", ""))
-
-            if critique:
-                _log(f"[JUDGE_CRITIQUE] step={step_idx}: {critique}")
-            if hypothesis.uncertainty:
-                _log(f"[ANALYSIS_UNCERTAINTY] step={step_idx}: {hypothesis.uncertainty}")
-
-            _log(f"[ACTION_JUSTIFICATION] step={step_idx}: {action.justification}")
-            if action.expected_outcome:
-                _log(f"[EXPECTED_OUTCOME] {action.expected_outcome}")
-            if action.risk_assessment:
-                _log(f"[RISK_ASSESSMENT] {action.risk_assessment}")
-
-            _log_run_history(next_obs)
-
-            rec = {
-                "step": step_idx,
-                "hypothesis": {
-                    "root_cause_category": hypothesis.root_cause_category,
-                    "confidence": float(hypothesis.confidence),
-                    "evidence": list(hypothesis.evidence),
-                    "suggested_action": hypothesis.suggested_action,
-                    "reasoning_steps": list(hypothesis.reasoning_steps),
-                    "uncertainty": hypothesis.uncertainty,
-                    "next_best_action": hypothesis.next_best_action,
-                    "predicted_effect": hypothesis.predicted_effect,
-                },
-                "secondary_hypothesis": {
-                    "root_cause_category": next_obs.secondary_hypothesis.root_cause_category,
-                    "confidence": float(next_obs.secondary_hypothesis.confidence),
-                }
-                if next_obs.secondary_hypothesis
-                else None,
-                "action": action.model_dump(),
-                "predicted_pass_rate_after": action.predicted_pass_rate_after,
-                "reward": reward,
-                "pass_rate": float(next_obs.current_pass_rate),
-                "judge_hypothesis_score": hypothesis_score,
-                "judge_patch_score": patch_score,
-                "judge_critique": critique,
-                "judge_prediction_error": prediction_error,
-                "reflection": next_obs.reflection,
-                "done": bool(next_obs.done),
-                "duration_s": round(time.time() - step_t0, 3),
-            }
-            steps.append(rec)
-
-            _log(
-                "[STEP] "
-                f"idx={step_idx} "
-                f"analyze={hypothesis.root_cause_category}:{hypothesis.confidence:.2f} "
-                f"execute={action.action_type} "
-                f"reward={reward:.3f} "
-                f"pass_rate={next_obs.current_pass_rate:.3f} "
-                f"judge_h={hypothesis_score} "
-                f"judge_p={patch_score} "
-                f"done={str(bool(next_obs.done)).lower()}"
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
             )
+            return response.choices[0].message.content or ""
+        except Exception as exc:
+            logger.error("[INFERENCE] LLM call failed: %s", exc)
+            return f"<think>\nRoot Cause: unknown (confidence: 0.1)\nLLM call failed: {exc}\nStrategy: Unable to generate fix.\n</think>\n<patch>\n</patch>"
 
-            obs = next_obs
-            if bool(next_obs.done):
-                break
 
-        # Phase 3: Final sync to ensure all judge evaluations are in before summary.
-        await env.wait_for_previous_judge()
+async def run_episode(
+    env: FlakeForgeEnvironment,
+    agent: UnifiedFlakeForgeAgent,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Run a single episode of the unified inference loop.
 
-        elapsed_s = round(time.time() - started_at, 3)
-        total_reward = round(sum(float(s["reward"]) for s in steps), 4)
-        mean_h = round(sum(int(s["judge_hypothesis_score"]) for s in steps) / max(len(steps), 1), 3)
-        mean_p = round(sum(int(s["judge_patch_score"]) for s in steps) / max(len(steps), 1), 3)
-        final_obs = obs
+    Returns:
+        Episode result dict with trajectory, rewards, and metadata.
+    """
+    episode_result: Dict[str, Any] = {
+        "trajectory": [],
+        "total_reward": 0.0,
+        "steps": 0,
+        "final_pass_rate": 0.0,
+        "done_reason": "in_progress",
+        "reward_breakdown_history": [],
+    }
 
-        summary = {
-            "episode_id": final_obs.episode_id,
-            "test_identifier": final_obs.test_identifier,
-            "model": MODEL_NAME,
-            "judge_model": JUDGE_MODEL,
-            "environment": "docker_image" if USE_DOCKER_IMAGE else ENV_BASE_URL,
-            "max_steps": MAX_STEPS,
-            "steps_executed": len(steps),
-            "done": bool(final_obs.done),
-            "baseline_pass_rate": float(final_obs.baseline_pass_rate),
-            "final_pass_rate": float(final_obs.current_pass_rate),
-            "improvement": round(float(final_obs.current_pass_rate - final_obs.baseline_pass_rate), 4),
-            "total_reward": total_reward,
-            "avg_judge_hypothesis_score": mean_h,
-            "avg_judge_patch_score": mean_p,
-            "elapsed_s": elapsed_s,
-            "duration_fingerprint": final_obs.duration_fingerprint,
-            "root_cause_identified": (
-                final_obs.current_hypothesis.root_cause_category
-                if final_obs.current_hypothesis is not None
-                else "unknown"
-            ),
-            "fix_summary": (
-                f"{steps[-1]['action']['action_type']}"
-                if steps
-                else "no_action_applied"
-            ),
-            "efficiency_score": round(
-                max(0.0, min(1.0, 1.0 - (final_obs.total_diff_lines / 100.0) - (len(steps) / max(1, MAX_STEPS * 2)))),
-                4,
-            ),
-            "steps": steps,
-        }
-        SUMMARY_FILE.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    # Reset environment
+    step_output = env.reset()
+    observation = step_output.observation
 
-        _log(
-            "[END] "
-            f"steps={summary['steps_executed']} "
-            f"baseline={summary['baseline_pass_rate']:.3f} "
-            f"final={summary['final_pass_rate']:.3f} "
-            f"improvement={summary['improvement']:+.3f} "
-            f"total_reward={summary['total_reward']:.3f} "
-            f"elapsed={summary['elapsed_s']:.2f}s"
+    if verbose:
+        logger.info(
+            "[EPISODE] START test=%s baseline_pass_rate=%.2f deep_signals=%s",
+            observation.test_identifier,
+            observation.baseline_pass_rate,
+            step_output.info.get("deep_signals", {}),
         )
-        _log(f"[OUTPUT] summary_file={SUMMARY_FILE}")
-        _log(f"[OUTPUT] log_file={LOG_FILE}")
 
-        return summary
-    finally:
-        close_fn = getattr(env, "close", None)
-        if callable(close_fn):
-            maybe = close_fn()
-            if asyncio.iscoroutine(maybe):
-                await maybe
+    while not step_output.done:
+        # Generate unified think+patch
+        action = agent.generate(observation)
+
+        if verbose:
+            logger.info(
+                "[EPISODE] STEP %d → category=%s confidence=%.2f patch_len=%d",
+                observation.step + 1,
+                action.predicted_category,
+                action.predicted_confidence,
+                len(action.patch_text),
+            )
+
+        # Execute step
+        step_output = env.step(action)
+        observation = step_output.observation
+
+        # Track trajectory
+        step_data = {
+            "step": step_output.state.step_count,
+            "predicted_category": action.predicted_category,
+            "predicted_confidence": action.predicted_confidence,
+            "think_text": action.think_text[:500],
+            "patch_applied": step_output.info.get("patch_result", {}).get("success", False),
+            "reward": step_output.reward,
+            "reward_breakdown": step_output.info.get("reward_breakdown", {}),
+            "pass_rate": step_output.state.current_pass_rate,
+            "done": step_output.done,
+        }
+        episode_result["trajectory"].append(step_data)
+        episode_result["total_reward"] += step_output.reward
+        episode_result["reward_breakdown_history"].append(
+            step_output.info.get("reward_breakdown", {})
+        )
+
+        if verbose:
+            logger.info(
+                "[EPISODE] RESULT step=%d reward=%.4f pass_rate=%.2f→%.2f done=%s reason=%s",
+                step_data["step"],
+                step_output.reward,
+                observation.baseline_pass_rate,
+                step_output.state.current_pass_rate,
+                step_output.done,
+                step_output.info.get("done_reason", ""),
+            )
+
+    # Finalize
+    episode_result["steps"] = step_output.state.step_count
+    episode_result["final_pass_rate"] = step_output.state.current_pass_rate
+    episode_result["done_reason"] = step_output.info.get("done_reason", "unknown")
+
+    return episode_result
 
 
-def main() -> None:
-    summary = asyncio.run(run_inference())
-    print(json.dumps(summary, indent=2), flush=True)
+def run_inference(
+    repo_path: str,
+    test_identifier: str,
+    model_name: str = "meta-llama/Llama-3.1-8B-Instruct",
+    max_steps: int = 8,
+    num_runs: int = 10,
+    api_base: Optional[str] = None,
+    api_key: Optional[str] = None,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """Run a FlakeForge V3 inference episode.
+
+    This is the main entry point for running the unified agent on a
+    flaky test. It creates the environment and agent, runs an episode,
+    and returns the result.
+    """
+    # Create environment
+    env = FlakeForgeEnvironment(
+        repo_path=repo_path,
+        test_identifier=test_identifier,
+        max_steps=max_steps,
+        num_runs=num_runs,
+    )
+
+    # Create LLM backend
+    backend = LLMBackend(
+        model_name=model_name,
+        api_base=api_base,
+        api_key=api_key,
+    )
+
+    # Create unified agent
+    agent = UnifiedFlakeForgeAgent(backend=backend)
+
+    # Run episode
+    try:
+        result = asyncio.run(run_episode(env, agent, verbose=verbose))
+    except RuntimeError:
+        # If event loop is already running (e.g., in Jupyter)
+        loop = asyncio.get_event_loop()
+        result = loop.run_until_complete(run_episode(env, agent, verbose=verbose))
+
+    if verbose:
+        logger.info(
+            "[INFERENCE] COMPLETE steps=%d total_reward=%.4f final_pass_rate=%.2f reason=%s",
+            result["steps"],
+            result["total_reward"],
+            result["final_pass_rate"],
+            result["done_reason"],
+        )
+
+    return result
 
 
-if __name__ == "__main__":
-    main()
+# ── Reward Function for GRPO Training ─────────────────────────────────────
+
+def flakeforge_reward_fn(
+    prompts: list,
+    completions: list,
+    **kwargs: Any,
+) -> list:
+    """Reward function compatible with TRL's GRPOTrainer.
+
+    Takes prompts and completions (from the model), evaluates each
+    completion using the V3 reward architecture.
+
+    This is a simplified wrapper for training — the full environment
+    step is not used here. Instead, we parse the completion and
+    compute format + reasoning consistency rewards.
+    """
+    from agent.unified_agent import (
+        extract_think,
+        extract_patch,
+        extract_category_from_think,
+        extract_confidence_from_think,
+        infer_category_from_patch,
+    )
+    from server.reward import (
+        compute_format_reward,
+        compute_reasoning_consistency,
+    )
+
+    rewards = []
+    for prompt, completion in zip(prompts, completions):
+        completion_text = completion if isinstance(completion, str) else str(completion)
+
+        # Parse the completion
+        action = FlakeForgeAction(
+            raw_response=completion_text,
+            think_text=extract_think(completion_text),
+            patch_text=extract_patch(completion_text),
+            predicted_category=extract_category_from_think(extract_think(completion_text)),
+            predicted_confidence=extract_confidence_from_think(extract_think(completion_text)),
+        )
+
+        # Format reward
+        format_score = compute_format_reward(action)
+
+        # Reasoning consistency
+        inferred_cat = infer_category_from_patch(action.patch_text)
+        consistency_score = compute_reasoning_consistency(
+            action.predicted_category, inferred_cat, action.think_text, action.patch_text
+        )
+
+        # Composite training reward (no execution signals in offline mode)
+        total = format_score * 1.0 + consistency_score * 0.5
+        rewards.append(total)
+
+    return rewards

@@ -1,34 +1,74 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+"""FlakeForge V3 — Unified Agent Architecture for Flaky Test Repair.
 
-"""FlakeForge Gym environment package."""
+V3 Key Changes:
+- Unified agent: single model generates <think> + <patch> in one pass
+- No LLM judge: 6-signal verifiable reward from execution outcomes
+- Deep flakiness detection: AST-based module cache, fixture, mock, import, async patterns
+- Free-form patches: search/replace hunks instead of hardcoded 7-action space
+- GRPO training: group-relative policy optimization with verifiable reward
+"""
 
-from .client import FlakeForgeEnv, FlakeforgeEnv
-from .agent import (
-    AnalyzerRole,
-    FixerRole,
-    FrozenJudge,
-    LoRAAdapterSpec,
-    ModelBackend,
+from .models import (
+    FlakeForgeAction,
+    FlakeForgeObservation,
+    FlakeForgeState,
+    RunRecord,
+    PatchRecord,
+    RewardBreakdown,
+    ROOT_CAUSE_TYPES,
+    failure_mode_entropy,
+    # Backward compatible aliases
+    FlakeforgeAction,
+    FlakeforgeObservation,
 )
-from .models import FlakeForgeAction, FlakeForgeObservation, FlakeforgeAction, FlakeforgeObservation
-from .training import build_grpo_batch, run_episode
+
+from .agent.unified_agent import (
+    UnifiedFlakeForgeAgent,
+    build_unified_prompt,
+    extract_think,
+    extract_patch,
+    extract_category_from_think,
+)
+
+from .server.FlakeForge_environment import (
+    FlakeForgeEnvironment,
+    create_flakeforge_environment,
+)
+
+from .server.reward import compute_verifiable_reward
+from .server.patch_applier import apply_search_replace_patch, parse_search_replace_hunks
+from .server.deep_flakiness import build_deep_observation_signals
+
+from .client import FlakeForgeClient
 
 __all__ = [
+    # Models
     "FlakeForgeAction",
     "FlakeForgeObservation",
-    "FlakeForgeEnv",
-    "LoRAAdapterSpec",
-    "ModelBackend",
-    "AnalyzerRole",
-    "FixerRole",
-    "FrozenJudge",
-    "run_episode",
-    "build_grpo_batch",
+    "FlakeForgeState",
+    "RunRecord",
+    "PatchRecord",
+    "RewardBreakdown",
+    "ROOT_CAUSE_TYPES",
+    "failure_mode_entropy",
     "FlakeforgeAction",
     "FlakeforgeObservation",
-    "FlakeforgeEnv",
+    # Agent
+    "UnifiedFlakeForgeAgent",
+    "build_unified_prompt",
+    "extract_think",
+    "extract_patch",
+    "extract_category_from_think",
+    # Environment
+    "FlakeForgeEnvironment",
+    "create_flakeforge_environment",
+    # Reward
+    "compute_verifiable_reward",
+    # Patch
+    "apply_search_replace_patch",
+    "parse_search_replace_hunks",
+    # Detection
+    "build_deep_observation_signals",
+    # Client
+    "FlakeForgeClient",
 ]

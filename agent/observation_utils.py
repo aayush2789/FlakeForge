@@ -1,115 +1,95 @@
-import json
+"""V3 Observation Utilities — builds observations from deep flakiness signals.
 
-from typing import Any, Dict
+Changes from V2:
+- No hypothesis fields
+- Deep flakiness signals integrated
+- Causal frontier extraction
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 
 try:
-    from models import FlakeForgeObservation, Hypothesis
+    from models import FlakeForgeObservation, RunRecord, PatchRecord
 except ImportError:
-    from ..models import FlakeForgeObservation, Hypothesis
+    from ..models import FlakeForgeObservation, RunRecord, PatchRecord
 
-try:
-    from server.hypothesis_engine import compute_duration_fingerprint
-except ImportError:
-    from ..server.hypothesis_engine import compute_duration_fingerprint
 
-def _hypothesis_payload(hypothesis: Hypothesis) -> Dict[str, Any]:
+def build_observation_from_state(state: Any) -> FlakeForgeObservation:
+    """Build a V3 observation from an EpisodeState object.
+
+    This utility bridges the state → observation gap when the state
+    object is from a different context (e.g., deserialized from JSON).
+    """
+    import math
+
+    durations = [r.duration_ms for r in (state.run_history or [])[-20:]]
+    dur_mean = sum(durations) / max(len(durations), 1) if durations else 0
+    dur_std = (
+        math.sqrt(sum((d - dur_mean) ** 2 for d in durations) / max(len(durations), 1))
+        if durations else 0
+    )
+
+    return FlakeForgeObservation(
+        episode_id=state.episode_id,
+        test_identifier=state.test_identifier,
+        step=state.step_count,
+        steps_remaining=state.steps_remaining,
+        test_function_source=state.current_test_source,
+        source_under_test=state.current_source_under_test,
+        run_history=state.run_history[-20:] if state.run_history else [],
+        current_pass_rate=state.current_pass_rate,
+        baseline_pass_rate=state.baseline_pass_rate,
+        patches_applied=state.patches_applied or [],
+        total_diff_lines=state.total_diff_lines,
+        # Deep signals
+        module_cache_violations=state.module_cache_violations or [],
+        fixture_scope_risks=state.fixture_scope_risks or [],
+        mock_residue_sites=state.mock_residue_sites or [],
+        import_side_effect_files=state.import_side_effect_files or [],
+        async_contamination_alive=state.async_contamination_alive or False,
+        # Causal
+        failure_frontier=state.failure_frontier or "",
+        call_chain_to_frontier=state.call_chain_to_frontier or [],
+        boundary_crossings=state.boundary_crossings or [],
+        # iDFlakies
+        order_dependency_detected=state.order_dependency_detected or False,
+        infrastructure_sensitive=state.infrastructure_sensitive or False,
+        # Graph
+        causal_graph=state.causal_graph,
+        causal_hints=state.causal_hints or [],
+        # Failure
+        failing_stack_trace=state.failing_stack_trace or "",
+        duration_fingerprint={"mean": dur_mean, "std": dur_std},
+        # Context
+        last_think_text=state.last_think_text or "",
+        last_patch_text=state.last_patch_text or "",
+        last_reward=state.last_reward or 0.0,
+        file_tree=state.file_tree or [],
+    )
+
+
+def summarize_observation(obs: FlakeForgeObservation) -> Dict[str, Any]:
+    """Create a compact summary of an observation for logging/debugging."""
     return {
-        "root_cause_category": hypothesis.root_cause_category,
-        "confidence": hypothesis.confidence,
-        "evidence": list(hypothesis.evidence),
-        "suggested_action": hypothesis.suggested_action,
-        "reasoning_steps": list(hypothesis.reasoning_steps),
-        "uncertainty": hypothesis.uncertainty,
-        "next_best_action": hypothesis.next_best_action,
-        "predicted_effect": hypothesis.predicted_effect,
+        "test": obs.test_identifier,
+        "step": f"{obs.step}/{obs.step + obs.steps_remaining}",
+        "pass_rate": f"{obs.current_pass_rate:.2f}",
+        "baseline": f"{obs.baseline_pass_rate:.2f}",
+        "patches_applied": len(obs.patches_applied),
+        "deep_signals": {
+            "cache_violations": len(obs.module_cache_violations),
+            "fixture_risks": len(obs.fixture_scope_risks),
+            "mock_residue": len(obs.mock_residue_sites),
+            "import_effects": len(obs.import_side_effect_files),
+            "async_alive": obs.async_contamination_alive,
+        },
+        "causal": {
+            "frontier": obs.failure_frontier[:50] if obs.failure_frontier else "",
+            "chain_depth": len(obs.call_chain_to_frontier),
+            "boundaries": len(obs.boundary_crossings),
+        },
+        "order_dep": obs.order_dependency_detected,
+        "infra_sensitive": obs.infrastructure_sensitive,
     }
-
-def _first_lines(text: str, line_count: int) -> str:
-    if not text:
-        return ""
-    lines = text.splitlines()
-    return "\n".join(lines[:line_count])
-
-
-def _extract_judge_feedback(observation: FlakeForgeObservation) -> Dict[str, Any]:
-    feedback: Dict[str, Any] = {}
-
-    for snippet in reversed(observation.log_snippets or []):
-        try:
-            payload = json.loads(snippet)
-        except Exception:
-            continue
-        if isinstance(payload, dict) and "judge_critique" in payload:
-            feedback["judge_critique"] = str(payload.get("judge_critique", ""))
-            if payload.get("judge_prediction_error") is not None:
-                feedback["judge_prediction_error"] = str(payload.get("judge_prediction_error", ""))
-            break
-
-    reflection = observation.reflection or {}
-    if isinstance(reflection, dict):
-        if reflection.get("judge_critique"):
-            feedback.setdefault("judge_critique", str(reflection.get("judge_critique", "")))
-        if reflection.get("judge_prediction_error"):
-            feedback.setdefault("judge_prediction_error", str(reflection.get("judge_prediction_error", "")))
-
-    return feedback
-
-def build_compact_observation(observation: FlakeForgeObservation, include_sources: bool = False, for_judge: bool = False) -> Dict[str, Any]:
-    """Unifies observation payload construction for Fixer, Analyzer, and Judge."""
-    run_history = [
-        {
-            "passed": r.passed,
-            "error_type": r.error_type,
-            "duration_ms": r.duration_ms,
-        }
-        for r in observation.run_history[-5:]
-    ]
-
-    # Shared common attributes between judge and agent payload
-    payload: Dict[str, Any] = {
-        "test_identifier": observation.test_identifier,
-        "step": observation.step,
-        "current_pass_rate": observation.current_pass_rate,
-        "baseline_pass_rate": observation.baseline_pass_rate,
-        "run_history": run_history,
-        "current_hypothesis": _hypothesis_payload(observation.current_hypothesis) if observation.current_hypothesis else None,
-        "secondary_hypothesis": {
-            "root_cause_category": observation.secondary_hypothesis.root_cause_category,
-            "confidence": observation.secondary_hypothesis.confidence,
-            "suggested_action": getattr(observation.secondary_hypothesis, "suggested_action", ""),
-        } if observation.secondary_hypothesis else None,
-    }
-
-    if for_judge:
-        # Extra parts needed solely by Judge
-        fp = observation.duration_fingerprint or compute_duration_fingerprint(observation.run_history)
-        causal = observation.causal_graph or {}
-        payload.update({
-            "infrastructure_sensitive": observation.infrastructure_sensitive,
-            "duration_fingerprint": fp,
-            "boundary_warnings": list(causal.get("boundary_warnings", []))[:5],
-            "boundary_nodes": list(causal.get("boundary_nodes", []))[:5],
-            "test_function_source": _first_lines(observation.test_function_source, 50),
-        })
-    else:
-        # Extra parts needed solely by Agent
-        payload.update({
-            "episode_id": observation.episode_id,
-            "steps_remaining": observation.steps_remaining,
-            "async_markers": list(observation.async_markers)[:20],
-            "log_snippets": list(observation.log_snippets)[-3:],
-            "latest_judge_feedback": _extract_judge_feedback(observation),
-            "duration_fingerprint": observation.duration_fingerprint,
-            "last_actions": list(observation.last_actions)[-3:],
-            "last_outcomes": list(observation.last_outcomes)[-3:],
-            "prediction_error_history": list(observation.prediction_error_history)[-5:],
-            "failure_pattern_summary": observation.failure_pattern_summary,
-            "causal_hints": list(observation.causal_hints)[-5:],
-            "reflection": observation.reflection,
-            "actions_tried": list(set(observation.last_actions)),
-        })
-        if include_sources:
-            payload["test_function_source"] = _first_lines(observation.test_function_source, 50)
-            payload["source_under_test"] = _first_lines(observation.source_under_test, 50)
-
-    return payload

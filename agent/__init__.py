@@ -1,19 +1,25 @@
-"""Agent-side architecture for Analyzer/Fixer/Judge orchestration."""
+"""FlakeForge V3 Agent — unified agent architecture."""
 
-from .roles import (
-    AnalyzerRole,
-    FixerRole,
-    FlakeForgeAgentPipeline,
-    LoRAAdapterSpec,
-    ModelBackend,
+from .unified_agent import (
+    UnifiedFlakeForgeAgent,
+    build_unified_prompt,
+    extract_think,
+    extract_patch,
+    extract_category_from_think,
+    extract_confidence_from_think,
+    infer_category_from_patch,
 )
-from .judge import FrozenJudge
+
+from .observation_utils import build_observation_from_state, summarize_observation
 
 __all__ = [
-    "ModelBackend",
-    "LoRAAdapterSpec",
-    "AnalyzerRole",
-    "FixerRole",
-    "FlakeForgeAgentPipeline",
-    "FrozenJudge",
+    "UnifiedFlakeForgeAgent",
+    "build_unified_prompt",
+    "extract_think",
+    "extract_patch",
+    "extract_category_from_think",
+    "extract_confidence_from_think",
+    "infer_category_from_patch",
+    "build_observation_from_state",
+    "summarize_observation",
 ]

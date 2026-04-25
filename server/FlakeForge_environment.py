@@ -1,842 +1,570 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+"""V3 FlakeForge Environment — Unified step loop.
 
-"""FlakeForge reinforcement learning environment implementation."""
+Key changes from V2:
+- No hypothesis gating — agent outputs think+patch directly
+- No judge calls — reward is fully deterministic
+- Deep flakiness signals injected into observation
+- Free-form patch application via search/replace
+- Single-step flow: observe → generate → patch → run → reward
+"""
 
 from __future__ import annotations
 
-import json
+import ast
 import math
 import os
-import re
-import statistics
-import subprocess
-from dataclasses import dataclass, field
+import traceback
+import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import uuid4
 
-from openenv.core.env_server.interfaces import Environment
+from openenv.core.env_server.types import (
+    Action,
+    EnvInfo,
+    Observation,
+    State,
+    StepOutput,
+)
 
 try:
+    from models import (
+        FlakeForgeAction,
+        FlakeForgeObservation,
+        FlakeForgeState,
+        RunRecord,
+        PatchRecord,
+        RewardBreakdown,
+        failure_mode_entropy,
+    )
+    from server.state import EpisodeState
+    from server.deep_flakiness import (
+        build_deep_observation_signals,
+        extract_failure_frontier,
+    )
+    from server.patch_applier import apply_search_replace_patch
+    from server.reward import compute_verifiable_reward
+    from server.causal_graph import CausalGraphBuilder
+except ImportError:
     from ..models import (
         FlakeForgeAction,
         FlakeForgeObservation,
         FlakeForgeState,
-        Hypothesis,
-        PatchRecord,
         RunRecord,
+        PatchRecord,
+        RewardBreakdown,
+        failure_mode_entropy,
     )
-    from .causal_graph import CrossRepoGraphBuilder
-    from .chaos_runner import ChaosAmplifiedRunner, ChaosProfile
-    from .docker_runner import DockerTestRunner
-    from .perf_sentinel import PerformanceSentinel
-    from .reward import compute_reward
-    from .logger import FullTraceLogger
-    from .causal_graph import EpisodeCausalTrace
-    from .tools import (
-        apply_ast_patch,
-        get_failure_pattern,
-        inject_logging,
-        list_repo_structure,
-        parse_ast_summary,
-        read_file_excerpt,
-        resolve_target_from_evidence,
+    from ..server.state import EpisodeState
+    from ..server.deep_flakiness import (
+        build_deep_observation_signals,
+        extract_failure_frontier,
     )
-except ImportError:
-    try:
-        from FlakeForge.models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord  # type: ignore
-        from FlakeForge.server.causal_graph import CrossRepoGraphBuilder, EpisodeCausalTrace  # type: ignore
-        from FlakeForge.server.chaos_runner import ChaosAmplifiedRunner, ChaosProfile  # type: ignore
-        from FlakeForge.server.docker_runner import DockerTestRunner  # type: ignore
-        from FlakeForge.server.perf_sentinel import PerformanceSentinel  # type: ignore
-        from FlakeForge.server.reward import compute_reward  # type: ignore
-        from FlakeForge.server.logger import FullTraceLogger  # type: ignore
-        from FlakeForge.server.tools import (  # type: ignore
-            apply_ast_patch,
-            get_failure_pattern,
-            inject_logging,
-            list_repo_structure,
-            parse_ast_summary,
-            read_file_excerpt,
-            resolve_target_from_evidence,
-        )
-    except ImportError:
-        from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState, Hypothesis, PatchRecord, RunRecord  # type: ignore
-        from server.causal_graph import CrossRepoGraphBuilder, EpisodeCausalTrace  # type: ignore
-        from server.chaos_runner import ChaosAmplifiedRunner, ChaosProfile  # type: ignore
-        from server.docker_runner import DockerTestRunner  # type: ignore
-        from server.perf_sentinel import PerformanceSentinel  # type: ignore
-        from server.reward import compute_reward  # type: ignore
-        from server.logger import FullTraceLogger  # type: ignore
-        from server.tools import (  # type: ignore
-            apply_ast_patch,
-            get_failure_pattern,
-            inject_logging,
-            list_repo_structure,
-            parse_ast_summary,
-            read_file_excerpt,
-            resolve_target_from_evidence,
-        )
+    from ..server.patch_applier import apply_search_replace_patch
+    from ..server.reward import compute_verifiable_reward
+    from ..server.causal_graph import CausalGraphBuilder
 
 try:
-    from .state import EpisodeState
-    from .hypothesis_engine import compute_duration_fingerprint, infer_hypothesis
-    from .action_executor import (
-        canonical_action,
-        injection_points_from_hypothesis,
-        extract_log_snippets,
-        build_patch_spec,
-    )
+    from utils.logger import get_logger
 except ImportError:
-    from server.state import EpisodeState
-    from server.hypothesis_engine import compute_duration_fingerprint, infer_hypothesis
-    from server.action_executor import (
-        canonical_action,
-        injection_points_from_hypothesis,
-        extract_log_snippets,
-        build_patch_spec,
-    )
+    try:
+        from ..utils.logger import get_logger
+    except ImportError:
+        import logging
+        get_logger = lambda n, **kw: logging.getLogger(n)
+
+logger = get_logger(__name__)
 
 
+class FlakeForgeEnvironment:
+    """V3 RL environment for flaky test repair.
 
-
-
-class FlakeForgeEnvironment(Environment):
-    SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    Unified step loop:
+    1. Build observation with deep flakiness signals
+    2. Agent generates <think> + <patch> in one forward pass
+    3. Apply search/replace patch atomically
+    4. Run test suite to verify fix
+    5. Compute 6-signal verifiable reward
+    6. Return observation with updated signals
+    """
 
     def __init__(
         self,
-        repo_path: str = "/app/seed_repos/timing_race",
-        test_id: str = "tests/test_flaky.py::test_flaky_case",
-        max_steps: int = 14,
-        benchmark_test_id: Optional[str] = None,
-        chaos_profile: str = "none",
-    ):
+        repo_path: str,
+        test_identifier: str,
+        max_steps: int = 8,
+        num_runs: int = 10,
+        runner: Optional[Any] = None,
+        chaos_runner: Optional[Any] = None,
+    ) -> None:
         self.repo_path = Path(repo_path)
-        self.repo_path = self._resolve_repo_path(self.repo_path)
-        
-        self.test_id = self._resolve_test_id(test_id)
+        self.test_identifier = test_identifier
         self.max_steps = max_steps
-        self.benchmark_test_id = benchmark_test_id  # e.g. "tests/test_benchmark.py::test_speed"
-        self.chaos_profile = ChaosProfile(chaos_profile) if chaos_profile != "none" else ChaosProfile.NONE
-        # V1: standard runner for regression checks
-        self.runner = DockerTestRunner(str(self.repo_path))
-        # V2 Pillar 2: chaos-capable runner
-        self.chaos_runner = ChaosAmplifiedRunner(str(self.repo_path))
-        # V2 Pillar 4: performance sentinel
-        self.perf_sentinel = PerformanceSentinel()
-        # V2 Pillar 1: causal graph builder
-        self.causal_graph_builder = CrossRepoGraphBuilder(str(self.repo_path), max_depth=3)
-        self._state = FlakeForgeState(episode_id=str(uuid4()), step_count=0)
-        self._episode = EpisodeState(episode_id=self._state.episode_id, max_steps=max_steps, test_identifier=test_id)
-        self.trace_logger = FullTraceLogger()
-        self.causal_trace = EpisodeCausalTrace()
-        self.debug_enabled = os.getenv("ENV_DEBUG", "0").strip().lower() in {"1", "true", "yes"}
+        self.num_runs = num_runs
+        self.runner = runner
+        self.chaos_runner = chaos_runner
+        self.state: Optional[EpisodeState] = None
 
-    def _resolve_repo_path(self, repo_path: Path) -> Path:
-        root = Path(__file__).resolve().parent.parent
-        candidates: List[Path] = []
+    def reset(self) -> StepOutput:
+        """Initialize a new episode."""
+        episode_id = str(uuid.uuid4())[:8]
+        logger.info("[ENV] RESET episode=%s test=%s", episode_id, self.test_identifier)
 
-        if repo_path.is_absolute() and repo_path.exists():
-            return repo_path
+        # Read source files
+        test_source, source_under_test = self._read_sources()
+        file_tree = self._build_file_tree()
 
-        if not repo_path.is_absolute():
-            candidates.append(root / repo_path)
-        else:
-            # Container-style paths like /app/seed_repos/... should map to the local workspace
-            relative_parts = repo_path.parts[1:] if len(repo_path.parts) > 1 else repo_path.parts
-            candidates.append(root / Path(*relative_parts))
-            if "seed_repos" in repo_path.parts:
-                candidates.append(root / "test_repos" / "timing_race_minimal")
+        # Run baseline tests
+        baseline_runs = self._run_tests(self.num_runs)
+        baseline_pass_rate = sum(1 for r in baseline_runs if r.passed) / max(len(baseline_runs), 1)
+        baseline_entropy = failure_mode_entropy(baseline_runs)
 
-        candidates.append(root / "test_repos" / "timing_race_minimal")
+        # Extract failing stack trace
+        failing_trace = ""
+        last_error_type = None
+        for r in baseline_runs:
+            if not r.passed:
+                failing_trace = r.stderr_excerpt or r.error_message or ""
+                last_error_type = r.error_type
+                break
 
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
+        # Build deep flakiness signals (AST-based, <5ms)
+        deep_signals = build_deep_observation_signals(self.repo_path)
 
-        # Fall back to the original value so callers see the failure path clearly.
-        return repo_path
-
-    def _resolve_test_id(self, test_id: str) -> str:
-        test_file, _, test_func = test_id.partition("::")
-        candidate_files = [self.repo_path / test_file]
-        if not candidate_files[0].exists():
-            candidate_files.append(self.repo_path / "tests" / "test_flaky.py")
-
-        resolved_file = next((path for path in candidate_files if path.exists()), candidate_files[0])
-        if not resolved_file.exists():
-            return test_id
-
-        if test_func and self._function_exists(resolved_file, test_func):
-            return f"{test_file}::{test_func}"
-
-        fallback_func = self._first_test_function_name(resolved_file)
-        if fallback_func:
-            return f"{test_file if candidate_files[0].exists() else 'tests/test_flaky.py'}::{fallback_func}"
-
-        return test_id
-
-    @staticmethod
-    def _function_exists(path: Path, function_name: str) -> bool:
-        try:
-            source = path.read_text(encoding="utf-8", errors="ignore")
-            return re.search(rf"^def\s+{re.escape(function_name)}\s*\(", source, flags=re.MULTILINE) is not None
-        except Exception:
-            return False
-
-    @staticmethod
-    def _first_test_function_name(path: Path) -> Optional[str]:
-        try:
-            source = path.read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            return None
-        match = re.search(r"^def\s+(test_[A-Za-z0-9_]+)\s*\(", source, flags=re.MULTILINE)
-        return match.group(1) if match else None
-
-    def reset(self) -> FlakeForgeObservation:
-        self._restore_clean_repo()
-        self._episode = EpisodeState(
-            episode_id=str(uuid4()),
-            max_steps=self.max_steps,
-            test_identifier=self.test_id,
+        # Extract causal frontier from stack trace
+        failure_frontier, call_chain, boundary_crossings = extract_failure_frontier(
+            failing_trace, self.repo_path
         )
-        self.causal_trace = EpisodeCausalTrace()
 
-        baseline_runs = self._run_test_n_times(n=5)
-        self._episode.run_history = baseline_runs[-10:]
-        self._episode.baseline_pass_rate = self._pass_rate(baseline_runs)
-        self._episode.current_pass_rate = self._episode.baseline_pass_rate
-        # Improvement 4: compute duration fingerprint from baseline runs.
-        self._episode.duration_fingerprint = compute_duration_fingerprint(baseline_runs)
+        # Check order dependency (reverse run)
+        order_dep = self._check_order_dependency(baseline_pass_rate)
 
-        # ── V2 Pillar 2: Chaos baseline ───────────────────────────────────────
-        if self.chaos_profile != ChaosProfile.NONE:
-            is_sensitive, chaos_baseline = self.chaos_runner.is_infrastructure_sensitive(
-                test_id=self.test_id,
-                clean_pass_rate=self._episode.baseline_pass_rate,
-                profile=self.chaos_profile,
-                n=10,
-            )
-            self._episode.chaos_baseline_pass_rate = chaos_baseline
-            self._episode.infrastructure_sensitive = is_sensitive
-        else:
-            self._episode.chaos_baseline_pass_rate = None
-            self._episode.infrastructure_sensitive = False
+        # Check infrastructure sensitivity (chaos run)
+        infra_sensitive = self._check_infrastructure_sensitivity(baseline_pass_rate)
 
-        # ── V2 Pillar 4: Performance baseline ─────────────────────────────────
-        if self.benchmark_test_id:
-            try:
-                self.perf_sentinel.capture_baseline(self.runner, self.benchmark_test_id)
-            except Exception:
-                pass  # Graceful degradation: no benchmark test available
+        # Build causal graph
+        causal_graph_data, causal_hints = self._build_causal_graph(test_source)
 
-        # ── V2 Pillar 1: Build causal graph ─────────────────────────────────
-        try:
-            test_file = self.test_id.split("::", 1)[0]
-            test_func = self.test_id.split("::", 1)[-1] if "::" in self.test_id else ""
-            if test_func:
-                causal_graph = self.causal_graph_builder.build(
-                    entry_file=str(self.repo_path / test_file),
-                    entry_function=test_func,
-                )
-                self._episode.causal_graph_dict = causal_graph.to_observation_dict()
-        except Exception:
-            self._episode.causal_graph_dict = None  # Graceful degradation
+        # Initialize state
+        self.state = EpisodeState(
+            episode_id=episode_id,
+            test_identifier=self.test_identifier,
+            repo_path=str(self.repo_path),
+            max_steps=self.max_steps,
+            original_test_source=test_source,
+            original_source_under_test=source_under_test,
+            current_test_source=test_source,
+            current_source_under_test=source_under_test,
+            run_history=baseline_runs,
+            baseline_pass_rate=baseline_pass_rate,
+            current_pass_rate=baseline_pass_rate,
+            baseline_entropy=baseline_entropy,
+            failing_stack_trace=failing_trace,
+            last_error_type=last_error_type,
+            failure_frontier=failure_frontier,
+            call_chain_to_frontier=call_chain,
+            boundary_crossings=boundary_crossings,
+            order_dependency_detected=order_dep,
+            infrastructure_sensitive=infra_sensitive,
+            causal_graph=causal_graph_data,
+            causal_hints=causal_hints,
+            file_tree=file_tree,
+            **deep_signals,
+        )
 
-        self._state = FlakeForgeState(
-            episode_id=self._episode.episode_id,
-            step_count=0,
+        observation = self._build_observation()
+
+        return StepOutput(
+            observation=observation,
+            state=FlakeForgeState(
+                episode_id=episode_id,
+                step_count=0,
+                done=False,
+                current_pass_rate=baseline_pass_rate,
+                baseline_pass_rate=baseline_pass_rate,
+            ),
+            reward=0.0,
             done=False,
-            current_pass_rate=self._episode.current_pass_rate,
-            baseline_pass_rate=self._episode.baseline_pass_rate,
-            regression_detected=False,
-            judge_scores=[],
-            prediction_error_history=[],
+            info={
+                "episode_id": episode_id,
+                "baseline_pass_rate": baseline_pass_rate,
+                "baseline_entropy": baseline_entropy,
+                "deep_signals": {k: len(v) if isinstance(v, list) else v for k, v in deep_signals.items()},
+            },
         )
-        self.trace_logger.start_episode(
-            episode_id=self._episode.episode_id,
-            test_identifier=self.test_id,
-            max_steps=self.max_steps,
-            baseline_pass_rate=self._episode.baseline_pass_rate,
+
+    def step(self, action: FlakeForgeAction) -> StepOutput:
+        """Execute one step of the unified agent loop."""
+        if self.state is None:
+            raise RuntimeError("Environment not initialized. Call reset() first.")
+
+        self.state.step_count += 1
+        logger.info(
+            "[ENV] STEP %d/%d category=%s",
+            self.state.step_count,
+            self.max_steps,
+            action.predicted_category,
         )
-        return self._build_initial_observation()
 
-    def step(self, action: FlakeForgeAction) -> FlakeForgeObservation:  # type: ignore[override]
-        if self._episode.done:
-            obs = self._build_observation(reward=0.0, done=True)
-            obs.metadata = {"reason": "episode_already_done"}
-            return obs
-
-        self._update_hypothesis_from_action(action)
-        canonical_action_var = canonical_action(action.action_type)
-
-        if canonical_action_var not in {"GATHER_EVIDENCE", "REVERT_LAST_PATCH", "ADD_RETRY"}:
-            if self._episode.current_hypothesis is None:
-                obs = self._build_observation(reward=-1.0, done=False)
-                obs.metadata = {"reason": "action_requires_hypothesis"}
-                self.trace_logger.log_error({"step": self._episode.step_count + 1, "error": "action_requires_hypothesis", "action": action.action_type})
-                return obs
-            if self._episode.current_hypothesis.confidence < 0.3:
-                obs = self._build_observation(reward=-1.0, done=False)
-                obs.metadata = {"reason": "hypothesis_confidence_too_low"}
-                self.trace_logger.log_error({"step": self._episode.step_count + 1, "error": "hypothesis_confidence_too_low", "action": action.action_type})
-                return obs
-
-        self._episode.step_count += 1
-        self._state.step_count = self._episode.step_count
-        self._episode.actions_taken.append(action.action_type)
-        current_conf = self._episode.current_hypothesis.confidence if self._episode.current_hypothesis else 0.0
-        self._episode.hypothesis_confidence_at_each_step.append(current_conf)
-        self._episode.hypothesis_history.append({"step": self._episode.step_count, "confidence": current_conf})
-
-        try:
-            execution = self._execute_action(action)
-            if execution.get("no_op"):
-                obs = self._build_observation(reward=-0.5, done=False)
-                obs.metadata = execution
-                self.trace_logger.log_error({"step": self._episode.step_count, "error": "no_op_action", "details": execution})
-                return obs
-        except Exception as exc:
-            obs = self._build_observation(reward=-1.0, done=False)
-            obs.metadata = {"action": action.action_type, "error": str(exc), "no_op": True}
-            self.trace_logger.log_error({"step": self._episode.step_count, "error": "action_execution_exception", "action": action.action_type, "details": str(exc)})
-            return obs
-
-        import logging as _logging
-        _log = _logging.getLogger(__name__).info
-
-        _log("[ENV.step] start action=%s step=%d", action.action_type, self._episode.step_count + 1)
-        post_runs = self._run_test_n_times(n=5)
-        _log("[ENV.step] tests done: pass_rate=%.2f", self._pass_rate(post_runs))
-        self._episode.run_history.extend(post_runs)
-        self._episode.run_history = self._episode.run_history[-10:]
-        self._episode.current_pass_rate = self._pass_rate(post_runs)
-        self._episode.regression_detected = self.runner.check_regressions(exclude_test_id=self.test_id, timeout_seconds=30)
-
-        # ── V2 Pillar 2: Chaos verification after each patch ─────────────────────
-        if self.chaos_profile != ChaosProfile.NONE and action.action_type != "CHAOS_PROBE":
-            chaos_records = self.chaos_runner.run_test_n_times_chaos(
-                self.test_id, n=10, profile=self.chaos_profile
+        # --- 1. Apply patch ---
+        patch_result = {"success": False, "error": "empty_patch", "files_modified": [], "lines_changed": 0, "diff": ""}
+        if action.patch_text.strip():
+            patch_result = apply_search_replace_patch(
+                repo_path=self.repo_path,
+                patch_text=action.patch_text,
+                default_target=self._resolve_default_target(),
             )
-            self._episode.chaos_pass_rate = self._pass_rate(chaos_records)
-        elif action.action_type == "CHAOS_PROBE":
-            # CHAOS_PROBE is handled in _execute_action; result already on episode
-            pass
+            logger.info(
+                "[ENV] PATCH success=%s files=%s lines=%d error=%s",
+                patch_result["success"],
+                patch_result.get("files_modified", []),
+                patch_result.get("lines_changed", 0),
+                patch_result.get("error"),
+            )
 
-        # ── V2 Pillar 4: Performance sentinel ─────────────────────────────────
-        if self.perf_sentinel.has_baseline and action.action_type not in {
-            "GATHER_EVIDENCE", "CHAOS_PROBE", "DIAGNOSE_BOUNDARY"
-        }:
-            sentinel_result = self.perf_sentinel.check_regression(self.runner)
-            self._episode.perf_regression_detected = sentinel_result.is_regression
-            self._episode.perf_median_ratio = sentinel_result.median_ratio
+        # --- 2. Syntax check ---
+        syntax_error = None
+        if patch_result["success"]:
+            syntax_error = self._check_syntax(patch_result.get("files_modified", []))
+            if syntax_error:
+                logger.warning("[ENV] SYNTAX ERROR: %s", syntax_error)
 
+        # --- 3. Run tests ---
+        post_runs: List[RunRecord] = []
+        post_run_dicts: List[Dict[str, Any]] = []
+        if patch_result["success"] and not syntax_error:
+            post_runs = self._run_tests(self.num_runs)
+            post_run_dicts = [
+                {"passed": r.passed, "error_type": r.error_type, "duration_ms": r.duration_ms}
+                for r in post_runs
+            ]
+            post_pass_rate = sum(1 for r in post_runs if r.passed) / max(len(post_runs), 1)
+        else:
+            post_pass_rate = self.state.current_pass_rate
+
+        # --- 4. Compute reward ---
+        pre_entropy = failure_mode_entropy(self.state.run_history[-self.num_runs:])
+        observation = self._build_observation()  # Build before reward for causal proximity
+
+        reward_breakdown = compute_verifiable_reward(
+            action=action,
+            observation=observation,
+            patch_result=patch_result,
+            post_run_results=post_run_dicts,
+            baseline_pass_rate=self.state.baseline_pass_rate,
+            pre_entropy=pre_entropy,
+        )
+
+        # --- 5. Update state ---
+        self.state.current_pass_rate = post_pass_rate
+        self.state.run_history.extend(post_runs)
+        self.state.last_think_text = action.think_text
+        self.state.last_patch_text = action.patch_text
+        self.state.last_reward = reward_breakdown.total_reward
+        self.state.last_reward_breakdown = reward_breakdown.to_dict()
+
+        if patch_result["success"]:
+            self.state.patches_applied.append(PatchRecord(
+                patch_text=action.patch_text,
+                target_files=patch_result.get("files_modified", []),
+                lines_changed=patch_result.get("lines_changed", 0),
+                pass_rate_after=post_pass_rate,
+                applied_successfully=True,
+            ))
+            self.state.total_diff_lines += patch_result.get("lines_changed", 0)
+
+        # Check for regression
+        if post_pass_rate < self.state.baseline_pass_rate - 0.1:
+            self.state.regression_detected = True
+
+        # Re-read modified sources
+        self.state.current_test_source, self.state.current_source_under_test = self._read_sources()
+
+        # Determine if episode is terminal
         done = (
-            self._episode.regression_detected
-            or self._episode.step_count >= self.max_steps
-            or self._episode.current_pass_rate >= 1.0
+            post_pass_rate >= 1.0  # Full stability achieved
+            or self.state.step_count >= self.max_steps
+            or self.state.regression_detected
         )
-        final_validation_runs = 0
-        if done and not self._episode.regression_detected:
-            terminal_runs = self._run_test_n_times(n=50)
-            final_validation_runs = len(terminal_runs)
-            self._episode.current_pass_rate = self._pass_rate(terminal_runs)
-            self._episode.run_history.extend(terminal_runs)
-            self._episode.run_history = self._episode.run_history[-10:]
-        self._episode.done = done
+        self.state.done = done
 
-        judge_scores = action.judge_feedback.model_dump() if action.judge_feedback is not None else {}
-        if judge_scores:
-            self._episode.judge_scores.append(judge_scores)
-        failure_pattern = get_failure_pattern(post_runs)
-        repeat_action_count = _repeat_tail_count([canonical_action(a) for a in self._episode.actions_taken])
-        step_result = {
-            "current_pass_rate": self._episode.current_pass_rate,
-            "regression_detected": self._episode.regression_detected,
-            "action_taken": canonical_action_var,
-            "done": done,
-            "timed_out": self._episode.step_count >= self.max_steps and self._episode.current_pass_rate < 0.9,
-            "ast_diff": execution.get("ast_diff", {}),
-            "lines_changed": int(execution.get("lines_changed", 0)),
-            "repeat_action_count": repeat_action_count,
-            # ── V2 additions ──
-            "chaos_pass_rate": self._episode.chaos_pass_rate,
-            "chaos_baseline_pass_rate": self._episode.chaos_baseline_pass_rate,
-            "perf_regression_detected": self._episode.perf_regression_detected,
-            "perf_median_ratio": self._episode.perf_median_ratio,
-        }
-        reward, reward_breakdown = compute_reward(self._episode, step_result, judge_scores)
+        # Build final observation with updated signals
+        final_observation = self._build_observation()
+        final_observation.reward = reward_breakdown.total_reward
+        final_observation.done = done
 
-        predicted = action.predicted_pass_rate_after
-        prediction_error = (
-            round(float(self._episode.current_pass_rate - predicted), 4)
-            if predicted is not None
-            else None
+        logger.info(
+            "[ENV] REWARD total=%.4f breakdown=%s done=%s pass_rate=%.2f→%.2f",
+            reward_breakdown.total_reward,
+            {k: round(v, 3) for k, v in reward_breakdown.to_dict().items()},
+            done,
+            self.state.baseline_pass_rate,
+            post_pass_rate,
         )
-        if prediction_error is not None:
-            self._episode.prediction_error_history.append(prediction_error)
-            self._state.prediction_error_history = self._episode.prediction_error_history[-10:]
 
-        was_hypothesis_correct = bool(self._episode.current_pass_rate >= self._episode.baseline_pass_rate)
-        reflection = {
-            "prediction_error": prediction_error,
-            "was_hypothesis_correct": was_hypothesis_correct,
-            "what_learned": _learning_summary(canonical_action_var, prediction_error, was_hypothesis_correct),
-            "updated_strategy": _updated_strategy(canonical_action_var, prediction_error, was_hypothesis_correct),
-        }
-        self._episode.reflection = reflection
-
-        self._episode.last_outcomes.append(
-            {
-                "step": self._episode.step_count,
-                "action": action.action_type,
-                "pass_rate": self._episode.current_pass_rate,
-                "reward": reward,
-                "prediction_error": prediction_error,
-            }
-        )
-        self._episode.last_outcomes = self._episode.last_outcomes[-3:]
-
-        self._state.current_pass_rate = self._episode.current_pass_rate
-        self._state.baseline_pass_rate = self._episode.baseline_pass_rate
-        self._state.done = done
-        self._state.regression_detected = self._episode.regression_detected
-
-        obs = self._build_observation(reward=reward, done=done)
-        obs.metadata = {
-            **execution,
-            "step_result": {
-                **step_result,
-                # Improvement 1: thread predicted_pass_rate_after into step_result
-                # so reward.py can compute the prediction-error penalty.
-                "predicted_pass_rate_after": (
-                    action.predicted_pass_rate_after
-                    if hasattr(action, "predicted_pass_rate_after")
-                    else None
-                ),
-            },
-            "reward_breakdown": reward_breakdown,
-            "failure_pattern": {
-                "pass_rate": failure_pattern.pass_rate,
-                "most_common_error": failure_pattern.most_common_error,
-                "error_distribution": failure_pattern.error_distribution,
-                "duration_mean": failure_pattern.duration_mean,
-                "duration_std": failure_pattern.duration_std,
-                "flakiness_score": failure_pattern.flakiness_score,
-            },
-            "hypothesis_history": self._episode.hypothesis_history,
-            "final_validation_runs": final_validation_runs,
-            "reflection": reflection,
-        }
-
-        self._episode.failure_pattern_summary = {
-            "most_common_error": failure_pattern.most_common_error,
-            "error_distribution": failure_pattern.error_distribution,
-            "flakiness_score": failure_pattern.flakiness_score,
-            "duration_mean": failure_pattern.duration_mean,
-            "duration_std": failure_pattern.duration_std,
-        }
-
-        if self._episode.current_hypothesis is not None:
-            self.causal_trace.add_hypothesis(
-                step=self._episode.step_count,
-                hypothesis={
-                    "root_cause_category": self._episode.current_hypothesis.root_cause_category,
-                    "confidence": self._episode.current_hypothesis.confidence,
-                    "evidence": list(self._episode.current_hypothesis.evidence),
+        return StepOutput(
+            observation=final_observation,
+            state=FlakeForgeState(
+                episode_id=self.state.episode_id,
+                step_count=self.state.step_count,
+                done=done,
+                current_pass_rate=post_pass_rate,
+                baseline_pass_rate=self.state.baseline_pass_rate,
+                regression_detected=self.state.regression_detected,
+            ),
+            reward=reward_breakdown.total_reward,
+            done=done,
+            info={
+                "reward_breakdown": reward_breakdown.to_dict(),
+                "patch_result": {
+                    "success": patch_result["success"],
+                    "error": patch_result.get("error"),
+                    "files_modified": patch_result.get("files_modified", []),
+                    "lines_changed": patch_result.get("lines_changed", 0),
                 },
-            )
-        self.causal_trace.add_action(
-            step=self._episode.step_count,
-            action={
-                "action_type": action.action_type,
-                "justification": action.justification,
-                "expected_outcome": action.expected_outcome,
-                "predicted_pass_rate_after": action.predicted_pass_rate_after,
+                "pass_rate_delta": round(post_pass_rate - self.state.baseline_pass_rate, 4),
+                "step": self.state.step_count,
+                "done_reason": self._done_reason(post_pass_rate, done),
             },
         )
-        if failure_pattern.most_common_error:
-            self.causal_trace.add_symptom(failure_pattern.most_common_error)
 
-        self.trace_logger.log_step(
-            {
-                "step": self._episode.step_count,
-                "reasoning": {
-                    "root_cause_category": (
-                        self._episode.current_hypothesis.root_cause_category
-                        if self._episode.current_hypothesis
-                        else None
-                    ),
-                    "confidence": (
-                        self._episode.current_hypothesis.confidence
-                        if self._episode.current_hypothesis
-                        else None
-                    ),
-                    "evidence": (
-                        list(self._episode.current_hypothesis.evidence)
-                        if self._episode.current_hypothesis
-                        else []
-                    ),
-                    "reasoning_steps": (
-                        list(self._episode.current_hypothesis.reasoning_steps)
-                        if self._episode.current_hypothesis
-                        else []
-                    ),
-                    "uncertainty": (
-                        self._episode.current_hypothesis.uncertainty
-                        if self._episode.current_hypothesis
-                        else None
-                    ),
-                },
-                "action": {
-                    "action_type": action.action_type,
-                    "parameters": action.parameters,
-                    "justification": action.justification,
-                    "predicted_pass_rate_after": action.predicted_pass_rate_after,
-                    "expected_outcome": action.expected_outcome,
-                    "risk_assessment": action.risk_assessment,
-                    "fallback_plan": action.fallback_plan,
-                },
-                "execution": {
-                    "pass_rate_before": self._episode.baseline_pass_rate,
-                    "pass_rate_after": self._episode.current_pass_rate,
-                    "runs": len(post_runs),
-                    "failure_types": failure_pattern.error_distribution,
-                },
-                "reward_breakdown": reward_breakdown,
-                "learning_signals": {
-                    "prediction_error": prediction_error,
-                    "was_fix_correct": was_hypothesis_correct,
-                    "did_flakiness_reduce": self._episode.current_pass_rate >= self._episode.baseline_pass_rate,
-                },
-            }
+    def _build_observation(self) -> FlakeForgeObservation:
+        """Build a V3 observation from current state."""
+        if self.state is None:
+            raise RuntimeError("State not initialized")
+
+        # Duration fingerprint
+        durations = [r.duration_ms for r in self.state.run_history[-self.num_runs:]]
+        dur_mean = sum(durations) / max(len(durations), 1) if durations else 0
+        dur_std = (
+            math.sqrt(sum((d - dur_mean) ** 2 for d in durations) / max(len(durations), 1))
+            if durations else 0
         )
-
-        if done:
-            root_cause_identified = (
-                self._episode.current_hypothesis.root_cause_category
-                if self._episode.current_hypothesis
-                else "unknown"
-            )
-            fix_summary = (
-                f"{action.action_type} with params {json.dumps(action.parameters, ensure_ascii=True)}"
-            )
-            success = bool(self._episode.current_pass_rate >= 0.95 and not self._episode.regression_detected)
-            self.causal_trace.finalize(
-                final_cause=str(root_cause_identified),
-                fix_applied=fix_summary,
-                success=success,
-            )
-            efficiency_score = round(
-                max(0.0, min(1.0, 1.0 - (self._episode.total_diff_lines / 100.0) - (self._episode.step_count / max(1, self.max_steps * 2)))),
-                4,
-            )
-            self.trace_logger.set_summary(
-                {
-                    "baseline_pass_rate": self._episode.baseline_pass_rate,
-                    "final_pass_rate": self._episode.current_pass_rate,
-                    "steps_taken": self._episode.step_count,
-                    "root_cause_identified": root_cause_identified,
-                    "fix_summary": fix_summary,
-                    "efficiency_score": efficiency_score,
-                    "causal_trace": self.causal_trace.to_dict(),
-                }
-            )
-        return obs
-
-    @property
-    def state(self) -> FlakeForgeState:
-        return self._state
-
-    def _restore_clean_repo(self) -> None:
-        if not self.repo_path.exists():
-            return
-        try:
-            subprocess.run(["git", "checkout", "--", "."], cwd=self.repo_path, check=False, capture_output=True, text=True)
-        except Exception:
-            pass
-
-    def _run_test_n_times(self, n: int) -> List[RunRecord]:
-        return self.runner.run_test_n_times(self.test_id, n=n, max_workers=4)
-
-    def _pass_rate(self, records: List[RunRecord]) -> float:
-        if not records:
-            return 0.0
-        passed = sum(1 for r in records if r.passed)
-        return passed / len(records)
-
-    def _build_initial_observation(self) -> FlakeForgeObservation:
-        return self._build_observation(reward=0.0, done=False)
-
-    def _build_observation(self, reward: float, done: bool) -> FlakeForgeObservation:
-        test_file = self.test_id.split("::", 1)[0]
-        test_path = self.repo_path / test_file
-        source_candidates = [p for p in self.repo_path.rglob("*.py") if "tests" not in p.parts]
-        source_path = source_candidates[0] if source_candidates else test_path
-
-        test_ast = parse_ast_summary(str(test_path)) if test_path.exists() else None
-        source_ast = parse_ast_summary(str(source_path)) if source_path.exists() else None
-
-        # read_file_excerpt enforces a max 100-line window.
-        test_src = read_file_excerpt(str(test_path), 1, 100) if test_path.exists() else ""
-        src_under_test = read_file_excerpt(str(source_path), 1, 100) if source_path.exists() else ""
-
-        async_markers: List[str] = []
-        if test_ast:
-            async_markers.extend([f["name"] for f in test_ast.functions if f.get("is_async")])
-        if source_ast:
-            async_markers.extend([f["name"] for f in source_ast.functions if f.get("is_async")])
-
-        repo_entries = list_repo_structure(str(self.repo_path)) if self.repo_path.exists() else []
 
         return FlakeForgeObservation(
-            episode_id=self._episode.episode_id,
-            test_identifier=self.test_id,
-            step=self._episode.step_count,
-            steps_remaining=max(self.max_steps - self._episode.step_count, 0),
-            test_function_source=test_src,
-            source_under_test=src_under_test,
-            relevant_imports=(test_ast.imports if test_ast else []),
-            file_tree=[entry["path"] for entry in repo_entries],
-            async_markers=sorted(set(async_markers)),
-            run_history=self._episode.run_history[-10:],
-            current_hypothesis=self._episode.current_hypothesis,
-            patches_applied=self._episode.patches_applied,
-            log_snippets=self._episode.log_snippets,
-            current_pass_rate=self._episode.current_pass_rate,
-            baseline_pass_rate=self._episode.baseline_pass_rate,
-            total_diff_lines=self._episode.total_diff_lines,
-            reward=reward,
-            done=done,
-            # ── V2 new fields ────────────────────────────────────────────────────
-            causal_graph=self._episode.causal_graph_dict,
-            chaos_pass_rate=self._episode.chaos_pass_rate,
-            chaos_baseline_pass_rate=self._episode.chaos_baseline_pass_rate,
-            infrastructure_sensitive=self._episode.infrastructure_sensitive,
-            perf_sentinel_status={
-                "regression": self._episode.perf_regression_detected,
-                "median_ratio": self._episode.perf_median_ratio,
-            } if self.perf_sentinel.has_baseline else None,
-            # ── Improvements 4 & 5 ───────────────────────────────────────────
-            duration_fingerprint=self._episode.duration_fingerprint,
-            secondary_hypothesis=self._episode.secondary_hypothesis,
-            last_actions=self._episode.actions_taken[-3:],
-            last_outcomes=self._episode.last_outcomes[-3:],
-            prediction_error_history=self._episode.prediction_error_history[-10:],
-            failure_pattern_summary=self._episode.failure_pattern_summary,
-            causal_hints=((self._episode.causal_graph_dict or {}).get("boundary_warnings", [])[:5]),
-            reflection=self._episode.reflection,
+            episode_id=self.state.episode_id,
+            test_identifier=self.state.test_identifier,
+            step=self.state.step_count,
+            steps_remaining=self.state.steps_remaining,
+            test_function_source=self.state.current_test_source,
+            source_under_test=self.state.current_source_under_test,
+            relevant_imports=self._extract_imports(self.state.current_test_source),
+            file_tree=self.state.file_tree,
+            run_history=self.state.run_history[-20:],
+            current_pass_rate=self.state.current_pass_rate,
+            baseline_pass_rate=self.state.baseline_pass_rate,
+            patches_applied=self.state.patches_applied,
+            total_diff_lines=self.state.total_diff_lines,
+            # V3 deep signals
+            module_cache_violations=self.state.module_cache_violations,
+            fixture_scope_risks=self.state.fixture_scope_risks,
+            mock_residue_sites=self.state.mock_residue_sites,
+            import_side_effect_files=self.state.import_side_effect_files,
+            async_contamination_alive=self.state.async_contamination_alive,
+            # Causal frontier
+            failure_frontier=self.state.failure_frontier,
+            call_chain_to_frontier=self.state.call_chain_to_frontier,
+            boundary_crossings=self.state.boundary_crossings,
+            # iDFlakies
+            order_dependency_detected=self.state.order_dependency_detected,
+            infrastructure_sensitive=self.state.infrastructure_sensitive,
+            # Causal graph
+            causal_graph=self.state.causal_graph,
+            causal_hints=self.state.causal_hints,
+            # Failure analysis
+            failing_stack_trace=self.state.failing_stack_trace,
+            duration_fingerprint={"mean": dur_mean, "std": dur_std},
+            # Episode context
+            last_think_text=self.state.last_think_text,
+            last_patch_text=self.state.last_patch_text,
+            last_reward=self.state.last_reward,
         )
 
-    def _execute_action(self, action: FlakeForgeAction) -> Dict[str, Any]:
-        test_file = self.test_id.split("::", 1)[0]
-        test_path = self.repo_path / test_file
-        target_file = str(test_path)
-        evidence = self._episode.current_hypothesis.evidence if self._episode.current_hypothesis else []
-        resolved_target = resolve_target_from_evidence(target_file, evidence)
+    def _run_tests(self, n: int) -> List[RunRecord]:
+        """Run the target test n times, collecting results."""
+        if self.runner is None:
+            logger.warning("[ENV] No runner configured — returning synthetic runs")
+            return self._synthetic_runs(n)
 
-        canonical_action_val = canonical_action(action.action_type)
-
-        if action.action_type == "detect_flakiness":
-            probe_runs = self._run_test_n_times(n=10)
-            self._episode.run_history.extend(probe_runs)
-            self._episode.run_history = self._episode.run_history[-10:]
-            self._episode.current_pass_rate = self._pass_rate(probe_runs)
-            return {
-                "action": action.action_type,
-                "probe_runs": len(probe_runs),
-                "distribution": {
-                    "passed": sum(1 for r in probe_runs if r.passed),
-                    "failed": sum(1 for r in probe_runs if not r.passed),
-                },
-                "lines_changed": 0,
-            }
-
-        if action.action_type == "analyze_logs":
-            fp = get_failure_pattern(self._episode.run_history[-10:])
-            return {
-                "action": action.action_type,
-                "failure_pattern": {
-                    "pass_rate": fp.pass_rate,
-                    "most_common_error": fp.most_common_error,
-                    "error_distribution": fp.error_distribution,
-                },
-                "lines_changed": 0,
-            }
-
-        if action.action_type == "retry_test":
-            retry_runs = self._run_test_n_times(n=5)
-            self._episode.run_history.extend(retry_runs)
-            self._episode.run_history = self._episode.run_history[-10:]
-            self._episode.current_pass_rate = self._pass_rate(retry_runs)
-            return {
-                "action": action.action_type,
-                "retry_runs": len(retry_runs),
-                "distribution": {
-                    "passed": sum(1 for r in retry_runs if r.passed),
-                    "failed": sum(1 for r in retry_runs if not r.passed),
-                },
-                "lines_changed": 0,
-            }
-
-        if canonical_action_val == "GATHER_EVIDENCE":
-            injection_points = injection_points_from_hypothesis(self._episode.current_hypothesis, resolved_target)
-            patched_source = inject_logging(target_file, injection_points)
-            Path(target_file).write_text(patched_source, encoding="utf-8")
-            evidence_runs = self._run_test_n_times(n=5)
-            self._episode.log_snippets.extend(extract_log_snippets(evidence_runs))
-            self._episode.log_snippets = self._episode.log_snippets[-3:]
-            self._episode.current_hypothesis = infer_hypothesis(self._episode, evidence_runs, self.test_id)
-            subprocess.run(["git", "checkout", "--", test_file], cwd=self.repo_path, check=False, capture_output=True, text=True)
-            return {
-                "action": action.action_type,
-                "evidence_runs": len(evidence_runs),
-                "resolved_target": resolved_target,
-            }
-
-        if canonical_action_val == "REVERT_LAST_PATCH":
-            if not self._episode.patches_applied:
-                return {"action": action.action_type, "no_op": True, "reason": "no_patches_to_revert"}
-
-            last_patch = self._episode.patches_applied.pop()
-            target = last_patch.target_file
-            diff_proc = subprocess.run(
-                ["git", "diff", "HEAD", "--", target],
-                cwd=self.repo_path,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if diff_proc.stdout.strip():
-                subprocess.run(
-                    ["git", "apply", "-R"],
-                    cwd=self.repo_path,
-                    check=False,
-                    input=diff_proc.stdout,
-                    text=True,
-                    capture_output=True,
-                )
-            self._episode.total_diff_lines = max(0, self._episode.total_diff_lines - last_patch.lines_changed)
-            return {"action": action.action_type, "reverted": target}
-
-        if canonical_action_val == "DIAGNOSE_BOUNDARY":
-            boundary_node = action.parameters.get("boundary_node", "")
+        results: List[RunRecord] = []
+        for _ in range(n):
             try:
-                test_file_name = self.test_id.split("::", 1)[0]
-                test_func = self.test_id.split("::", 1)[-1] if "::" in self.test_id else ""
-                if test_func:
-                    fresh_graph = self.causal_graph_builder.build(
-                        str(self.repo_path / test_file_name), test_func
-                    )
-                    self._episode.causal_graph_dict = fresh_graph.to_observation_dict()
-                boundary_nodes = [
-                    n for n in (self._episode.causal_graph_dict or {}).get("nodes", [])
-                    if boundary_node in n.get("id", "") or n.get("boundary")
-                ]
-                return {
-                    "action": action.action_type,
-                    "boundary_node": boundary_node,
-                    "found_boundaries": boundary_nodes,
-                    "no_op": False,
-                }
+                result = self.runner.run_single(self.test_identifier)
+                results.append(RunRecord(
+                    passed=result.get("passed", False),
+                    duration_ms=result.get("duration_ms", 0),
+                    error_type=result.get("error_type"),
+                    error_message=result.get("error_message"),
+                    stderr_excerpt=result.get("stderr", "")[:500],
+                ))
             except Exception as exc:
-                return {"action": action.action_type, "no_op": True, "reason": str(exc)}
+                results.append(RunRecord(
+                    passed=False,
+                    duration_ms=0,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:200],
+                ))
+        return results
 
-        if canonical_action_val == "CHAOS_PROBE":
-            profile = ChaosProfile(action.parameters["profile"])
-            n_runs = action.parameters.get("n_runs", 10)
-            chaos_records = self.chaos_runner.run_test_n_times_chaos(
-                self.test_id, n=n_runs, profile=profile
-            )
-            chaos_pass_rate = self._pass_rate(chaos_records)
-            self._episode.chaos_pass_rate = chaos_pass_rate
-            clean_pr = self._episode.current_pass_rate
-            is_sensitive = chaos_pass_rate < (clean_pr - 0.2)
-            self._episode.infrastructure_sensitive = is_sensitive
-            return {
-                "action": action.action_type,
-                "profile": profile.value,
-                "n_runs": n_runs,
-                "chaos_pass_rate": chaos_pass_rate,
-                "clean_pass_rate": clean_pr,
-                "infrastructure_sensitive": is_sensitive,
-                "no_op": False,
-            }
+    def _synthetic_runs(self, n: int) -> List[RunRecord]:
+        """Generate synthetic run results for development/testing."""
+        import random
+        results = []
+        for _ in range(n):
+            passed = random.random() > 0.5
+            results.append(RunRecord(
+                passed=passed,
+                duration_ms=random.randint(10, 500),
+                error_type=None if passed else "TimeoutError",
+                error_message=None if passed else "Operation timed out",
+            ))
+        return results
 
-        if canonical_action_val != "REVERT_LAST_PATCH" and not resolved_target.get("identifier"):
-            return {"action": action.action_type, "no_op": True, "reason": "unable_to_ground_evidence"}
+    def _read_sources(self) -> Tuple[str, str]:
+        """Read test and source-under-test files."""
+        test_source = ""
+        source_under_test = ""
 
-        patch_spec = build_patch_spec(action, resolved_target)
-        result = apply_ast_patch(target_file, patch_spec)
-        if not result.get("success"):
-            return {"action": action.action_type, "patch_error": result.get("error", "patch_failed")}
+        # Find test file
+        test_parts = self.test_identifier.split("::")
+        test_file_hint = test_parts[0] if test_parts else ""
 
-        patch_record = PatchRecord(
-            action_taken=action.action_type,
-            target_file=target_file,
-            lines_changed=int(result.get("lines_changed", 0)),
-            pass_rate_after=self._episode.current_pass_rate,
-            judge_patch_score=0.0,
-        )
-        self._episode.patches_applied.append(patch_record)
-        self._episode.total_diff_lines += patch_record.lines_changed
-        return {
-            "action": action.action_type,
-            "lines_changed": patch_record.lines_changed,
-            "diff": result.get("diff", ""),
-            "ast_diff": result.get("ast_diff", {}),
-            "resolved_target": resolved_target,
-        }
+        if test_file_hint:
+            test_path = self.repo_path / test_file_hint
+            if test_path.exists():
+                try:
+                    test_source = test_path.read_text(encoding="utf-8", errors="ignore")[:8000]
+                except Exception:
+                    pass
 
+        # Try to find source under test from imports
+        if test_source:
+            imports = self._extract_imports(test_source)
+            for imp in imports:
+                # Convert import to file path
+                parts = imp.replace(".", "/")
+                candidates = [
+                    self.repo_path / f"{parts}.py",
+                    self.repo_path / "src" / f"{parts}.py",
+                ]
+                for candidate in candidates:
+                    if candidate.exists():
+                        try:
+                            source_under_test = candidate.read_text(encoding="utf-8", errors="ignore")[:8000]
+                            break
+                        except Exception:
+                            pass
+                if source_under_test:
+                    break
 
+        return test_source, source_under_test
 
-    def _update_hypothesis_from_action(self, action: FlakeForgeAction) -> None:
-        if action.hypothesis is None:
-            return
+    def _build_file_tree(self) -> List[str]:
+        """Build a compact file tree of the repo."""
+        tree: List[str] = []
+        skip = {"__pycache__", ".git", "node_modules", "venv", ".venv", ".pytest_cache", ".tox"}
+        for root, dirs, files in os.walk(self.repo_path):
+            dirs[:] = [d for d in dirs if d not in skip]
+            rel = os.path.relpath(root, self.repo_path)
+            depth = rel.count(os.sep)
+            if depth > 3:
+                continue
+            for f in files:
+                if f.endswith(".py"):
+                    tree.append(os.path.join(rel, f).replace("\\", "/"))
+        return sorted(tree)[:50]
+
+    def _extract_imports(self, source: str) -> List[str]:
+        """Extract import statements from source."""
+        imports = []
         try:
-            self._episode.current_hypothesis = Hypothesis(**action.hypothesis.model_dump())
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        imports.append(alias.name)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imports.append(node.module)
         except Exception:
-            # Ignore malformed hypotheses and keep previous valid hypothesis.
-            return
+            pass
+        return imports
+
+    def _check_syntax(self, files: List[str]) -> Optional[str]:
+        """Check that modified files have valid Python syntax."""
+        for f in files:
+            path = Path(f)
+            if not path.exists() or not path.suffix == ".py":
+                continue
+            try:
+                source = path.read_text(encoding="utf-8", errors="ignore")
+                ast.parse(source)
+            except SyntaxError as exc:
+                return f"{path.name}:{exc.lineno}: {exc.msg}"
+        return None
+
+    def _check_order_dependency(self, baseline_rate: float) -> bool:
+        """Check for order dependency by running in reverse order."""
+        if self.runner is None:
+            return False
+        try:
+            if hasattr(self.runner, "run_reversed"):
+                result = self.runner.run_reversed(self.test_identifier)
+                reverse_rate = result.get("pass_rate", baseline_rate)
+                return abs(reverse_rate - baseline_rate) > 0.15
+        except Exception:
+            pass
+        return False
+
+    def _check_infrastructure_sensitivity(self, baseline_rate: float) -> bool:
+        """Check if the test is sensitive to infrastructure pressure."""
+        if self.chaos_runner is None:
+            return False
+        try:
+            result = self.chaos_runner.run_single(self.test_identifier)
+            chaos_rate = 1.0 if result.get("passed", False) else 0.0
+            return abs(chaos_rate - baseline_rate) > 0.2
+        except Exception:
+            pass
+        return False
+
+    def _build_causal_graph(self, test_source: str) -> Tuple[Optional[Dict], List[str]]:
+        """Build causal graph for the test."""
+        try:
+            builder = CausalGraphBuilder(str(self.repo_path))
+            graph = builder.build(test_source, self.test_identifier)
+            hints = builder.get_hints() if hasattr(builder, "get_hints") else []
+            return graph, hints
+        except Exception as exc:
+            logger.debug("[ENV] Causal graph construction failed: %s", exc)
+            return None, []
+
+    def _resolve_default_target(self) -> str:
+        """Resolve the default target file for patches."""
+        test_parts = self.test_identifier.split("::")
+        return test_parts[0] if test_parts else ""
+
+    def _done_reason(self, pass_rate: float, done: bool) -> str:
+        if not done:
+            return "in_progress"
+        if pass_rate >= 1.0:
+            return "fully_stable"
+        if self.state and self.state.regression_detected:
+            return "regression_detected"
+        if self.state and self.state.step_count >= self.max_steps:
+            return "max_steps_reached"
+        return "unknown"
 
 
+# ── Factory for OpenEnv ──────────────────────────────────────────────────────
 
-
-def _repeat_tail_count(actions: List[str]) -> int:
-    if not actions:
-        return 0
-    tail = actions[-1]
-    count = 0
-    for action in reversed(actions):
-        if action == tail:
-            count += 1
-        else:
-            break
-    return count
-
-
-def _learning_summary(action: str, prediction_error: Optional[float], was_hypothesis_correct: bool) -> str:
-    if prediction_error is None:
-        return "No explicit outcome prediction provided."
-    if was_hypothesis_correct and abs(prediction_error) <= 0.1:
-        return f"{action} behaved as expected with low prediction error."
-    if not was_hypothesis_correct:
-        return f"{action} did not improve stability; hypothesis needs revision."
-    return f"{action} improved stability but calibration is off by {prediction_error:+.2f}."
-
-
-def _updated_strategy(action: str, prediction_error: Optional[float], was_hypothesis_correct: bool) -> str:
-    if not was_hypothesis_correct:
-        return "Switch to evidence-focused probing before further code changes."
-    if prediction_error is not None and abs(prediction_error) > 0.2:
-        return "Reduce confidence in aggressive fixes and prefer minimal reversible actions."
-    return f"Continue with targeted follow-up action after {action}."
-
-
-# Backward compatible alias for template-generated class name.
-FlakeforgeEnvironment = FlakeForgeEnvironment
+def create_flakeforge_environment(
+    repo_path: str,
+    test_identifier: str,
+    **kwargs: Any,
+) -> FlakeForgeEnvironment:
+    """Create a FlakeForge V3 environment instance."""
+    return FlakeForgeEnvironment(
+        repo_path=repo_path,
+        test_identifier=test_identifier,
+        **kwargs,
+    )

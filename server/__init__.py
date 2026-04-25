@@ -1,11 +1,18 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
+"""FlakeForge V3 Server — environment, reward, and detection."""
 
-"""FlakeForge server module exports."""
+from .FlakeForge_environment import FlakeForgeEnvironment, create_flakeforge_environment
+from .reward import compute_verifiable_reward
+from .patch_applier import apply_search_replace_patch, parse_search_replace_hunks
+from .deep_flakiness import build_deep_observation_signals, extract_failure_frontier
+from .state import EpisodeState
 
-from .FlakeForge_environment import FlakeForgeEnvironment, FlakeforgeEnvironment
-
-__all__ = ["FlakeForgeEnvironment", "FlakeforgeEnvironment"]
+__all__ = [
+    "FlakeForgeEnvironment",
+    "create_flakeforge_environment",
+    "compute_verifiable_reward",
+    "apply_search_replace_patch",
+    "parse_search_replace_hunks",
+    "build_deep_observation_signals",
+    "extract_failure_frontier",
+    "EpisodeState",
+]

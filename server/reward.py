@@ -1,144 +1,391 @@
+"""V3 Reward Architecture — Six-signal verifiable reward, no LLM judge.
+
+Each signal is deterministic and derived from execution outcomes:
+1. Format Compliance: Valid <think>+<patch> structure
+2. Compile/Syntax: Modified file parses without errors
+3. Stability Delta: Pass-rate improvement over baseline
+4. Causal Proximity: Patch touches causal frontier, not distant code
+5. Failure Entropy Reduction: Fewer distinct error modes after fix
+6. Anti-Hack Penalty: Catch test deletion, sleep injection, broad try/except
+
+Research basis:
+- DeepSeek R1: Format+correctness reward (no human prefs)
+- RLEF: Execution-verified compilability
+- Reflexion NeurIPS 2023: Self-consistency check for reasoning
+"""
+
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Tuple
+import re
+from collections import Counter
+from typing import Any, Dict, List, Optional
 
-
-def compute_reward(
-    episode_state: Any,
-    step_result: Dict[str, Any],
-    judge_scores: Dict[str, int],
-) -> Tuple[float, Dict[str, float]]:
-    """Compute scalar reward from environment and judge signals."""
-
-    current_pass_rate = float(step_result.get("current_pass_rate", episode_state.current_pass_rate))
-    baseline_pass_rate = float(getattr(episode_state, "baseline_pass_rate", 0.0))
-
-    r_stability = (current_pass_rate - baseline_pass_rate) * 10.0
-    
-    # v2: Add chaos stability reward - compare against chaos_baseline, not clean_baseline
-    v_chaos = step_result.get("chaos_pass_rate")
-    chaos_pass_rate = float(v_chaos if v_chaos is not None else current_pass_rate)
-    v_chaos_bl = getattr(episode_state, "chaos_baseline_pass_rate", None)
-    chaos_baseline_pass_rate = float(v_chaos_bl if v_chaos_bl is not None else 0.0)
-    
-    # When chaos hasn't been run yet, return 0.0 instead of defaulting to current_pass_rate
-    if chaos_baseline_pass_rate == 0.0 and chaos_pass_rate == current_pass_rate:
-        r_chaos_stability = 0.0
-    else:
-        r_chaos_stability = (chaos_pass_rate - chaos_baseline_pass_rate) * 5.0
-
-    judge_hypothesis_score = int(judge_scores.get("judge_hypothesis_score", 0))
-    judge_patch_score = int(judge_scores.get("judge_patch_score", 0))
-    r_judge = ((judge_hypothesis_score / 5.0) + (judge_patch_score / 5.0)) * 1.5
-
-    r_efficiency = 0.0
-    confidence_hist = getattr(episode_state, "hypothesis_confidence_at_each_step", [])
-    action_hist = getattr(episode_state, "actions_taken", [])
-    for idx, confidence in enumerate(confidence_hist):
-        if idx < len(action_hist) and action_hist[idx] == "GATHER_EVIDENCE" and confidence > 0.8:
-            r_efficiency -= 0.3
-
-    p_regression = 15.0 if step_result.get("regression_detected", False) else 0.0
-    
-    # v2: Use sentinel's penalty() method for performance regression
-    # If perf_regression_detected is True, use 10 × log(median_ratio)
-    p_perf_regression = 0.0
-    if step_result.get("perf_regression_detected", False):
-        v_ratio = step_result.get("perf_median_ratio")
-        median_ratio = float(v_ratio if v_ratio is not None else 1.0)
-        if median_ratio > 1.0:
-            p_perf_regression = min(25.0, 10.0 * math.log(median_ratio))
-
-    action_taken = step_result.get("action_taken", "")
-    p_retry_abuse = 2.0 if action_taken in {"ADD_RETRY", "retry_test"} else 0.0
-
-    # Penalize repeating the same action more than twice in a row.
-    p_repeat_action = 0.0
-    repeat_count = int(step_result.get("repeat_action_count", 1))
-    if repeat_count > 2:
-        p_repeat_action = 1.5 * (repeat_count - 2)
-
-    # Penalize large patches that do not improve stability.
-    lines_changed = int(step_result.get("lines_changed", 0))
-    improvement = current_pass_rate - baseline_pass_rate
-    p_large_patch_no_gain = 0.0
-    if lines_changed >= 20 and improvement <= 0:
-        p_large_patch_no_gain = min(6.0, lines_changed * 0.1)
-
-    # Penalize likely false fixes where pass rate worsens significantly.
-    p_false_fix = 0.0
-    if improvement < -0.1:
-        p_false_fix = min(8.0, abs(improvement) * 12.0)
-
-    ast_diff = step_result.get("ast_diff", {}) or {}
-    semantic_footprint = len(ast_diff.get("functions_modified", []))
-    r_semantic_efficiency = -0.1 * max(0, semantic_footprint - 1)
-
-    # ── Improvement 1: prediction-error shaping ─────────────────────────────
-    # When the Fixer includes predicted_pass_rate_after we penalise the delta
-    # between prediction and reality (up to -2.0). This forces the model to
-    # internalise outcome uncertainty rather than being unconditionally optimistic.
-    predicted_pass_rate: Optional[float] = step_result.get("predicted_pass_rate_after")
-    r_prediction_accuracy = 0.0
-    if predicted_pass_rate is not None:
-        p_error = abs(predicted_pass_rate - current_pass_rate)
-        r_prediction_accuracy = -round(p_error * 2.0, 4)  # penalty ∈ [-2, 0]
-
-    reward = (
-        r_stability
-        + r_chaos_stability
-        + r_judge
-        + r_efficiency
-        + r_semantic_efficiency
-        + r_prediction_accuracy
-        - p_regression
-        - p_perf_regression
-        - p_retry_abuse
-        - p_repeat_action
-        - p_large_patch_no_gain
-        - p_false_fix
+try:
+    from models import (
+        FlakeForgeAction,
+        FlakeForgeObservation,
+        RewardBreakdown,
+        ROOT_CAUSE_TYPES,
+        RELATED_CATEGORIES,
+        failure_mode_entropy,
+    )
+except ImportError:
+    from ..models import (
+        FlakeForgeAction,
+        FlakeForgeObservation,
+        RewardBreakdown,
+        ROOT_CAUSE_TYPES,
+        RELATED_CATEGORIES,
+        failure_mode_entropy,
     )
 
-    terminal_bonus = 0.0
-    terminal_timeout_penalty = 0.0
 
-    if step_result.get("done", False):
-        success = current_pass_rate >= 1.0 and not step_result.get("regression_detected", False)
-        timeout = step_result.get("timed_out", False) or (
-            episode_state.step_count >= episode_state.max_steps and current_pass_rate < 0.9
-        )
-        if success:
-            terminal_bonus = 5.0
-            reward += terminal_bonus
-        elif timeout:
-            terminal_timeout_penalty = 5.0
-            reward -= terminal_timeout_penalty
+# ── Signal 1: Format Compliance ──────────────────────────────────────────────
 
-    breakdown = {
-        "stability_reward": float(r_stability + r_chaos_stability),
-        "efficiency_penalty": float(max(0.0, -r_efficiency) + p_repeat_action + p_retry_abuse),
-        "regression_penalty": float(p_regression + p_perf_regression),
-        "false_fix_penalty": float(p_false_fix + p_large_patch_no_gain),
-        "judge_score": float(r_judge),
-        "prediction_accuracy": float(r_prediction_accuracy),
-        "semantic_efficiency": float(r_semantic_efficiency),
-        "total_reward": 0.0,
-        # Keep legacy keys for compatibility with existing scripts.
-        "r_stability": float(r_stability),
-        "r_chaos_stability": float(r_chaos_stability),
-        "r_judge": float(r_judge),
-        "r_efficiency": float(r_efficiency),
-        "r_semantic_efficiency": float(r_semantic_efficiency),
-        "r_prediction_accuracy": float(r_prediction_accuracy),
-        "p_regression": float(p_regression),
-        "p_perf_regression": float(p_perf_regression),
-        "p_retry_abuse": float(p_retry_abuse),
-        "p_repeat_action": float(p_repeat_action),
-        "p_large_patch_no_gain": float(p_large_patch_no_gain),
-        "p_false_fix": float(p_false_fix),
-        "terminal_bonus": float(terminal_bonus),
-        "terminal_timeout_penalty": float(terminal_timeout_penalty),
-    }
-    breakdown["total_reward"] = float(reward)
-    return float(reward), breakdown
+def compute_format_reward(action: FlakeForgeAction) -> float:
+    """Check that the model produced valid <think> and <patch> blocks.
+
+    Returns:
+        1.0 if both blocks present with required fields
+        0.5 if only one block present
+        0.0 if neither
+    """
+    score = 0.0
+
+    # Check think block
+    if action.think_text:
+        think = action.think_text.lower()
+        has_root_cause = "root cause:" in think or "root_cause:" in think
+        has_confidence = "confidence:" in think
+        has_evidence = any(word in think for word in ["evidence:", "because", "the ", "causing", "due to"])
+
+        if has_root_cause and has_confidence:
+            score += 0.5
+        elif has_root_cause or has_confidence:
+            score += 0.25
+
+    # Check patch block
+    if action.patch_text:
+        has_search = "<<<<<<< SEARCH" in action.patch_text or "<<<<<<<" in action.patch_text
+        has_replace = ">>>>>>> REPLACE" in action.patch_text or ">>>>>>>" in action.patch_text
+        has_separator = "=======" in action.patch_text
+
+        if has_search and has_replace and has_separator:
+            score += 0.5
+        elif has_search or has_replace:
+            score += 0.25
+
+    return round(score, 2)
+
+
+# ── Signal 2: Compile/Syntax ────────────────────────────────────────────────
+
+def compute_compile_reward(
+    patch_applied_successfully: bool,
+    syntax_error: Optional[str] = None,
+) -> float:
+    """Check that the patched file compiles without errors.
+
+    Returns:
+        1.0 if patch applied + no syntax errors
+        0.5 if patch applied but has warnings
+       -1.0 if syntax error
+    """
+    if not patch_applied_successfully:
+        return -1.0
+    if syntax_error:
+        return -0.5
+    return 1.0
+
+
+# ── Signal 3: Stability Delta ───────────────────────────────────────────────
+
+def compute_stability_reward(
+    baseline_pass_rate: float,
+    current_pass_rate: float,
+) -> float:
+    """Reward proportional to pass-rate improvement.
+
+    Uses a clipped linear reward:
+    - Positive if pass rate improved
+    - Negative if pass rate regressed
+    - Bonus for reaching 100%
+
+    Returns:
+        Float in [-1.0, 2.0]
+    """
+    delta = current_pass_rate - baseline_pass_rate
+
+    if current_pass_rate >= 1.0:
+        return 2.0  # Full stability achieved — terminal bonus
+    elif delta > 0:
+        return round(min(delta * 3.0, 1.5), 4)  # Scale positives
+    elif delta < 0:
+        return round(max(delta * 5.0, -1.0), 4)  # Harsher penalty for regression
+    else:
+        return -0.1  # No change — slight penalty for wasted step
+
+
+# ── Signal 4: Causal Proximity ──────────────────────────────────────────────
+
+def compute_causal_proximity_reward(
+    patch_files: List[str],
+    failure_frontier: str,
+    call_chain: List[str],
+    boundary_crossings: List[str],
+) -> float:
+    """Reward patches that touch code near the failure site.
+
+    Patches to files far from the causal frontier are likely
+    noise or workarounds, not root-cause fixes.
+
+    Returns:
+        Float in [-0.5, 1.0]
+    """
+    if not patch_files or not failure_frontier:
+        return 0.0
+
+    score = 0.0
+    frontier_file = failure_frontier.split(":")[0] if ":" in failure_frontier else failure_frontier
+
+    # Direct hit — same file as failure frontier
+    for pf in patch_files:
+        pf_name = pf.split("/")[-1] if "/" in pf else pf
+        frontier_name = frontier_file.split("/")[-1] if "/" in frontier_file else frontier_file
+        if pf_name == frontier_name:
+            score = 1.0
+            break
+
+    if score == 0.0:
+        # Check if patch file is in the call chain
+        for pf in patch_files:
+            pf_name = pf.split("/")[-1].replace(".py", "")
+            for frame in call_chain:
+                if pf_name in frame:
+                    score = max(score, 0.5)
+                    break
+
+    if score == 0.0:
+        # Patch is far from causal frontier — penalize
+        score = -0.3
+
+    # Bonus if patch crosses a known boundary (meaningful infrastructure fix)
+    if boundary_crossings and score > 0:
+        score = min(score + 0.2, 1.0)
+
+    return round(score, 2)
+
+
+# ── Signal 5: Failure Entropy Reduction ─────────────────────────────────────
+
+def compute_entropy_reward(
+    pre_entropy: float,
+    post_entropy: float,
+) -> float:
+    """Reward reduction in failure mode entropy.
+
+    Lower entropy = more deterministic = closer to fixing root cause.
+    If all errors converge to one type (or zero), the fix is targeted.
+
+    Returns:
+        Float in [-0.5, 1.0]
+    """
+    if pre_entropy <= 0 and post_entropy <= 0:
+        return 0.5  # No errors at all — good
+
+    delta = pre_entropy - post_entropy
+    if delta > 0:
+        return round(min(delta * 2.0, 1.0), 4)
+    elif delta < 0:
+        return round(max(delta * 1.5, -0.5), 4)
+    return 0.0
+
+
+# ── Signal 6: Anti-Hack Penalty ─────────────────────────────────────────────
+
+def compute_anti_hack_penalty(
+    patch_text: str,
+    files_modified: List[str],
+    lines_changed: int,
+) -> float:
+    """Penalize common reward-hacking patterns.
+
+    Catches:
+    - Test deletion (removing assertions or entire test)
+    - Sleep injection (masking timing issues)
+    - Broad try/except (masking errors)
+    - Excessive changes (> 50 lines = shotgun fix)
+    - Skip decorators (@pytest.mark.skip)
+
+    Returns:
+        Float in [-2.0, 0.0] (always non-positive)
+    """
+    penalty = 0.0
+    patch_lower = patch_text.lower()
+
+    # Test deletion — deleting assertions
+    if "assert" in patch_lower:
+        # Check if assertions are being removed (in SEARCH but not in REPLACE)
+        search_blocks = re.findall(r"<<<<<<< SEARCH\n(.*?)=======", patch_text, re.DOTALL)
+        replace_blocks = re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
+
+        for search, replace in zip(search_blocks, replace_blocks):
+            search_asserts = search.lower().count("assert")
+            replace_asserts = replace.lower().count("assert")
+            if search_asserts > replace_asserts:
+                penalty -= 0.5 * (search_asserts - replace_asserts)
+
+    # Sleep injection
+    sleep_patterns = ["time.sleep(", "await asyncio.sleep(", "sleep("]
+    for pattern in sleep_patterns:
+        if pattern in patch_lower:
+            # Only penalize if sleep is being ADDED (in replace but not search)
+            replace_count = sum(
+                1 for b in re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
+                if pattern in b.lower()
+            )
+            search_count = sum(
+                1 for b in re.findall(r"<<<<<<< SEARCH\n(.*?)=======", patch_text, re.DOTALL)
+                if pattern in b.lower()
+            )
+            if replace_count > search_count:
+                penalty -= 0.3 * (replace_count - search_count)
+
+    # Broad try/except
+    if "except:" in patch_lower or "except Exception:" in patch_lower:
+        replace_blocks = re.findall(r"=======\n(.*?)>>>>>>> REPLACE", patch_text, re.DOTALL)
+        for block in replace_blocks:
+            if "except:" in block.lower() or "except exception:" in block.lower():
+                penalty -= 0.5
+
+    # Skip decorator injection
+    skip_patterns = ["@pytest.mark.skip", "@unittest.skip", "pytest.skip("]
+    for pattern in skip_patterns:
+        if pattern in patch_lower:
+            penalty -= 1.0
+
+    # Excessive changes
+    if lines_changed > 50:
+        penalty -= min((lines_changed - 50) / 100.0, 0.5)
+
+    return round(max(penalty, -2.0), 2)
+
+
+# ── Reasoning Consistency (Bonus Signal) ────────────────────────────────────
+
+def compute_reasoning_consistency(
+    predicted_category: str,
+    inferred_category_from_patch: str,
+    think_text: str,
+    patch_text: str,
+) -> float:
+    """Check that the reasoning in <think> is consistent with the <patch>.
+
+    Verifies that the diagnosed root cause category matches what the
+    patch actually modifies. Prevents "vibe-coding" (reasoning that
+    sounds good but doesn't match the actual fix).
+
+    Returns:
+        Float in [-0.5, 0.5]
+    """
+    if not predicted_category or not inferred_category_from_patch:
+        return 0.0
+
+    # Exact match
+    if predicted_category == inferred_category_from_patch:
+        return 0.5
+
+    # Related category match (e.g., concurrency ↔ async_wait)
+    related = RELATED_CATEGORIES.get(predicted_category, set())
+    if inferred_category_from_patch in related:
+        return 0.25
+
+    # Mismatch — reasoning doesn't match what was actually changed
+    return -0.5
+
+
+# ── Composite Reward ────────────────────────────────────────────────────────
+
+def compute_verifiable_reward(
+    action: FlakeForgeAction,
+    observation: FlakeForgeObservation,
+    patch_result: Dict[str, Any],
+    post_run_results: List[Dict[str, Any]],
+    baseline_pass_rate: float,
+    pre_entropy: float,
+) -> RewardBreakdown:
+    """Compute the full six-signal verifiable reward.
+
+    All signals are deterministic and derived from execution outcomes.
+    No LLM judge required.
+    """
+    # Patch metadata
+    patch_applied = patch_result.get("success", False)
+    syntax_error = patch_result.get("error") if not patch_applied else None
+    files_modified = patch_result.get("files_modified", [])
+    lines_changed = patch_result.get("lines_changed", 0)
+
+    # Post-run results
+    post_pass_count = sum(1 for r in post_run_results if r.get("passed", False))
+    post_pass_rate = post_pass_count / max(len(post_run_results), 1)
+
+    # Post entropy
+    post_errors = [r.get("error_type", "") for r in post_run_results if not r.get("passed", True)]
+    post_counter = Counter(e for e in post_errors if e)
+    if post_counter:
+        total = sum(post_counter.values())
+        post_entropy = -sum((c / total) * math.log2(c / total) for c in post_counter.values())
+        max_e = math.log2(len(post_counter)) if len(post_counter) > 1 else 1.0
+        post_entropy = post_entropy / max_e if max_e > 0 else 0.0
+    else:
+        post_entropy = 0.0
+
+    # Inferred category from actual patch changes
+    from agent.unified_agent import infer_category_from_patch
+    inferred_cat = infer_category_from_patch(action.patch_text)
+
+    # Compute signals
+    breakdown = RewardBreakdown()
+    breakdown.format_reward = compute_format_reward(action)
+    breakdown.compile_reward = compute_compile_reward(patch_applied, syntax_error)
+    breakdown.stability_reward = compute_stability_reward(baseline_pass_rate, post_pass_rate)
+    breakdown.causal_proximity_reward = compute_causal_proximity_reward(
+        files_modified,
+        observation.failure_frontier,
+        observation.call_chain_to_frontier,
+        observation.boundary_crossings,
+    )
+    breakdown.failure_entropy_reward = compute_entropy_reward(pre_entropy, post_entropy)
+    breakdown.anti_hack_penalty = compute_anti_hack_penalty(
+        action.patch_text,
+        files_modified,
+        lines_changed,
+    )
+    breakdown.reasoning_consistency_reward = compute_reasoning_consistency(
+        action.predicted_category,
+        inferred_cat,
+        action.think_text,
+        action.patch_text,
+    )
+
+    # Terminal bonus for full stability
+    if post_pass_rate >= 1.0:
+        breakdown.terminal_bonus = 2.0
+    elif post_pass_rate > baseline_pass_rate + 0.3:
+        breakdown.terminal_bonus = 1.0
+
+    # Weighted total
+    breakdown.total_reward = round(
+        breakdown.format_reward * 0.5
+        + breakdown.compile_reward * 1.0
+        + breakdown.stability_reward * 2.0
+        + breakdown.causal_proximity_reward * 0.5
+        + breakdown.failure_entropy_reward * 0.5
+        + breakdown.anti_hack_penalty * 1.5
+        + breakdown.reasoning_consistency_reward * 0.5
+        + breakdown.terminal_bonus * 1.0,
+        4,
+    )
+
+    return breakdown

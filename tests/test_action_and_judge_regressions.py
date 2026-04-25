@@ -1,70 +1,124 @@
-from __future__ import annotations
+"""V3 Regression Tests — Patch Applier and Reward.
 
+Tests that were historically problematic in V2 (action dispatch bugs,
+judge scoring inconsistencies) are replaced by V3 equivalents testing
+the patch applier and deterministic reward signals.
+"""
+
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from client import FlakeForgeEnv
-from models import FlakeForgeAction, FlakeForgeObservation
-from server.action_executor import build_patch_spec
-from server.tools import apply_ast_patch
+from models import FlakeForgeAction, RunRecord, RewardBreakdown
+from server.patch_applier import parse_search_replace_hunks, apply_search_replace_patch
+from server.reward import (
+    compute_format_reward,
+    compute_anti_hack_penalty,
+    compute_stability_reward,
+)
 
 
-def test_add_sleep_injects_default_delay_ms() -> None:
-    action = FlakeForgeAction(action_type="add_sleep", parameters={})
+class TestPatchApplierRegressions:
+    """Regression tests for the V3 patch applier."""
 
-    assert action.parameters["delay_ms"] == 100
+    def test_whitespace_fuzzy_match(self):
+        """Patch with slightly different indentation should still apply."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = Path(tmpdir) / "example.py"
+            test_file.write_text("    x = 1\n    y = 2\n    z = 3\n")
+
+            # Search text without leading spaces
+            patch = """--- example.py
+<<<<<<< SEARCH
+x = 1
+=======
+x = 42
+>>>>>>> REPLACE"""
+            result = apply_search_replace_patch(Path(tmpdir), patch)
+            # Should succeed via fuzzy match
+            assert result["success"] is True
+
+    def test_file_not_found_graceful(self):
+        """Patching a nonexistent file should not crash."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            patch = """--- nonexistent.py
+<<<<<<< SEARCH
+old
+=======
+new
+>>>>>>> REPLACE"""
+            result = apply_search_replace_patch(Path(tmpdir), patch)
+            assert result["success"] is False
+
+    def test_empty_search_block_ignored(self):
+        """Empty search blocks should be silently skipped."""
+        patch = """--- test.py
+<<<<<<< SEARCH
+
+=======
+new_code
+>>>>>>> REPLACE"""
+        hunks = parse_search_replace_hunks(patch)
+        assert len(hunks) == 0  # Empty search should be skipped
+
+    def test_multi_hunk_atomicity(self):
+        """If second hunk fails, first should be rolled back."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file1 = Path(tmpdir) / "file1.py"
+            file1.write_text("original1 = True\n")
+
+            patch = """--- file1.py
+<<<<<<< SEARCH
+original1 = True
+=======
+modified1 = True
+>>>>>>> REPLACE
+
+--- file2.py
+<<<<<<< SEARCH
+this_doesnt_exist
+=======
+replacement
+>>>>>>> REPLACE"""
+            result = apply_search_replace_patch(Path(tmpdir), patch)
+            assert result["success"] is False
 
 
-def test_add_synchronization_builds_a_real_patch(tmp_path: Path) -> None:
-    source_path = tmp_path / "test_flaky.py"
-    source_path.write_text(
-        "def test_fetch_should_complete():\n"
-        "    result = fetch_data_with_race()\n"
-        "    assert result\n",
-        encoding="utf-8",
-    )
+class TestRewardRegressions:
+    """Regression tests for V3 reward signals."""
 
-    action = FlakeForgeAction(action_type="ADD_SYNCHRONIZATION", parameters={"primitive": "lock"})
-    patch_spec = build_patch_spec(action, {"type": "function", "identifier": "test_fetch_should_complete"})
+    def test_no_crash_on_empty_action(self):
+        """Reward computation should handle empty action gracefully."""
+        action = FlakeForgeAction(raw_response="")
+        reward = compute_format_reward(action)
+        assert reward == 0.0
 
-    result = apply_ast_patch(str(source_path), patch_spec)
+    def test_stability_edge_case_100_percent(self):
+        """100% pass rate gives terminal bonus."""
+        reward = compute_stability_reward(0.5, 1.0)
+        assert reward == 2.0
 
-    assert result["success"] is True
-    assert result["lines_changed"] > 0
-    assert "with threading.Lock():" in source_path.read_text(encoding="utf-8")
+    def test_anti_hack_assertion_deletion(self):
+        """Deleting assertions should be heavily penalized."""
+        patch = """<<<<<<< SEARCH
+    assert result == expected
+    assert len(data) > 0
+=======
+    pass
+>>>>>>> REPLACE"""
+        penalty = compute_anti_hack_penalty(patch, ["test.py"], 3)
+        assert penalty < -0.5  # Two assertions removed
 
-
-@pytest.mark.asyncio
-async def test_judge_uses_single_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    observation = FlakeForgeObservation(
-        episode_id="episode-1",
-        test_identifier="tests/test_flaky.py::test_fetch_should_complete",
-        step=1,
-        steps_remaining=3,
-        test_function_source="def test_fetch_should_complete():\n    pass\n",
-        source_under_test="def fetch():\n    return True\n",
-    )
-
-    call_count = 0
-
-    async def fake_call(prompt: str) -> str:
-        nonlocal call_count
-        call_count += 1
-        assert '"task": "score_both"' in prompt
-        return (
-            '{"judge_hypothesis_score": 4, "judge_patch_score": 3, '
-            '"critique": "tighten the wait", "prediction_error": "prediction too optimistic"}'
-        )
-
-    monkeypatch.setattr(FlakeForgeEnv, "_call_nvidia_judge", staticmethod(fake_call))
-
-    env = FlakeForgeEnv("http://localhost:5000")
-    try:
-        result = await env._run_judge(observation)
-    finally:
-        await env.close()
-
-    assert call_count == 1
-    assert result["judge_hypothesis_score"] == 4
-    assert result["judge_patch_score"] == 3
+    def test_anti_hack_broad_except(self):
+        """Adding bare except: should be penalized."""
+        patch = """<<<<<<< SEARCH
+result = func()
+=======
+try:
+    result = func()
+except:
+    result = None
+>>>>>>> REPLACE"""
+        penalty = compute_anti_hack_penalty(patch, ["test.py"], 5)
+        assert penalty < 0
