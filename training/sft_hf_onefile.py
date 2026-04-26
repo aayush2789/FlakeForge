@@ -1253,7 +1253,7 @@ def main() -> None:
     if args.cmd == "submit":
         forwarded = [
             "--seed-root",
-            "test_repos/synthetic
+            "test_repos/synthetic",
             "--workdir",
             "outputs/sft_workdir",
             "--max-repos",
