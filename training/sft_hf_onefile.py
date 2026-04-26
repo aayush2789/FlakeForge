@@ -110,6 +110,77 @@ def _safe_read_text(path: Path, max_chars: int) -> str:
         return ""
 
 
+def _infer_imported_packages(repo_dir: Path) -> List[str]:
+    """Infer minimal pip packages needed to import and run tests for a synthetic repo.
+
+    We intentionally do NOT trust requirements.txt for synthetic repos because
+    it may contain old pins (e.g. sympy==0.7.5) that are incompatible with the
+    job's Python. Instead we install only what the code actually imports.
+    """
+    import ast
+
+    # Python 3.10+ provides stdlib module names.
+    try:
+        stdlib = set(sys.stdlib_module_names)  # type: ignore[attr-defined]
+    except Exception:
+        stdlib = set()
+
+    # Local modules that should not be treated as pip deps.
+    local_names: set[str] = {"source", "tests", "__future__"}
+    # Some common stdlib aliases that may not appear in stdlib_module_names on older versions.
+    stdlib |= {"typing", "pathlib", "dataclasses", "collections", "concurrent", "asyncio", "unittest"}
+
+    py_files: List[Path] = []
+    src = repo_dir / "source.py"
+    if src.exists():
+        py_files.append(src)
+    tests_dir = repo_dir / "tests"
+    if tests_dir.exists():
+        py_files.extend(sorted(tests_dir.rglob("*.py")))
+
+    imports: set[str] = set()
+    for p in py_files:
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name:
+                        imports.add(alias.name.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.add(node.module.split(".", 1)[0])
+
+    # Filter stdlib + local.
+    pkgs: List[str] = []
+    for name in sorted(imports):
+        if name in local_names:
+            continue
+        if name in stdlib:
+            continue
+        # pytest is installed separately
+        if name == "pytest":
+            continue
+        pkgs.append(name)
+
+    # Map common import->pip name mismatches (add more if encountered).
+    rename = {
+        "yaml": "pyyaml",
+        "PIL": "pillow",
+        "sklearn": "scikit-learn",
+    }
+    pkgs = [rename.get(p, p) for p in pkgs]
+
+    # Safety: never install ancient sympy from requirements; if imported, force modern.
+    if "sympy" in pkgs:
+        pkgs = [p for p in pkgs if p != "sympy"]
+        pkgs.append("sympy>=1.10")
+
+    return pkgs
+
+
 def _apply_hunks_in_place(repo_dir: Path, hunks: List[Dict[str, str]]) -> Dict[Path, str]:
     """Apply FlakeForge-style search/replace hunks. Returns {path: original_text} for rollback."""
     originals: Dict[Path, str] = {}
@@ -453,16 +524,18 @@ def build_sft_rows_synthetic(
         print(f"[SYN] test={c.test_identifier} root_file={manifest.get('root_cause_file','source.py')}", flush=True)
 
         if install_deps:
-            req = c.repo_dir / "requirements.txt"
-            if req.exists() and req.stat().st_size > 0:
-                try:
-                    print(f"[SYNDEPS] installing requirements.txt ({req.stat().st_size} bytes)", flush=True)
-                    _pip_install(["install", "-r", str(req)], prefix=f"[SYNDEPS:{c.slug}] ")
-                except Exception as exc:
-                    deps_failed.append(c.slug)
-                    print(f"[SYNDEPS] FAIL {c.slug}: {exc}", flush=True)
-            else:
-                print("[SYNDEPS] no requirements.txt (skipping)", flush=True)
+            try:
+                # Always ensure pytest exists for verification.
+                _pip_install(["install", "-U", "pytest", "pytest-asyncio"], prefix=f"[SYNDEPS:{c.slug}] ")
+                pkgs = _infer_imported_packages(c.repo_dir)
+                print(f"[SYNDEPS] inferred_packages={pkgs}", flush=True)
+                if pkgs:
+                    _pip_install(["install", "-U", *pkgs], prefix=f"[SYNDEPS:{c.slug}] ")
+                else:
+                    print("[SYNDEPS] no external imports detected (stdlib-only)", flush=True)
+            except Exception as exc:
+                deps_failed.append(c.slug)
+                print(f"[SYNDEPS] FAIL {c.slug}: {exc}", flush=True)
 
         hunks = _synthetic_fix_hunks(manifest, c.repo_dir)
         if not hunks:
