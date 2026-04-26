@@ -142,58 +142,39 @@ That is why we introduced a **`PatchValidator`**: a **code-side** gate that runs
 
 ### `PatchValidator` in detail (stages, from `server/patch_validator.py`)
 
-The module docstring encodes a fixed pipeline. Invalid patches are **rejected before the repo on disk is mutated**.
+The module docstring encodes a fixed pipeline. **Invalid patches are rejected before the repo on disk is mutated.** That single rule is what keeps the training problem stable: the environment never asks pytest to arbitrate a patch that is not even a legal edit of the repository.
 
-**Stage 1 — Format**  
-- The model must produce **SEARCH/REPLACE** hunks with the expected delimiters. Empty patches or missing markers fail fast.
+**format** is the first gate. The model must produce **SEARCH/REPLACE** hunks with the expected delimiters. Empty patches or missing markers are rejected immediately; there is no point simulating or compiling text that is not a patch at all.
 
-**Stage 1b — Anti-hack (hard errors)**  
-- Before any simulation, the validator looks for *known* reward hacks in the hunk text: e.g. **deleting more assertions** than it adds, **injecting** `time.sleep` / `asyncio.sleep`, **adding** `@pytest.mark.skip` / `pytest.skip`, or **swallowing exceptions** with `except: pass`. These patterns are cheap to catch and protect the *semantic* meaning of the test.
+**anti-hack** runs next and treats a short list of patterns as **hard errors** before any simulation. The validator scans the hunk text for known reward hacks: for example deleting more assertions than it adds, injecting `time.sleep` or `asyncio.sleep`, adding `@pytest.mark.skip` or `pytest.skip`, or swallowing exceptions with `except: pass`. These checks are cheap to run, and they exist so a policy cannot “win” by hollowing out what the test is supposed to assert.
 
-**Stage 2 — Apply simulation (no disk write)**  
-- The patch is **simulated** against a snapshot of sources (`simulate_search_replace_patch`). Every `search` must **match** real file content (with optional **fuzzy** indent normalization, which is flagged as a **warning**). If simulation fails, the patch is **invalid**—there is nothing meaningful to test.
+**apply simulation** still does **not** write to disk. The patch is applied in memory against a snapshot of sources via `simulate_search_replace_patch`. Every search block must match real file content. The implementation can optionally relax indentation in a controlled way; when that path fires, it is surfaced as a **warning** rather than silently accepted. If simulation fails, the patch is **invalid**: there is no coherent edit left to evaluate under pytest.
 
-**Stage 2b — Reasoning–action bridge (when structured claims exist)**  
-- If the think block **names** a function or file, the validator checks that the **patch actually edits** that locus. Example failure mode: the claim points at an entity, but the **AST text for that node is unchanged** after simulation—"you said you fixed X, but X is identical."
+**reasoning–action bridge** applies when structured claims name a function or file. After simulation, the validator checks that the patch **actually edits** that locus. A common failure mode is purely rhetorical: the think block points at an entity, but the AST text for that node is unchanged—“you said you fixed X, but X is identical.” That mismatch is caught here.
 
-**Smell checks on added lines**  
-- The validator scans **added** lines for **flakiness smells** the policy should not introduce: e.g. new uses of `random.random`, `datetime.now` at module level, **new** mutable global assignments, or **new** `lru_cache` (often warned rather than always hard-failed—see code paths).
+**Smell checks on added lines** look at what the patch **introduces**, not only whether it applies. New uses of `random.random`, `datetime.now` at module level, new mutable global assignments, or new `lru_cache` are examples of patterns the policy should not learn to lean on. The code distinguishes warnings from hard failures along several paths; the intent is to flag flakiness the training objective is meant to discourage.
 
-**Size and idempotency**  
-- **Very large** diffs are rejected (e.g. beyond a line-change budget) to block “rewrite the world” rewards. A **second simulated apply** checks **idempotency**—a good search/replace should not do something different on a second pass.
+**Size and idempotency** limit how much the model can rewrite in one step. Diffs that exceed a line-change budget are rejected so the agent cannot harvest reward by replacing large swaths of the tree. A **second** simulated apply checks **idempotency**: a correct search/replace should not produce a different outcome if applied again to the already-patched text.
 
-**Stages 3–4–5 — Syntax, compile, structure (per modified file)**  
-- For each changed `.py` file, the post-patch text must pass **`ast.parse`**, then **`compile`**. Structural heuristics flag obviously broken trees (e.g. **empty** function or class bodies). Optional **LibCST** roundtrip checks add another layer. **Undefined-name** heuristics catch patches that reference `threading` / `Lock` / etc. without imports.
+**syntax, compile, and structure** run **per modified** `.py` file. Post-patch source must pass `ast.parse` and then `compile`. Structural heuristics flag obviously broken trees, such as empty function or class bodies. Optional LibCST roundtrip checks add another consistency layer. Undefined-name heuristics catch patches that mention names like `threading` or `Lock` without bringing them into scope via imports.
 
-**Stage 6 — Causal proximity (warnings)**  
-- If hunks **edit files far** from the **failure frontier** and call chain, the validator only **warns**—this mirrors the **causal_proximity_reward** signal; it is a hint that the edit may be a workaround, not a localized fix.
+**causal proximity** is softer: it issues **warnings**, not automatic rejections. If hunks touch files far from the failure frontier and the causal call chain, the validator mirrors the signal used in **causal_proximity_reward**. The edit may still be valid, but the hint is that it might be a workaround rather than a localized fix.
 
-**Output**  
-- A boolean **`is_valid`**, **errors** / **warnings**, and a **score in \([0,1]\)** used for **reward shaping** when the patch is valid (penalties for noop patches, fuzzy apply, or very large diffs).
-
-Together, these stages make one thing explicit: **the environment never asks pytest to arbitrate a patch that is not even a legal edit of the repository.**
+**Output** packages everything for the rest of the environment: a boolean **`is_valid`**, lists of **errors** and **warnings**, and a **score in \([0,1]\)** used for reward shaping when the patch is valid. That score can penalize noop patches, fuzzy apply, or very large diffs even when the patch technically applies. Taken together, these stages tell one story: **preflight on the patch keeps the workspace healthy before pytest is allowed to speak.**
 
 ### `OracleEngine` in detail: verifying “think” against code (`server/oracle_engine.py`)
 
-The **oracle** is the complement of the **validator**. Where the validator cares about **edits**, the oracle (via `verify_structured_think`) asks: **given pre- and post-patch source, is each `ThinkClaim` actually supported, and does the patch address it?**
+The **oracle** is the complement of the **validator**. The validator answers whether the patch is a legal, safe edit of the codebase. The oracle, through **`verify_structured_think`**, answers a different question: **given pre- and post-patch source, is each `ThinkClaim` actually supported by the code, and does the patch meaningfully address that claim?**
 
-**Per-category plugins**  
-- Each `ROOT_CAUSE_TYPES` value can register an **`OraclePlugin`** in a registry (examples in code include race / async-wait, LRU cache, mock leak, shared state, fixture scope, network, import side effect, and more). For a given claim category, the plugin uses **AST** (and **LibCST** when available) to check **static** conditions that match the kind of root cause (e.g. evidence of a lock, a problematic decorator, a boundary pattern).
+**Per-category plugins** implement that question for each kind of root cause. Each `ROOT_CAUSE_TYPES` value can register an **`OraclePlugin`** in a registry. The codebase includes examples for race and async-wait behavior, LRU cache issues, mock leaks, shared state, fixture scope, network boundaries, import side effects, and more. For a given category, the plugin uses the AST (and LibCST when available) to test static conditions that match that failure mode—evidence of a lock, a suspicious decorator, a boundary pattern, and similar. The oracle is not improvising; it is running reproducible checks tied to the claim type.
 
-**Evidence object**  
-- Each claim is annotated with an **`OracleEvidence`**: e.g. whether the **entity** resolved in the file, pre/post conditions held, and whether the **patch addresses** the claim.
+**Evidence** is recorded per claim in an **`OracleEvidence`** object. That structure captures whether the named entity resolved in the file, whether expected pre- and post-conditions held, and whether the patch plausibly addresses what the claim says went wrong. The oracle thus builds an auditable record rather than a single opaque score.
 
-**Patch coherence**  
-- A **`PatchCoherenceOracle`** cross-checks that the **patch** is consistent with the claim. If a plugin would say "confirmed" but the patch and claim **do not cohere**, the verdict is downgraded to **inconclusive**.
+**Patch coherence** is enforced by a **`PatchCoherenceOracle`**. Even when a category plugin would like to say the claim is **confirmed**, the cross-check asks whether the **patch** and the **claim** actually fit together. If they do not cohere, the verdict is **downgraded** toward **inconclusive** so that “sounding right” cannot outrun “editing consistently.”
 
-**Scoring**  
-- `verify_structured_think` returns a **`StructuredThink` with per-claim `verdict` and `oracle_score`**, and an aggregate **oracle_score** in \([-1,1]\) used in **`compute_verifiable_reward`**. The oracle is **not** a chat model. It is **reproducible static checking** + **hunk–claim alignment**—the “process supervision” that stays cheap at scale.
+**Scoring** closes the loop. **`verify_structured_think`** returns a **`StructuredThink`** with a per-claim **`verdict`** and **`oracle_score`**, plus an aggregate **`oracle_score`** in \([-1,1]\) that **`compute_verifiable_reward`** consumes. The important distinction is philosophical as well as technical: **the oracle is not a chat model.** It is static analysis plus alignment between hunks and claims—the cheap, scalable side of process supervision.
 
-**Why both validator and oracle**  
-- **Validator**: *never* break the world; *never* let training collapse into "syntax repair."  
-- **Oracle**: *when the world is still intact*, score whether the **stated** diagnosis matches **what the code and patch actually do**—so the "thinking" channel cannot float free of the "editing" channel.
-
-In other words: **preflight and logs** keep us in the *right problem class*; the **patch validator** keeps the **workspace healthy**; the **oracle** keeps the **learned policy honest** about *why* a patch is supposed to work.
+**Why both validator and oracle** matters for training design. Preflight and logs keep episodes in the **right problem class** (flaky-like vs broken checkout). The **patch validator** ensures the workspace is never corrupted by an illegal or obviously hacked edit, so the policy does not collapse into learning **syntax repair** for its own mistakes. The **oracle** operates **after** the world is still intact: it scores whether the **stated** diagnosis matches **what the code and patch actually do**, so the thinking channel cannot float free of the editing channel. In one line: **the validator guards the repo; the oracle guards the honesty of the reasoning.**
 
 ---
 
@@ -215,57 +196,25 @@ flowchart TD
     J --> D
 ```
 
-The main components are:
-
-- **Environment**: `FlakeForgeEnvironment` controls episodes, snapshots source files, restores pristine state, applies patches, runs tests, and returns observations.
-- **Agent interface**: `UnifiedFlakeForgeAgent` prompts a code model to emit one JSON object containing `think` claims and `patch` hunks.
-- **Observation model**: `FlakeForgeObservation` carries source snippets, run history, pass rates, preflight results, deep flakiness signals, causal hints, reward breakdown, and termination status.
-- **Action model**: `FlakeForgeAction` represents a unified structured patch action with root-cause claims and search/replace hunks.
-- **Patch validator**: rejects malformed, non-applicable, syntactically invalid, or suspicious patches before they can corrupt the repo.
-- **Reward function**: `compute_verifiable_reward` combines pass-rate improvement, compile/apply checks, causal proximity, anti-hack penalties, reasoning consistency, and terminal success bonuses.
-- **Dataset builder**: the IDoFT builder curates real flaky-test cases with category labels, root-cause files, difficulty splits, and PR references.
-- **Training pipeline**: warm-up teaches valid JSON formatting and reasoning consistency; online GRPO uses environment reward from real rollouts.
+Architecturally, the pieces chain together in the order an engineer would expect: **`FlakeForgeEnvironment`** owns the episode. It snapshots Python sources, restores a pristine tree when needed, applies validated patches, runs **`pytest`** in a loop, and hands back a **`FlakeForgeObservation`**. Sitting in front of the model, **`UnifiedFlakeForgeAgent`** is only the interface that turns a completion into one JSON object with **`think`** claims and **`patch`** hunks. Between raw model text and disk, the **patch validator** enforces that nothing malformed or obviously hacked reaches the repo. After the run, **`compute_verifiable_reward`** folds pass-rate movement, apply and compile health, how close the edit sits to the failure frontier, anti-hack signals, and reasoning consistency into a single training signal. Around that core, the **IDoFT builder** supplies curated real cases (labels, root-cause files, difficulty, PR links), and the **training pipeline** uses a warm-up phase for valid JSON and coherent claims before **GRPO** rolls out against the live environment.
 
 ---
 
 ## 7. Environment Design for RL
 
-FlakeForge is a partially observable Markov decision process. The true state includes the whole repository, hidden runtime behavior, ordering effects, cached state, previous patches, and test-run outcomes. The agent only sees a compressed observation.
+FlakeForge is a partially observable Markov decision process on paper, but the lived shape of an episode is a **tight loop**: the world holds far more than the policy ever sees, the policy speaks once per step in a rigid schema, the environment mutates and measures, and the next observation tells the story of what actually happened.
 
 ### State
 
-The hidden state includes:
-
-- The repository contents.
-- The target test identifier.
-- A pristine snapshot of Python files for reset.
-- Episode step count and maximum steps.
-- Baseline pass rate and current pass rate.
-- Previous patches and reward history.
-- Failure distribution across repeated runs.
-
-The environment restores a clean source snapshot between episodes so GRPO rollouts do not accidentally stack patches on top of each other.
+The **full state** is everything the harness knows and the agent does not. It spans the **repository contents** and the **target test** identity, the **pristine snapshot** of files that makes `reset` trustworthy, and bookkeeping such as **step count**, **max steps**, **baseline vs current pass rate**, the **patch and reward history** accumulated in the episode, and the **distribution of failures** across repeated runs. None of that needs to fit in context; it is the ground truth the environment integrates over. Between episodes, the environment **restores** that pristine snapshot so parallel GRPO rollouts never inherit a half-patched tree—the next episode always starts from the same clean contract with the codebase.
 
 ### Observation
 
-The observation is intentionally richer than a raw stack trace. It includes:
-
-- Test source and source under test.
-- File tree and relevant imports.
-- Repeated run history with pass/fail status, duration, error type, and stderr excerpts.
-- Baseline and current pass rates.
-- Preflight classification: stable, flaky, deterministic bug, infra broken, or unknown.
-- Deep flakiness signals from AST scans.
-- Failure frontier extracted from stack traces.
-- Causal graph summaries and boundary hints.
-- Reward breakdown from the previous step.
-- Think and patch history so the model can avoid repeating dead hypotheses.
-
-This matters because flaky bugs are often not visible from one failure. The agent needs repeated evidence.
+What the agent **does** see is a deliberate compression of that state into a **`FlakeForgeObservation`**. It is not a single stack trace. The builder threads in **test source** and **code under test**, a **file tree** and **relevant imports**, and a **run history** that already encodes repetition: pass or fail, how long the run took, error type, and stderr excerpts. Preflight and metrics surface **baseline and current pass rates** and a **classification** of whether the scenario looks stable, flaky, like a deterministic bug, infra-broken, or still ambiguous. Static passes contribute **deep flakiness** hints; stack analysis yields a **failure frontier** and **causal** summaries that point toward boundaries in the call graph. The previous step’s **reward breakdown** and the **think/patch history** ride along so the model is not asked to debug in a memory vacuum. The design bet is simple: flaky behavior often **hides** behind one unlucky run, so the observation is built to show **patterns across runs**, not a single screenshot of failure.
 
 ### Action
 
-The action is a single JSON object:
+Each step, the policy emits **one** structured action, a **`FlakeForgeAction`** serialized as JSON. The **`think`** half names **claims**: category, entity, location (for example `path::function`), polarity, and a short reason. The **`patch`** half lists **search/replace** hunks bound to real paths. That pairing is the whole point—the environment can ask whether the **words** and the **diff** agree before pytest ever runs.
 
 ```json
 {
@@ -293,39 +242,15 @@ The action is a single JSON object:
 }
 ```
 
-This structure forces the model to connect its explanation to the edit. The environment can then check whether the claimed category, location, and patch are coherent.
+Because both halves live in one object, “I believe X is wrong” and “here is the edit for X” are **forced** to be the same move; reward and oracle machinery can treat inconsistency as a first-class mistake rather than a post-hoc judgment.
 
 ### Transitions
 
-One environment step does the following:
-
-1. Parse the model output into structured think and patch objects.
-2. Validate the patch format and search/replace anchors.
-3. Simulate and apply the patch only if it is safe.
-4. Run the target test repeatedly.
-5. Measure pass-rate movement and failure distribution.
-6. Compute reward.
-7. Return a new observation with updated history.
-
-This is what makes the environment useful for RL: the agent does not get credit for saying the right thing. It gets credit for changing execution behavior.
+A **`step`** walks that move from intent to evidence. The harness **parses** the model output into structured think and patch objects, then runs **validation**: format, anti-hack checks, simulation, and the syntax/compile passes described earlier. Only if the patch survives does the environment **apply** it atomically and **re-run** the target test the configured number of times. From those runs it updates **pass rate**, **failure entropy**, and related statistics, folds everything into **`compute_verifiable_reward`**, and finally **returns** the next observation with refreshed history. The transition is therefore not “append chat”; it is **measure whether execution changed**. That is why RL here is meaningful: fluent diagnosis without a behavioral delta burns budget without earning the central part of the reward.
 
 ### Reward
 
-The reward is multi-signal and verifiable.
-
-Important components include:
-
-- **Format reward**: Did the model emit valid structured think and patch fields?
-- **Compile/apply reward**: Did the patch apply cleanly and keep Python syntax valid?
-- **Stability reward**: Did repeated test pass rate improve?
-- **Causal proximity reward**: Did the patch touch code near the failure frontier or call chain?
-- **Failure entropy reward**: Did chaotic failure modes collapse into a more stable pattern?
-- **Anti-hack penalty**: Did the patch try to skip tests, weaken assertions, add sleeps, or swallow exceptions?
-- **Regression penalty**: Did the patch break neighboring behavior?
-- **Reasoning consistency reward**: Did the stated root cause match the kind of edit made?
-- **Terminal bonus**: Did the target test reach fully stable repeated passes?
-
-The most important design choice is that pass-rate improvement is central, but it is not alone. Without patch validation and anti-hack penalties, the model could learn bad shortcuts. Without stability reward, it could learn pretty JSON that does not fix anything.
+**`compute_verifiable_reward`** is deliberately **multi-signal** so no single loophole dominates. **Format** credit rewards a well-formed action schema. **Compile and apply** terms align with the validator: the tree must remain legal Python and the edit must be real. **Stability**—movement in **repeated pass rate**—sits at the center, because fixing a flaky test means changing outcomes across runs, not winning once. **Causal proximity** nudges edits toward the failure frontier and call chain; **failure entropy** rewards calmer, less chaotic failure modes when things are still red. **Anti-hack** and **regression** terms punish skips, gutted assertions, sleeps, swallowed exceptions, and collateral damage. **Reasoning consistency** ties the oracle’s view of claims and patches into the scalar signal, and a **terminal bonus** marks when the target test reaches **stable** repeated passes. Pass-rate improvement remains the spine of the objective, but the flanking terms exist so the policy cannot trade the whole problem for **pretty JSON** or **syntax repair**—it has to earn its green runs without hacking the meaning of the test.
 
 ---
 

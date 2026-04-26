@@ -43,6 +43,7 @@ tags:
 10. [Verifiable reward system](#10-verifiable-reward-system)
 11. [OpenEnv config and commands](#11-openenv-config-and-commands)
 12. [Build, run, and test locally](#12-build-run-and-test-locally)
+   - [Inference log (`outputs/inference.log`)](#inference-log-outputsinferencelog)
 13. [Deploy on Hugging Face Spaces](#13-deploy-on-hugging-face-spaces)
 14. [RL training (Unsloth, curriculum)](#14-rl-training-unsloth-curriculum)
 15. [Repository layout](#15-repository-layout)
@@ -381,6 +382,377 @@ If you run from a source checkout without installing, set `PYTHONPATH` to the re
 
 **Image build** uses `server/Dockerfile` (see top of that file for `HEALTHCHECK` and `uvicorn` entrypoint).
 
+### Inference log (`outputs/inference.log`)
+
+Running **`python inference.py`** (with your usual args for repo path, test id, and model) appends **structured episode logs** to **`outputs/inference.log`** (see `inference.py`: the logger is created with that path). The same run also **prints the full episode result as JSON** to stdout when the script finishes, so you can copy a trajectory for post-mortems. That JSON is the in-memory `episode_result` from `run_episode`: `trajectory` (per-step think/patch/reward), `total_reward`, `final_pass_rate`, and `done_reason`.
+
+**Example: bad policy on a queue-under-load / concurrency case.** The episode below is from a run against a **small worker-pool** fixture (flaky test exercising **`WorkerPool`** and **`QUEUE_CAPACITY`** in `source.py`, in the same family as `test_repos/moderate_load_jitter_flaky`—concurrent submissions vs a tight queue). The model repeatedly **raises queue capacity** and insists the root cause is “small capacity → false failures,” but **pass rate never moves off zero** and the session ends on **`regression_detected`**.
+
+**Why the agent is poor here (reward-aligned):**
+
+- **Patch quality:** Step 1 replaces `QUEUE_CAPACITY = 5` with `WorkerPool.QUEUE_CAPACITY = 10` in a way that is **not a valid or stable edit** to the class body (the breakdown still shows `compile` 1.0 in some steps, but the trajectory illustrates **fuzzy/fragile** edits and later `patch_applied: false` when search text no longer matches). The policy **fixates** on a single knob instead of the actual failure mode the tests encode.
+- **No measurable improvement:** `pass_rate` is **0.0** every step, so the environment never sees **stability** improve; that keeps **`stability` negative** and exposes **regression** risk when the patch moves the code away from the reference behavior.
+- **Reasoning not grounded in execution:** **Oracle / reasoning** terms (`oracle_reasoning`, and related breakdown fields) stay negative: the high-confidence **concurrency** narrative does not match what **pytest** can verify, so the verifiable stack punishes “sounds right but isn’t” claims.
+- **Repetition without learning:** `think_history` turns negative in later steps—similar claims and the same class of capacity tweak yield **increasingly wasteful** trajectories.
+- **Outcome:** **`total_reward`: -24.55**, **`done_reason`:** `regression_detected`, after eight steps still at **`final_pass_rate`: 0.0**. This is exactly the kind of run you want the reward to make **unattractive** for training or evaluation: confident language, **no** pass-rate lift, and **guardrail** terms firing.
+
+```json
+{
+  "trajectory": [
+    {
+      "step": 1,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool\", \"polarity\": \"present\", \"reason\": \"small capacity causes false positives during concurrent load\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nQUEUE_CAPACITY = 5\n=======\nWorkerPool.QUEUE_CAPACITY = 10\n>>>>>>> REPLACE",
+      "patch_applied": true,
+      "reward": -3.55,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": 1.0,
+        "stability": -1.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.5,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": -1.0,
+        "patch_validation": 0.2,
+        "noop_patch": 0.0,
+        "think_history": 0.0,
+        "terminal_bonus": 0.0,
+        "total": -3.55
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 2,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool\", \"polarity\": \"present\", \"reason\": \"small queue capacity causes false positives during concurrent load\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 10\n=======\nWorkerPool.QUEUE_CAPACITY = 50\n>>>>>>> REPLACE",
+      "patch_applied": true,
+      "reward": -3.8,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": 1.0,
+        "stability": -1.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.5,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": -1.0,
+        "patch_validation": 0.2,
+        "noop_patch": 0.0,
+        "think_history": -0.25,
+        "terminal_bonus": 0.0,
+        "total": -3.8
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 3,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool\", \"polarity\": \"present\", \"reason\": \"small capacity leads to false queue-full reports\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 50\n=======\nWorkerPool.QUEUE_CAPACITY = 100\n>>>>>>> REPLACE",
+      "patch_applied": true,
+      "reward": -3.8,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": 1.0,
+        "stability": -1.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.5,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": -1.0,
+        "patch_validation": 0.2,
+        "noop_patch": 0.0,
+        "think_history": -0.25,
+        "terminal_bonus": 0.0,
+        "total": -3.8
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 4,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool\", \"polarity\": \"present\", \"reason\": \"small queue capacity leads to false positives during concurrent load\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 100\n=======\nWorkerPool.QUEUE_CAPACITY = 500\n>>>>>>> REPLACE",
+      "patch_applied": true,
+      "reward": -3.8,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": 1.0,
+        "stability": -1.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.5,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": -1.0,
+        "patch_validation": 0.2,
+        "noop_patch": 0.0,
+        "think_history": -0.25,
+        "terminal_bonus": 0.0,
+        "total": -3.8
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 5,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool.__init__\", \"polarity\": \"present\", \"reason\": \"smaller capacity leads to more frequent failures\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 500\n=======\nWorkerPool.QUEUE_CAPACITY = 1000\n>>>>>>> REPLACE",
+      "patch_applied": false,
+      "reward": -1.0,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": -0.5,
+        "stability": 0.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.0,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": 0.0,
+        "patch_validation": 0.0,
+        "noop_patch": 0.0,
+        "think_history": 0.0,
+        "terminal_bonus": 0.0,
+        "total": -1.0
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 6,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool.__init__\", \"polarity\": \"present\", \"reason\": \"smaller capacity leads to more frequent failures\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 500\n=======\nWorkerPool.QUEUE_CAPACITY = 1000\n>>>>>>> REPLACE",
+      "patch_applied": false,
+      "reward": -1.0,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": -0.5,
+        "stability": 0.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.0,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": 0.0,
+        "patch_validation": 0.0,
+        "noop_patch": 0.0,
+        "think_history": 0.0,
+        "terminal_bonus": 0.0,
+        "total": -1.0
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 7,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool\", \"polarity\": \"present\", \"reason\": \"small capacity causes false queue-full reports\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 500\n=======\nWorkerPool.QUEUE_CAPACITY = 1000\n>>>>>>> REPLACE",
+      "patch_applied": true,
+      "reward": -3.8,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": 1.0,
+        "stability": -1.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.5,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": -1.0,
+        "patch_validation": 0.2,
+        "noop_patch": 0.0,
+        "think_history": -0.25,
+        "terminal_bonus": 0.0,
+        "total": -3.8
+      },
+      "pass_rate": 0.0,
+      "done": false
+    },
+    {
+      "step": 8,
+      "predicted_category": "concurrency",
+      "predicted_confidence": 0.9,
+      "think_text": "{\"claims\": [{\"category\": \"concurrency\", \"entity\": \"QUEUE_CAPACITY\", \"location\": \"source.py::WorkerPool\", \"polarity\": \"present\", \"reason\": \"small queue capacity causes false positives during concurrent load\"}], \"confidence\": 0.9}",
+      "patch_text": "--- source.py\n<<<<<<< SEARCH\nWorkerPool.QUEUE_CAPACITY = 1000\n=======\nWorkerPool.QUEUE_CAPACITY = 5000\n>>>>>>> REPLACE",
+      "patch_applied": true,
+      "reward": -3.8,
+      "reward_breakdown": {
+        "format": 1.0,
+        "compile": 1.0,
+        "stability": -1.0,
+        "causal_proximity": 0.0,
+        "failure_entropy": 0.5,
+        "anti_hack": 0.0,
+        "regression": -1.5,
+        "reasoning_consistency": 0.0,
+        "oracle_reasoning": -1.0,
+        "patch_validation": 0.2,
+        "noop_patch": 0.0,
+        "think_history": -0.25,
+        "terminal_bonus": 0.0,
+        "total": -3.8
+      },
+      "pass_rate": 0.0,
+      "done": true
+    }
+  ],
+  "total_reward": -24.55,
+  "steps": 8,
+  "final_pass_rate": 0.0,
+  "done_reason": "regression_detected",
+  "reward_breakdown_history": [
+    {
+      "format": 1.0,
+      "compile": 1.0,
+      "stability": -1.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.5,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": -1.0,
+      "patch_validation": 0.2,
+      "noop_patch": 0.0,
+      "think_history": 0.0,
+      "terminal_bonus": 0.0,
+      "total": -3.55
+    },
+    {
+      "format": 1.0,
+      "compile": 1.0,
+      "stability": -1.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.5,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": -1.0,
+      "patch_validation": 0.2,
+      "noop_patch": 0.0,
+      "think_history": -0.25,
+      "terminal_bonus": 0.0,
+      "total": -3.8
+    },
+    {
+      "format": 1.0,
+      "compile": 1.0,
+      "stability": -1.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.5,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": -1.0,
+      "patch_validation": 0.2,
+      "noop_patch": 0.0,
+      "think_history": -0.25,
+      "terminal_bonus": 0.0,
+      "total": -3.8
+    },
+    {
+      "format": 1.0,
+      "compile": 1.0,
+      "stability": -1.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.5,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": -1.0,
+      "patch_validation": 0.2,
+      "noop_patch": 0.0,
+      "think_history": -0.25,
+      "terminal_bonus": 0.0,
+      "total": -3.8
+    },
+    {
+      "format": 1.0,
+      "compile": -0.5,
+      "stability": 0.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.0,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": 0.0,
+      "patch_validation": 0.0,
+      "noop_patch": 0.0,
+      "think_history": 0.0,
+      "terminal_bonus": 0.0,
+      "total": -1.0
+    },
+    {
+      "format": 1.0,
+      "compile": -0.5,
+      "stability": 0.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.0,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": 0.0,
+      "patch_validation": 0.0,
+      "noop_patch": 0.0,
+      "think_history": 0.0,
+      "terminal_bonus": 0.0,
+      "total": -1.0
+    },
+    {
+      "format": 1.0,
+      "compile": 1.0,
+      "stability": -1.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.5,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": -1.0,
+      "patch_validation": 0.2,
+      "noop_patch": 0.0,
+      "think_history": -0.25,
+      "terminal_bonus": 0.0,
+      "total": -3.8
+    },
+    {
+      "format": 1.0,
+      "compile": 1.0,
+      "stability": -1.0,
+      "causal_proximity": 0.0,
+      "failure_entropy": 0.5,
+      "anti_hack": 0.0,
+      "regression": -1.5,
+      "reasoning_consistency": 0.0,
+      "oracle_reasoning": -1.0,
+      "patch_validation": 0.2,
+      "noop_patch": 0.0,
+      "think_history": -0.25,
+      "terminal_bonus": 0.0,
+      "total": -3.8
+    }
+  ]
+}
+```
+
 ---
 
 ## 13. Deploy on Hugging Face Spaces
@@ -452,6 +824,7 @@ python -m training.train_grpo --model Qwen/Qwen2.5-7B-Instruct --max-episodes 50
 | `server/docker_runner.py` | pytest / Docker test execution |
 | `agent/unified_agent.py` | JSON-first agent and prompts |
 | `client.py` | Remote HTTP client example |
+| `inference.py` | LLM-driven episodes; logs to `outputs/inference.log`, prints final JSON |
 | `training/` | GRPO and curriculum |
 
 
