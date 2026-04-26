@@ -29,14 +29,16 @@ Architecture
 
 Default hyperparameters (``--help`` overrides)
 ----------------------------------------------
-Tuned for **~2.5 hour wall-clock** with real env execution:
+Tuned for **~1.5 hour wall-clock** with real env execution:
 
-  - **batch_size=4**: repos per step, processed in parallel threads.
+  - **batch_size=6**: repos per step, processed in parallel threads (compensates for stable-rejected repos).
   - **G=3**: 3 rollouts per prompt → fewer pytest invocations per step.
-  - **num_runs=3**: pytest passes per env.step (enough for pass-rate signal).
+  - **num_runs=10**: pytest passes per env.step (good balance of speed + signal).
+  - **Preflight**: 3 quick + 5 confirm (fast yet reliable flaky detection).
   - **LoRA rank 64**: faster forward-backward than 128.
   - **max_completion_tokens=1024**: faster sampling.
-  - **max_steps=60**: ~2–2.5 min/step → fits in 2.5h. Step-0 ETA printed.
+  - **max_steps=90**: ~50s/step with num_runs=10 → fits in ~1.5h. Step-0 ETA printed.
+  - **25 repos**: curated IDoFT set (1 per unique project where duplicates existed).
 
 Requirements
 ------------
@@ -124,9 +126,9 @@ COMPACT_TEST_CHARS = 1000
 SAMPLE_TEMPERATURE = 0.85
 SAMPLE_TOP_P = 0.98
 ADAM_WEIGHT_DECAY = 0.01
-ENV_NUM_RUNS = 3
-PREFLIGHT_QUICK = 2
-PREFLIGHT_CONFIRM = 2
+ENV_NUM_RUNS = 10
+PREFLIGHT_QUICK = 3
+PREFLIGHT_CONFIRM = 5
 ROLLOUT_PREFLIGHT_QUICK = 1
 ROLLOUT_PREFLIGHT_CONFIRM = 1
 
@@ -263,8 +265,8 @@ def _rollout_one(
 
 async def run_grpo_training(
     *,
-    max_steps: int = 60,
-    batch_size: int = 4,
+    max_steps: int = 90,
+    batch_size: int = 6,
     group_size: int = GROUP_SIZE,
     learning_rate: float = 6e-5,
     lora_rank: int = LORA_RANK,
@@ -551,7 +553,7 @@ async def run_grpo_training(
             est_h = elapsed * max_steps / 3600.0
             print(
                 f"  [TIME] ~{elapsed:.0f}s/step -> ~{est_h:.1f}h for {max_steps} steps. "
-                f"Tune --max-steps to land near 2.5h.",
+                f"Tune --max-steps to land in 1.5h budget.",
                 flush=True,
             )
 
@@ -671,12 +673,12 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--max-steps", type=int, default=60,
-        help="Optimizer steps (~2-2.5 min each with real env; 60 ~ 2.5h).",
+        "--max-steps", type=int, default=90,
+        help="Optimizer steps (~45-55s each with num_runs=10; 90 ~ 1.5h).",
     )
     p.add_argument(
-        "--batch-size", type=int, default=4,
-        help="Repos per step (processed in parallel threads). More = slower step.",
+        "--batch-size", type=int, default=6,
+        help="Repos per step (processed in parallel threads). 6 compensates for stable-rejected repos.",
     )
     p.add_argument(
         "--group-size", type=int, default=GROUP_SIZE,
@@ -684,7 +686,7 @@ def main() -> None:
     )
     p.add_argument(
         "--num-runs", type=int, default=ENV_NUM_RUNS,
-        help="Pytest runs per env.step (pass-rate precision). 3 is fast + reliable.",
+        help="Pytest runs per env.step (pass-rate precision). 10 balances speed + signal.",
     )
     p.add_argument(
         "--learning-rate", type=float, default=6e-5,
@@ -705,7 +707,7 @@ def main() -> None:
         help="Max new tokens per completion.",
     )
     p.add_argument(
-        "--checkpoint-every", type=int, default=15,
+        "--checkpoint-every", type=int, default=20,
         help="Save Tinker training state every N steps (0 = disable).",
     )
     p.add_argument("--curriculum-root", default="seed_repos/idoft")
