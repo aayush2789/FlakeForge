@@ -29,6 +29,10 @@ class DockerTestRunner:
         self.repo_path = Path(repo_path)
         self.use_docker_image = os.getenv("USE_DOCKER_IMAGE", "0").strip().lower() in {"1", "true", "yes"}
         self.local_image_name = os.getenv("LOCAL_IMAGE_NAME", "flakeforge-env:latest").strip() or "flakeforge-env:latest"
+        self.pytest_timeout_seconds = int(os.getenv("FF_PYTEST_TIMEOUT_SECONDS", "20") or "20")
+        self._deps_checked = False
+        self._deps_ready = False
+        self._deps_error = ""
         self._docker_checked = False
         self._docker_available = False
         self._docker_unavailable_reason = ""
@@ -80,6 +84,64 @@ class DockerTestRunner:
     def _pytest_cmd(self, test_id: str) -> List[str]:
         return ["pytest", test_id, "--tb=short", "-q", "--no-header"]
 
+    def _deps_marker_path(self) -> Path:
+        return self.repo_path / ".flakeforge_deps_ready"
+
+    def _ensure_local_deps(self) -> bool:
+        """Best-effort install of repo-specific test dependencies (local mode only).
+
+        Many IDoFT repos require dependencies to import modules during pytest
+        collection. Without this, preflight classifies the environment as
+        infra_broken after a single sanity run.
+        """
+        if self._deps_checked:
+            return self._deps_ready
+
+        self._deps_checked = True
+        marker = self._deps_marker_path()
+        if marker.exists():
+            self._deps_ready = True
+            return True
+
+        try:
+            # Always ensure pytest exists in the active environment.
+            base_cmds: list[list[str]] = [
+                ["python", "-m", "pip", "install", "-q", "pytest"],
+            ]
+
+            # Install project deps if present. Prefer requirements.txt for speed.
+            requirements = self.repo_path / "requirements.txt"
+            pyproject = self.repo_path / "pyproject.toml"
+            setup_py = self.repo_path / "setup.py"
+
+            if requirements.exists():
+                base_cmds.append(["python", "-m", "pip", "install", "-q", "-r", "requirements.txt"])
+            elif pyproject.exists() or setup_py.exists():
+                # Editable install makes imports work for most repos.
+                base_cmds.append(["python", "-m", "pip", "install", "-q", "-e", "."])
+
+            for cmd in base_cmds:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=self.repo_path,
+                    timeout=300,
+                )
+                if proc.returncode != 0:
+                    self._deps_ready = False
+                    combined = f"{proc.stdout}\n{proc.stderr}".strip()
+                    self._deps_error = (combined or "dependency install failed")[-800:]
+                    return False
+
+            marker.write_text("ok\n", encoding="utf-8")
+            self._deps_ready = True
+            return True
+        except Exception as exc:
+            self._deps_ready = False
+            self._deps_error = f"{type(exc).__name__}: {exc}"
+            return False
+
     def _run_local_pytest(self, test_id: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             self._pytest_cmd(test_id),
@@ -109,14 +171,24 @@ class DockerTestRunner:
             cwd=self.repo_path,
         )
 
-    def run_test(self, test_id: str, timeout_seconds: int = 5) -> RunRecord:
+    def run_test(self, test_id: str, timeout_seconds: int | None = None) -> RunRecord:
         start = time.perf_counter()
+        timeout_seconds = int(timeout_seconds or self.pytest_timeout_seconds)
         try:
             if self.use_docker_image and self._ensure_docker_available():
                 proc = self._run_docker_pytest(test_id, timeout_seconds)
             else:
                 if self.use_docker_image:
                     self._maybe_warn_docker_unavailable()
+                if not self._ensure_local_deps():
+                    duration_ms = int((time.perf_counter() - start) * 1000)
+                    return RunRecord(
+                        passed=False,
+                        duration_ms=duration_ms,
+                        error_type="ImportError",
+                        error_message="dependency_install_failed",
+                        stderr_excerpt=(self._deps_error or "")[-500:],
+                    )
                 proc = self._run_local_pytest(test_id, timeout_seconds)
             duration_ms = int((time.perf_counter() - start) * 1000)
             output = f"{proc.stdout}\n{proc.stderr}".strip()
