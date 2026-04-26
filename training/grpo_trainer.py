@@ -712,6 +712,8 @@ class OnlineGRPOLoop:
         num_runs: int = 6,
         max_env_steps: int = 1,
         use_chat_template: bool = True,
+        compact_prompt: bool = True,
+        system_prompt: Optional[str] = None,
         runner_factory: Optional[Any] = None,
         wandb_run: Any = None,
         log_every: int = 1,
@@ -737,12 +739,16 @@ class OnlineGRPOLoop:
         self.num_runs = int(num_runs)
         self.max_env_steps = int(max_env_steps)
         self.use_chat_template = bool(use_chat_template)
+        self.compact_prompt = bool(compact_prompt)
         self.runner_factory = runner_factory
         self.wandb_run = wandb_run
         self.log_every = int(log_every)
         self.checkpoint_every = int(checkpoint_every)
         self.env_preflight_quick_runs = int(env_preflight_quick_runs)
         self.env_preflight_confirm_runs = int(env_preflight_confirm_runs)
+
+        # Small-model friendly system prompt (matches training/train_grpo_tinker.py)
+        self.system_prompt = system_prompt or _COMPACT_SYSTEM_PROMPT
 
         self.device = next(model.parameters()).device
 
@@ -900,22 +906,28 @@ class OnlineGRPOLoop:
         )
 
     def _build_prompt(self, observation: Any) -> str:
-        try:
-            from agent.unified_agent import build_unified_prompt, UNIFIED_SYSTEM_PROMPT
-        except ImportError:
-            from ..agent.unified_agent import build_unified_prompt, UNIFIED_SYSTEM_PROMPT  # type: ignore[no-redef]
+        if self.compact_prompt:
+            user_body = _compact_observation_from_env_observation(observation)
+            sys_prompt = self.system_prompt
+        else:
+            try:
+                from agent.unified_agent import build_unified_prompt, UNIFIED_SYSTEM_PROMPT
+            except ImportError:
+                from ..agent.unified_agent import build_unified_prompt, UNIFIED_SYSTEM_PROMPT  # type: ignore[no-redef]
+            user_body = build_unified_prompt(observation)
+            sys_prompt = UNIFIED_SYSTEM_PROMPT
 
-        body = build_unified_prompt(observation)
+        user_body = user_body[:3000]
         if self.use_chat_template and hasattr(self.tokenizer, "apply_chat_template"):
             return self.tokenizer.apply_chat_template(
                 [
-                    {"role": "system", "content": UNIFIED_SYSTEM_PROMPT},
-                    {"role": "user", "content": body},
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_body},
                 ],
                 tokenize=False,
                 add_generation_prompt=True,
             )
-        return f"{UNIFIED_SYSTEM_PROMPT}\n\n{body}"
+        return f"{sys_prompt}\n\n{user_body}"
 
     def _tokenize_prompt(self, prompt_text: str) -> Any:
         enc = self.tokenizer(
@@ -1061,3 +1073,58 @@ def _std(values: List[float]) -> float:
         return 0.0
     m = sum(values) / len(values)
     return (sum((v - m) ** 2 for v in values) / len(values)) ** 0.5
+
+
+_COMPACT_SYSTEM_PROMPT = """\
+You are FlakeForge, a debugging agent that fixes flaky Python tests.
+
+Reply with ONE JSON object. No markdown, no XML, no commentary.
+
+Shape:
+{"think":{"claims":[{"category":"<cat>","entity":"<symbol>","location":"<file>::<func>","polarity":"present","reason":"<short>"}],"confidence":0.85},"patch":{"hunks":[{"file":"<path>","search":"<one line from source>","replace":"<fixed line>"}]}}
+
+CATEGORIES (pick ONE):
+async_wait, concurrency, test_order_dependency, resource_leak, shared_state,
+network, platform_dependency, nondeterminism, import_side_effect,
+module_cache_pollution, fixture_scope_leak, mock_residue, unknown.
+
+RULES:
+1. "search" = ONE verbatim line from SOURCE UNDER TEST (same indentation).
+2. "replace" keeps the same indentation.
+3. Prefer the smallest fix. No sleep(), no retry, no pytest.mark.skip.
+4. Patch source.py, not the test, unless the bug is in the test itself.
+5. If unsure, set confidence < 0.3 and return empty hunks.
+"""
+
+
+def _compact_observation_from_env_observation(observation: Any) -> str:
+    """Compact observation string (small-model friendly).
+
+    Mirrors `training/train_grpo_tinker.py::build_compact_observation` but uses
+    fields already present in `FlakeForgeObservation` produced by the env.
+    """
+    test_id = str(getattr(observation, "test_identifier", "tests/test_flaky.py") or "tests/test_flaky.py")
+    baseline = float(getattr(observation, "baseline_pass_rate", 0.0) or 0.0)
+    current = float(getattr(observation, "current_pass_rate", 0.0) or 0.0)
+
+    source_under_test = str(getattr(observation, "source_under_test", "") or "")[:1200]
+    test_src = str(getattr(observation, "test_function_source", "") or "")[:800]
+    trace = str(getattr(observation, "failing_stack_trace", "") or "")
+    trace = trace[-600:] if trace else ""
+
+    parts: List[str] = [
+        "=== TASK ===",
+        f"Test: {test_id}",
+        f"Pass rate: baseline={baseline:.2f}  current={current:.2f}  goal=1.00",
+        "",
+    ]
+    if source_under_test.strip():
+        parts += ["=== SOURCE UNDER TEST ===", source_under_test, ""]
+    if test_src.strip():
+        parts += ["=== TEST FUNCTION ===", test_src, ""]
+    if trace.strip():
+        parts += ["=== LAST FAILURE (tail) ===", trace, ""]
+    parts += [
+        'Reply with ONE JSON object: {"think": {...}, "patch": {...}}',
+    ]
+    return "\n".join(parts)

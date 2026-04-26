@@ -443,27 +443,27 @@ def _read_root_cause_source(repo_path: Path, manifest: Dict[str, Any], max_chars
 
 
 def _render_prompt_from_manifest(manifest: Dict[str, Any], repo_dir: Path) -> str:
-    """Render an observation-style prompt without spinning up the environment.
+    """Render a compact observation prompt (small-model friendly).
 
-    The result mirrors the layout of :func:`agent.unified_agent.build_unified_prompt`
-    closely enough that a model fine-tuned on these prompts will recognise the
-    real env prompts at evaluation time.
+    This intentionally mirrors the compact prompt used in `train_grpo_tinker.py`:
+    - short sections (TASK / SOURCE UNDER TEST / TEST FUNCTION)
+    - tight caps on file contents
+    - single-line instruction to emit ONE JSON object
     """
     test_id = (
         manifest.get("flaky_test_path")
         or manifest.get("test_identifier")
         or "tests/test_flaky.py"
     )
-    test_src = _read_test_source(repo_dir, test_id)
-    src_under_test = _read_root_cause_source(repo_dir, manifest)
+    test_src = _read_test_source(repo_dir, test_id, max_chars=800)
+    src_under_test = _read_root_cause_source(repo_dir, manifest, max_chars=1200)
     category = str(manifest.get("flake_category") or manifest.get("category") or "unknown").lower()
     difficulty = str(manifest.get("difficulty") or "medium").lower()
 
     parts: List[str] = []
     parts.append("=== TASK ===")
-    parts.append(f"Test:       {test_id}")
-    parts.append("Step:       1 of 1")
-    parts.append("Pass rate:  baseline=0.00  current=0.00  goal=1.00")
+    parts.append(f"Test: {test_id}")
+    parts.append("Pass rate: baseline=0.00  current=0.00  goal=1.00")
     parts.append("")
     if src_under_test:
         parts.append("=== SOURCE UNDER TEST ===")
@@ -471,29 +471,11 @@ def _render_prompt_from_manifest(manifest: Dict[str, Any], repo_dir: Path) -> st
         parts.append("")
     if test_src:
         parts.append("=== TEST FUNCTION ===")
-        parts.append(test_src[:1000])
+        parts.append(test_src[:800])
         parts.append("")
-    parts.append("=== SCENARIO GUIDE (do this now) ===")
-    # Mock observation for scenario_hints
-    obs = FlakeForgeObservation(
-        test_identifier=test_id,
-        step=0,
-        steps_remaining=1,
-        baseline_pass_rate=0.0,
-        current_pass_rate=0.0,
-        think_history=[],
-        patches_applied=[],
-    )
-    parts.extend(scenario_hints(obs))
+    parts.append(f"Likely root cause: {category} (difficulty: {difficulty})")
     parts.append("")
-
-    parts.append(CATEGORY_CHEATSHEET)
-    parts.append("")
-
-    parts.append("=== YOUR TURN ===")
-    parts.append("Reply with ONE JSON object. No markdown, no XML, no commentary.")
-    parts.append("Single-line example shape (do NOT copy values, just the structure):")
-    parts.append(UNIFIED_EXAMPLE_JSON)
+    parts.append('Reply with ONE JSON object: {"think": {...}, "patch": {...}}')
     return "\n".join(parts)
 
 
