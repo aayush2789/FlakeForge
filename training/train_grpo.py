@@ -118,6 +118,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-seq-length", type=int, default=4096)
     p.add_argument("--max-prompt-length", type=int, default=3072)
     p.add_argument("--max-new-tokens", type=int, default=1024)
+    p.add_argument("--compact-prompt", dest="compact_prompt", action="store_true", default=True,
+                   help="Use the small-model prompt style (like train_grpo_tinker.py).")
+    p.add_argument("--full-prompt", dest="compact_prompt", action="store_false",
+                   help="Use the full unified_agent prompt (bigger, more rules).")
 
     p.add_argument("--load-in-4bit", dest="load_in_4bit", type=_str2bool, default=True)
     p.add_argument("--no-load-in-4bit", dest="load_in_4bit", action="store_false")
@@ -257,6 +261,7 @@ def run_online(args: argparse.Namespace, model: Any, tokenizer: Any, wandb_run: 
         checkpoint_every=args.checkpoint_every,
         env_preflight_quick_runs=args.env_quick_runs,
         env_preflight_confirm_runs=args.env_confirm_runs,
+        compact_prompt=args.compact_prompt,
     )
     summary = loop.train(max_episodes=args.max_online_episodes)
 
