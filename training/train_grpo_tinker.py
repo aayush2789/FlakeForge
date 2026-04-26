@@ -482,7 +482,8 @@ async def run_grpo_training(
 
     # ── 4. GRPO training loop ─────────────────────────────────────────────
     metrics_history: List[Dict[str, Any]] = []
-    rejected_case_ids: set = set()
+    COOLDOWN_STEPS = 5
+    reject_until: Dict[str, int] = {}
 
     for step in range(max_steps):
         t0 = time.time()
@@ -497,7 +498,7 @@ async def run_grpo_training(
             if c is None:
                 continue
             cid = c.get("case_id") or str(c.get("repo_path", ""))
-            if cid in seen_ids or cid in rejected_case_ids:
+            if cid in seen_ids or reject_until.get(cid, 0) > step:
                 continue
             seen_ids.add(cid)
             cases.append(c)
@@ -528,14 +529,14 @@ async def run_grpo_training(
             else:
                 cid = cases[i].get("case_id") or str(cases[i].get("repo_path", ""))
                 if cid:
-                    rejected_case_ids.add(cid)
+                    reject_until[cid] = step + COOLDOWN_STEPS
 
         if not envs:
-            n_rejected = len(rejected_case_ids)
+            n_cooling = sum(1 for v in reject_until.values() if v > step)
             n_total = sum(len(s.cases) for s in scheduler.stages)
             print(
                 f"Step {step:3d} | SKIP (all resets failed/rejected) "
-                f"[blacklisted {n_rejected}/{n_total} repos]",
+                f"[cooling {n_cooling}/{n_total} repos]",
                 flush=True,
             )
             continue
@@ -650,10 +651,7 @@ async def run_grpo_training(
             fwd_bwd_result = await fwd_bwd.result_async()
             optim = await training_client.optim_step_async(adam_params)
             await optim.result_async()
-            if fwd_bwd_result.metrics:
-                loss_val = next(iter(fwd_bwd_result.metrics.values()), None)
-            if step < 3:
-                print(f"  [DEBUG] fwd_bwd metrics={fwd_bwd_result.metrics}", flush=True)
+            loss_val = fwd_bwd_result.metrics.get("loss:sum")
 
         # ── 4g. Logging ──────────────────────────────────────────────────
         elapsed = time.time() - t0

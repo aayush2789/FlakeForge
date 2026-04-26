@@ -42,7 +42,7 @@ except ImportError:
         import logging
         get_logger = lambda n, **kw: logging.getLogger(n)
 
-logger = get_logger(__name__)
+logger = get_logger(__name__, log_file=Path("outputs/inference.log"))
 
 if load_dotenv is not None:
     load_dotenv()
