@@ -493,4 +493,4 @@ The long-term vision is an agent that does not merely silence flaky tests, but r
 
 ---
 
-[GITHUB_LINK](https://github.com//aayush2789/FlakeForge/FLAKEFORGE_WRITEUP.md)
+[GITHUB_LINK](https://github.com//aayush2789/FlakeForge)
