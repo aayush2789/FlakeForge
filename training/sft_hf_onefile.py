@@ -436,9 +436,12 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
 
     rel = str(target.relative_to(repo_dir)).replace("\\", "/")
 
-    def one(search: str, replace: str) -> List[Dict[str, str]]:
-        if search in src and replace:
-            return [{"file": rel, "search": search, "replace": replace}]
+    def one(search_line: str, replace_block: str) -> List[Dict[str, str]]:
+        """Create a single hunk. `search_line` must match exact line text (including indentation)."""
+        if not replace_block:
+            return []
+        if search_line in src:
+            return [{"file": rel, "search": search_line, "replace": replace_block}]
         return []
 
     if category == "shared_state":
@@ -455,7 +458,7 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
     if category == "concurrency":
         # Add a lock + wrap read-modify-write in a critical section (synthetic counter template).
         hunks: List[Dict[str, str]] = []
-        lock_hunk = one("# Bug: no lock protecting _value", "        self._lock = threading.Lock()")
+        lock_hunk = one("        # Bug: no lock protecting _value", "        self._lock = threading.Lock()")
         if lock_hunk:
             hunks.extend(lock_hunk)
         # Wrap increment.
@@ -468,8 +471,10 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
         return hunks
     if category == "import_side_effect":
         # Guard import-time registration so it doesn't accumulate.
-        return one("_auto_register()  # Bug: runs every time module is imported/reloaded",
-                   "if not _plugins:\n    _auto_register()  # guarded auto-register")
+        return one(
+            "_auto_register()  # Bug: runs every time module is imported/reloaded",
+            "if not _plugins:\n    _auto_register()  # guarded auto-register",
+        )
     if category == "test_order_dependency":
         # Hard to safely generalize across templates; skip by default.
         return []
