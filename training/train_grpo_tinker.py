@@ -29,13 +29,14 @@ Architecture
 
 Default hyperparameters (``--help`` overrides)
 ----------------------------------------------
-Tuned for **~3–3.5 hour wall-clock** with real env execution:
+Tuned for **~2.5 hour wall-clock** with real env execution:
 
-  - **batch_size=4**: fewer repos per step → parallelized env work stays fast.
-  - **G=4**: fewer rollouts per prompt → fewer pytest invocations per step.
-  - **num_runs=4**: pytest passes per env.step (enough for pass-rate signal).
-  - **Preflight**: fast (2 quick + 2 confirm first reset; 1+1 for rollout resets).
-  - **max_steps=80**: ~2–2.5 min/step → fits in 3h. Step-0 ETA printed.
+  - **batch_size=4**: repos per step, processed in parallel threads.
+  - **G=3**: 3 rollouts per prompt → fewer pytest invocations per step.
+  - **num_runs=3**: pytest passes per env.step (enough for pass-rate signal).
+  - **LoRA rank 64**: faster forward-backward than 128.
+  - **max_completion_tokens=1024**: faster sampling.
+  - **max_steps=60**: ~2–2.5 min/step → fits in 2.5h. Step-0 ETA printed.
 
 Requirements
 ------------
@@ -114,16 +115,16 @@ except ImportError:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 TINKER_MODEL_ID = "Qwen/Qwen3-8B"
-LORA_RANK = 128
-GROUP_SIZE = 4
-MAX_COMPLETION_TOKENS = 1200
-COMPACT_USER_MAX_CHARS = 4000
-COMPACT_SOURCE_CHARS = 2000
-COMPACT_TEST_CHARS = 1200
+LORA_RANK = 64
+GROUP_SIZE = 3
+MAX_COMPLETION_TOKENS = 1024
+COMPACT_USER_MAX_CHARS = 3500
+COMPACT_SOURCE_CHARS = 1800
+COMPACT_TEST_CHARS = 1000
 SAMPLE_TEMPERATURE = 0.85
 SAMPLE_TOP_P = 0.98
 ADAM_WEIGHT_DECAY = 0.01
-ENV_NUM_RUNS = 4
+ENV_NUM_RUNS = 3
 PREFLIGHT_QUICK = 2
 PREFLIGHT_CONFIRM = 2
 ROLLOUT_PREFLIGHT_QUICK = 1
@@ -262,10 +263,10 @@ def _rollout_one(
 
 async def run_grpo_training(
     *,
-    max_steps: int = 80,
+    max_steps: int = 60,
     batch_size: int = 4,
     group_size: int = GROUP_SIZE,
-    learning_rate: float = 5e-5,
+    learning_rate: float = 6e-5,
     lora_rank: int = LORA_RANK,
     num_runs: int = ENV_NUM_RUNS,
     curriculum_root: str = "seed_repos/idoft",
@@ -276,7 +277,7 @@ async def run_grpo_training(
     top_p: float = SAMPLE_TOP_P,
     max_completion_tokens: int = MAX_COMPLETION_TOKENS,
     weight_decay: float = ADAM_WEIGHT_DECAY,
-    checkpoint_every: int = 20,
+    checkpoint_every: int = 15,
 ) -> Dict[str, Any]:
     """Run the full GRPO loop: Tinker GPU + local FlakeForge env rewards.
 
@@ -550,7 +551,7 @@ async def run_grpo_training(
             est_h = elapsed * max_steps / 3600.0
             print(
                 f"  [TIME] ~{elapsed:.0f}s/step -> ~{est_h:.1f}h for {max_steps} steps. "
-                f"Tune --max-steps to land near 3-3.5h.",
+                f"Tune --max-steps to land near 2.5h.",
                 flush=True,
             )
 
@@ -670,8 +671,8 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--max-steps", type=int, default=80,
-        help="Optimizer steps (~2-2.5 min each with real env; 80 ~ 3h).",
+        "--max-steps", type=int, default=60,
+        help="Optimizer steps (~2-2.5 min each with real env; 60 ~ 2.5h).",
     )
     p.add_argument(
         "--batch-size", type=int, default=4,
@@ -679,15 +680,15 @@ def main() -> None:
     )
     p.add_argument(
         "--group-size", type=int, default=GROUP_SIZE,
-        help="GRPO group size G -- rollouts per prompt. 4 is fast + enough signal.",
+        help="GRPO group size G -- rollouts per prompt. 3 is fast + enough signal.",
     )
     p.add_argument(
         "--num-runs", type=int, default=ENV_NUM_RUNS,
-        help="Pytest runs per env.step (pass-rate precision). 4 is fast + reliable.",
+        help="Pytest runs per env.step (pass-rate precision). 3 is fast + reliable.",
     )
     p.add_argument(
-        "--learning-rate", type=float, default=5e-5,
-        help="AdamW learning rate.",
+        "--learning-rate", type=float, default=6e-5,
+        help="AdamW learning rate (slightly higher to compensate for fewer steps).",
     )
     p.add_argument(
         "--weight-decay", type=float, default=ADAM_WEIGHT_DECAY,
@@ -704,7 +705,7 @@ def main() -> None:
         help="Max new tokens per completion.",
     )
     p.add_argument(
-        "--checkpoint-every", type=int, default=20,
+        "--checkpoint-every", type=int, default=15,
         help="Save Tinker training state every N steps (0 = disable).",
     )
     p.add_argument("--curriculum-root", default="seed_repos/idoft")
