@@ -646,14 +646,7 @@ def _fetch_diff(pr_url: Optional[str], dest: Path) -> bool:
 def _write_manifest(spec: RepoSpec, dest: Path) -> None:
     manifest = {
         "repo_name": spec.repo_url.rstrip("/").split("/")[-1],
-        "repo_url": spec.repo_url,
-        "sha": spec.sha,
-        "test_identifier": spec.test_path,
-        "flaky_test_path": spec.test_path,
         "flake_category": spec.flake_category,
-        "idoft_category": spec.idoft_category,
-        "difficulty": spec.difficulty,
-        "pr_url": spec.pr_url,
         "root_cause_file": spec.root_cause_file,
         "root_cause_function": spec.root_cause_function
     }

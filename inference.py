@@ -489,7 +489,7 @@ def run_inference(
     test_identifier: str,
     model_name: Optional[str] = None,
     max_steps: Optional[int] = None,
-    num_runs: int = 10,
+    num_runs: int = 20,
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
     verbose: bool = True,
