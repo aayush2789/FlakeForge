@@ -2,7 +2,7 @@
 torch==2.4.0
 torchvision
 torchaudio
---index-url https://download.pytorch.org/whl/cu121
+--extra-index-url https://download.pytorch.org/whl/cu121
 
 # Core training stack
 unsloth[cu121-torch240]@git+https://github.com/unslothai/unsloth.git  # Latest with GRPO support
