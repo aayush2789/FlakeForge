@@ -1126,6 +1126,11 @@ def submit_hf_job(
         f"git clone --depth 1 --branch {shlex.quote(branch)} {shlex.quote(git_url)} /workspace; "
         "cd /workspace; "
         "echo '[JOB] repo HEAD='$(git rev-parse HEAD); "
+        # Global pip constraints for ancient pinned deps on modern Python (py3.11+).
+        # pip honors PIP_CONSTRAINT for *all* installs, including build isolation.
+        "echo 'sympy>=1.10' > /workspace/.flakeforge_global_constraints.txt; "
+        "export PIP_CONSTRAINT=/workspace/.flakeforge_global_constraints.txt; "
+        "echo '[JOB] PIP_CONSTRAINT='${PIP_CONSTRAINT}; "
         "python -m pip install --upgrade pip wheel setuptools; "
         "pip install -r training-requirements.txt; "
         f"python training/sft_hf_onefile.py run {forwarded}"
