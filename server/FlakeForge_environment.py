@@ -836,10 +836,17 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             logger.warning("[ENV] No runner configured — returning synthetic runs")
             return self._synthetic_runs(n)
 
+        try:
+            if hasattr(self.runner, "run_test_n_times"):
+                batch = self.runner.run_test_n_times(self.test_identifier, n)
+                if isinstance(batch, list) and batch:
+                    return batch
+        except Exception as exc:
+            logger.debug("[ENV] run_test_n_times failed, falling back to loop: %s", exc)
+
         results: List[RunRecord] = []
         for _ in range(n):
             try:
-                # DockerTestRunner uses run_test, not run_single
                 result = self.runner.run_test(self.test_identifier)
                 results.append(result)
             except Exception as exc:

@@ -649,7 +649,35 @@ def _ignore_episode_copy(_: str, names: List[str]) -> set[str]:
     return ignored
 
 
-def _materialize_case_repo(case: Dict[str, Any], isolate: bool = True) -> Path:
+def _ensure_case_backup(
+    case: Dict[str, Any],
+    *,
+    backup_root: str | Path,
+    enabled: bool = True,
+) -> Optional[Path]:
+    """Create a one-time immutable backup copy of an original seed repo."""
+    if not enabled:
+        return None
+
+    source = Path(case["repo_path"]).resolve()
+    root = Path(backup_root).expanduser().resolve()
+    backup_path = root / case["case_id"]
+
+    if backup_path.exists():
+        return backup_path
+
+    root.mkdir(parents=True, exist_ok=True)
+    tmp_path = root / f".{case['case_id']}.tmp-{uuid.uuid4().hex[:8]}"
+    shutil.copytree(source, tmp_path, ignore=_ignore_episode_copy)
+    tmp_path.replace(backup_path)
+    return backup_path
+
+
+def _materialize_case_repo(
+    case: Dict[str, Any],
+    isolate: bool = True,
+    backup_path: Optional[Path] = None,
+) -> Path:
     repo_path = Path(case["repo_path"]).resolve()
     if not isolate:
         return repo_path
@@ -659,7 +687,7 @@ def _materialize_case_repo(case: Dict[str, Any], isolate: bool = True) -> Path:
     worktree = episode_root / f"{case['case_id']}-{uuid.uuid4().hex[:8]}"
     if worktree.exists():
         shutil.rmtree(worktree)
-    shutil.copytree(repo_path, worktree, ignore=_ignore_episode_copy)
+    shutil.copytree(backup_path or repo_path, worktree, ignore=_ignore_episode_copy)
     return worktree
 
 
@@ -690,6 +718,8 @@ def run_seed_inference(
     case: Optional[str],
     limit: Optional[int],
     isolate: bool,
+    backup: bool,
+    backup_root: str | Path,
     model_name: Optional[str],
     max_steps: Optional[int],
     num_runs: int,
@@ -701,16 +731,18 @@ def run_seed_inference(
     results: List[Dict[str, Any]] = []
 
     for idx, seed_case in enumerate(cases, start=1):
-        worktree = _materialize_case_repo(seed_case, isolate=isolate)
+        backup_path = _ensure_case_backup(seed_case, backup_root=backup_root, enabled=backup)
+        worktree = _materialize_case_repo(seed_case, isolate=isolate, backup_path=backup_path)
         if verbose:
             logger.info(
-                "[INFERENCE] Seed case %d/%d id=%s category=%s test=%s repo=%s",
+                "[INFERENCE] Seed case %d/%d id=%s category=%s test=%s repo=%s backup=%s",
                 idx,
                 len(cases),
                 seed_case["case_id"],
                 seed_case["flake_category"],
                 seed_case["test_id"],
                 worktree,
+                backup_path or "<disabled>",
             )
 
         try:
@@ -731,6 +763,7 @@ def run_seed_inference(
                 "difficulty": seed_case["difficulty"],
                 "test_id": seed_case["test_id"],
                 "source_repo_path": str(seed_case["repo_path"]),
+                "backup_repo_path": str(backup_path) if backup_path else None,
                 "run_repo_path": str(worktree),
                 "result": result,
             })
@@ -743,6 +776,7 @@ def run_seed_inference(
                 "difficulty": seed_case["difficulty"],
                 "test_id": seed_case["test_id"],
                 "source_repo_path": str(seed_case["repo_path"]),
+                "backup_repo_path": str(backup_path) if backup_path else None,
                 "run_repo_path": str(worktree),
                 "error": type(exc).__name__,
                 "message": str(exc),
@@ -750,6 +784,8 @@ def run_seed_inference(
 
     return {
         "seed_root": str(Path(seed_root).resolve()),
+        "backup_root": str(Path(backup_root).resolve()) if backup else None,
+        "isolated": isolate,
         "count": len(results),
         "results": results,
     }
@@ -771,6 +807,16 @@ def main() -> None:
         "--no-isolation",
         action="store_true",
         help="Patch seed repos in place instead of copying to outputs/inference_repos first",
+    )
+    parser.add_argument(
+        "--backup-root",
+        default=os.environ.get("FF_SEED_BACKUP_ROOT", "outputs/seed_repo_backups"),
+        help="Where immutable seed repo backups are stored before local inference",
+    )
+    parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Disable seed repo backup creation. Not recommended for batch runs.",
     )
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"), help="LLM model name")
     parser.add_argument("--max-steps", type=int, default=None, help="Max episode steps")
@@ -806,6 +852,8 @@ def main() -> None:
                     case=args.case,
                     limit=args.limit,
                     isolate=not args.no_isolation,
+                    backup=not args.no_backup,
+                    backup_root=args.backup_root,
                     model_name=args.model,
                     max_steps=args.max_steps,
                     num_runs=args.num_runs,

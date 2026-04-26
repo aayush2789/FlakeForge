@@ -126,6 +126,36 @@ Strategy: Increase timeout
         assert "<<<<<<< SEARCH" in patch
         assert ">>>>>>> REPLACE" in patch
 
+    def test_extract_patch_normalizes_escaped_hunk_strings(self):
+        response = """{
+  "think": {
+    "claims": [
+      {
+        "category": "concurrency",
+        "entity": "submit",
+        "location": "source.py::WorkerPool.submit",
+        "polarity": "present",
+        "reason": "Lock branch malformed"
+      }
+    ],
+    "confidence": 0.85
+  },
+  "patch": {
+    "hunks": [
+      {
+        "file": "source.py",
+        "search": "        with self._lock:\\\\\\"",
+        "replace": "        with self._lock:",
+        "rationale": "Normalize malformed line"
+      }
+    ]
+  }
+}"""
+        patch = extract_patch(response)
+        assert "--- source.py" in patch
+        assert "with self._lock:" in patch
+        assert '\\"' not in patch
+
     def test_extract_empty_response(self):
         assert extract_think("") == ""
         assert extract_patch("") == ""

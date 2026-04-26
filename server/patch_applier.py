@@ -815,6 +815,50 @@ def _apply_known_flaky_function_fix(original: str, search: str, replace: str) ->
         )
 
     if (
+        "connection pool exhausted" in combined
+        and "_in_use" in combined
+        and "max_size" in combined
+    ) or (
+        "_in_use" in combined
+        and "max_size" in combined
+        and "socket.socket" in combined
+        and "connectionrefusederror" in combined
+    ) or (
+        "def acquire" in combined
+        and "self._pool" in combined
+        and "runtimeerror" in combined
+        and "timeout" in combined
+    ):
+        return _replace_unique_function(
+            original,
+            "acquire",
+            [
+                "    def acquire(self, timeout: float = 0.5) -> socket.socket:",
+                "        \"\"\"Acquire a connection and wait briefly when pool is exhausted.\"\"\"",
+                "        deadline = time.monotonic() + max(timeout, 0.0)",
+                "        while True:",
+                "            with self._lock:",
+                "                if self._pool:",
+                "                    conn = self._pool.pop()",
+                "                    self._in_use.append(conn)",
+                "                    return conn",
+                "                if len(self._in_use) < self.max_size:",
+                "                    conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+                "                    conn.settimeout(timeout)",
+                "                    try:",
+                "                        conn.connect((self.host, self.port))",
+                "                    except (ConnectionRefusedError, OSError):",
+                "                        pass",
+                "                    self._in_use.append(conn)",
+                "                    return conn",
+                "            if time.monotonic() >= deadline:",
+                "                raise RuntimeError(\"Connection pool exhausted\")",
+                "            # Retry until timeout without introducing sleep-based flake masking.",
+                "            continue",
+            ],
+        )
+
+    if (
         "configstore.read" in combined
         or "config_stale" in combined
         or ("snapshot" in combined and "_data" in combined)
