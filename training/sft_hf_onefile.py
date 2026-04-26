@@ -530,6 +530,10 @@ def run_sft(
     lora_alpha: int,
     wandb_project: Optional[str],
     wandb_run_name: Optional[str],
+    push_to_hub: bool = False,
+    hub_repo_id: Optional[str] = None,
+    hub_private: bool = True,
+    hub_commit_message: Optional[str] = None,
 ) -> None:
     """SFT only (TRL SFTTrainer) on {prompt, completion} JSONL."""
     try:
@@ -654,6 +658,36 @@ def run_sft(
     tokenizer.save_pretrained(str(final_dir))
     print(f"[SFT] Saved -> {final_dir}", flush=True)
 
+    if push_to_hub:
+        if not hub_repo_id:
+            raise SystemExit("--push-to-hub requires --hub-repo-id (e.g. HarshTri007/flakeforge-sft-qwen2.5-coder-7b)")
+        try:
+            from huggingface_hub import HfApi, create_repo, upload_folder
+        except Exception as exc:
+            raise SystemExit(f"huggingface_hub missing for push_to_hub: {exc}") from exc
+
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+        if not token:
+            raise SystemExit("HF_TOKEN is not set; cannot push to Hub.")
+
+        # Ensure repo exists (idempotent).
+        try:
+            create_repo(repo_id=hub_repo_id, token=token, private=hub_private, exist_ok=True)
+        except Exception:
+            # fall back to API method in older hub versions
+            HfApi(token=token).create_repo(repo_id=hub_repo_id, private=hub_private, exist_ok=True)
+
+        commit_message = hub_commit_message or "Upload FlakeForge SFT adapter"
+        print(f"[HUB] Uploading adapter to {hub_repo_id} ...", flush=True)
+        upload_folder(
+            repo_id=hub_repo_id,
+            folder_path=str(final_dir),
+            path_in_repo=".",
+            token=token,
+            commit_message=commit_message,
+        )
+        print(f"[HUB] Uploaded: https://huggingface.co/{hub_repo_id}", flush=True)
+
 
 def submit_hf_job(
     *,
@@ -743,6 +777,14 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Patch known-incompatible pins (e.g. sympy 0.7.x) and retry installs (recommended).")
     s_submit.add_argument("--no-deps-safe-mode", dest="deps_safe_mode", action="store_false",
                           help="Disable safe-mode patching for dependency installs.")
+    s_submit.add_argument("--push-to-hub", action="store_true", default=False,
+                          help="Upload the final LoRA adapter to the Hugging Face Hub at the end of training.")
+    s_submit.add_argument("--hub-repo-id", default=None,
+                          help="Target repo on Hub, e.g. 'HarshTri007/flakeforge-sft-qwen2.5-coder-7b'.")
+    s_submit.add_argument("--hub-private", action="store_true", default=True,
+                          help="Create/upload to a private repo (default).")
+    s_submit.add_argument("--hub-public", dest="hub_private", action="store_false",
+                          help="Create/upload to a public repo.")
 
     s_run = sub.add_parser("run", help="Run the pipeline locally/in-job (no HF submit).")
     s_run.add_argument("--seed-root", default=str(SEED_ROOT_DEFAULT))
@@ -769,6 +811,13 @@ def build_parser() -> argparse.ArgumentParser:
     s_run.add_argument("--lora-alpha", type=int, default=128)
     s_run.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "flakeforge-sft"))
     s_run.add_argument("--wandb-run-name", default=None)
+    s_run.add_argument("--push-to-hub", action="store_true", default=False,
+                       help="Upload the final LoRA adapter to the Hugging Face Hub at the end of training.")
+    s_run.add_argument("--hub-repo-id", default=None,
+                       help="Target repo on Hub, e.g. 'HarshTri007/flakeforge-sft-qwen2.5-coder-7b'.")
+    s_run.add_argument("--hub-private", action="store_true", default=True)
+    s_run.add_argument("--hub-public", dest="hub_private", action="store_false")
+    s_run.add_argument("--hub-commit-message", default=None)
 
     return p
 
@@ -811,6 +860,12 @@ def main() -> None:
             forwarded += ["--deps-editable"]
         if not args.deps_safe_mode:
             forwarded += ["--no-deps-safe-mode"]
+        if args.push_to_hub:
+            forwarded += ["--push-to-hub"]
+            if args.hub_repo_id:
+                forwarded += ["--hub-repo-id", args.hub_repo_id]
+            if not args.hub_private:
+                forwarded += ["--hub-public"]
 
         submit_hf_job(
             git_url=args.git_url,
@@ -876,6 +931,10 @@ def main() -> None:
             lora_alpha=int(args.lora_alpha),
             wandb_project=None if not args.wandb_project else args.wandb_project,
             wandb_run_name=args.wandb_run_name,
+            push_to_hub=bool(args.push_to_hub),
+            hub_repo_id=args.hub_repo_id,
+            hub_private=bool(args.hub_private),
+            hub_commit_message=args.hub_commit_message,
         )
         return
 
