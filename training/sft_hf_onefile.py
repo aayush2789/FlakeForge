@@ -122,9 +122,17 @@ def _find_file(repo_dir: Path, rel_or_name: str) -> Optional[Path]:
     return None
 
 
-def _pip_install(args: List[str], *, cwd: Optional[Path] = None, prefix: str = "") -> None:
+def _pip_install(
+    args: List[str],
+    *,
+    cwd: Optional[Path] = None,
+    prefix: str = "",
+    constraints: Optional[Path] = None,
+) -> None:
     """Run `python -m pip ...` with streaming output."""
     cmd = [sys.executable, "-m", "pip", *args]
+    if constraints is not None:
+        cmd += ["-c", str(constraints)]
     _run_stream(cmd, cwd=cwd, prefix=prefix)
 
 
@@ -299,6 +307,13 @@ def install_repo_dependencies(
         filtered.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
         return filtered
 
+    def _write_constraints(repo_dir: Path) -> Path:
+        """Constraints file applied to all pip installs for this repo."""
+        constraints = repo_dir / ".flakeforge_constraints.txt"
+        # Sympy <1.10 breaks on py3.11+ (inspect.getargspec removal).
+        constraints.write_text("sympy>=1.10\n", encoding="utf-8")
+        return constraints
+
     for i, c in enumerate(cases, start=1):
         repo_dir = cloned_repo_paths.get(c.slug)
         if repo_dir is None or not repo_dir.exists():
@@ -314,8 +329,9 @@ def install_repo_dependencies(
 
         print(f"[DEPS] {i}/{total} installing: {c.slug}", flush=True)
         try:
+            constraints = _write_constraints(repo_dir) if safe_mode else None
             if always:
-                _pip_install(["install", *always], prefix=f"[DEPS:{c.slug}] ")
+                _pip_install(["install", *always], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
 
             req = repo_dir / "requirements.txt"
             pyproject = repo_dir / "pyproject.toml"
@@ -323,7 +339,7 @@ def install_repo_dependencies(
 
             if req.exists() and req.stat().st_size > 0:
                 try:
-                    _pip_install(["install", "-r", str(req)], prefix=f"[DEPS:{c.slug}] ")
+                    _pip_install(["install", "-r", str(req)], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
                 except Exception as exc:
                     if not safe_mode:
                         raise
@@ -333,10 +349,10 @@ def install_repo_dependencies(
                         print(f"[DEPS] no safe_mode patch available for {c.slug}; continuing (deps may be incomplete)", flush=True)
                     else:
                         print(f"[DEPS] retry with filtered requirements: {filtered.name}", flush=True)
-                        _pip_install(["install", "-r", str(filtered)], prefix=f"[DEPS:{c.slug}] ")
+                        _pip_install(["install", "-r", str(filtered)], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
             elif editable and (pyproject.exists() or setup_py.exists()):
                 # Editable installs can fail for older repos; keep it optional.
-                _pip_install(["install", "-e", "."], cwd=repo_dir, prefix=f"[DEPS:{c.slug}] ")
+                _pip_install(["install", "-e", "."], cwd=repo_dir, prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
 
             marker.write_text("ok\n", encoding="utf-8")
             ok += 1
