@@ -21,7 +21,7 @@ tags:
 [![Pydantic](https://img.shields.io/badge/Pydantic-000?style=for-the-badge&logo=pydantic&logoColor=e92063)](https://docs.pydantic.dev/)
 [![uvicorn](https://img.shields.io/badge/uvicorn-ASGI-444?style=for-the-badge)](https://www.uvicorn.org/)
 
-**FlakeForge** is an [OpenEnv](https://pypi.org/project/openenv-core/)–style reinforcement learning **environment** for learning to **repair flaky Python tests**. The world is (mostly) deterministic: repeated `pytest` runs, AST scans, and static checks produce structured observations. The only learned piece is the policy (your code model); reward is **verifiable** from execution and static oracles, not an LLM judge.
+**FlakeForge** is an [OpenEnv](https://pypi.org/project/openenv-core/)–style reinforcement learning **environment** for learning to **repair flaky Python tests**. 
 
 ## Links
 
@@ -461,7 +461,7 @@ Running **`python inference.py`** (with your usual args for repo path, test id, 
 
 **Visual dashboard (same run as the JSON in `data/inference_example_episode.json` — step rewards, cumulative reward, pass rate vs confidence, patch apply markers, a heatmap of every `reward_breakdown` key per step, and traces for a few components):**
 
-![Inference episode dashboard](docs/assets/inference_episode_dashboard.png)
+![Inference episode dashboard](./docs/assets/inference_episode_dashboard.png)
 
 Regenerate the figure after changing the example JSON (or pipe your own saved stdout to a `.json` file):
 
