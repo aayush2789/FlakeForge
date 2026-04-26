@@ -1,0 +1,547 @@
+# FlakeForge: Teaching an RL Agent to Repair Flaky Tests
+
+Flaky tests silently break CI pipelines.
+
+They pass on one run, fail on the next, and leave developers asking the worst debugging question: "What changed?" Most teams respond with retries, larger timeouts, skipped tests, or long manual investigations. Those fixes may quiet the pipeline, but they rarely explain the real root cause.
+
+FlakeForge was built around a different idea: treat flaky-test repair as an interactive reinforcement-learning environment, where an agent must inspect evidence, propose a causal explanation, apply a minimal patch, and prove the fix through repeated execution.
+
+The goal is not to make a model sound confident. The goal is to make the test suite stable.
+
+---
+
+## 1. The Problem: Flaky Tests Are Not Normal Bugs
+
+A deterministic bug is straightforward compared with a flaky one. If a test fails every time, the failure is at least reproducible. You can trace it, patch it, and rerun it.
+
+Flaky tests are different. They live in the gaps between runs:
+
+- A timeout appears only when the machine is under load.
+- A shared global counter keeps state from a previous test.
+- A mock remains patched after teardown.
+- A test passes alone but fails when another test runs first.
+- A socket, file handle, thread, or event loop survives longer than expected.
+- A dictionary, set, random seed, timestamp, or scheduler changes the execution path.
+
+This is why flaky tests are so expensive. The failure is not just in the code. It is in the interaction between code, runtime, order, timing, environment, and test harness.
+
+The painful part is that the symptom often points to the wrong place. A stack trace may end at an assertion, but the cause may be a stale cache, an import side effect, a fixture scope leak, or a race several calls earlier.
+
+That makes flaky-test repair a strong environment-design problem: the agent needs observations that expose hidden state and transitions that verify whether a patch actually improved stability.
+
+---
+
+## 2. Why Existing Solutions Fall Short
+
+Most teams already have tools for flaky tests, but each one solves only part of the problem.
+
+### Retries Hide the Symptom
+
+Retries are useful for reducing CI noise, but they are not a repair strategy. If a test passes after three attempts, the pipeline turns green while the underlying nondeterminism remains. Over time, the project accumulates tests that are "green enough" instead of trustworthy.
+
+### Static Analysis Misses Runtime Behavior
+
+Static analysis can flag risky patterns such as mutable globals, unsafe fixture scopes, unclosed resources, or import-time side effects. But flaky behavior often depends on execution order, scheduling, timing, and environment pressure. A static warning can tell us where to look, not whether the test is actually unstable.
+
+### Heuristic Debugging Does Not Learn
+
+Rule-based tools can catch common cases, but they struggle when the fix requires combining signals: stack traces, repeated pass rates, failure entropy, causal call chains, and patch validation. A flaky bug may look like a timeout but actually be a race. It may look like a network issue but actually be a missing mock.
+
+### LLM-Only Repair Is Too Easy to Game
+
+A language model can generate plausible explanations and patches, but plausible is not enough. If the reward is another model's opinion, the agent can learn to write convincing narratives instead of correct repairs. In software repair, the final judge should be executable evidence.
+
+FlakeForge is designed around that principle: reward what can be verified.
+
+---
+
+## 3. How We Got Here: Two Heads, a Judge, and the Unified Bet
+
+The current FlakeForge design did not land on the first try. The path from prototype to a trainable environment taught us as much as the final architecture.
+
+### The first architecture: analyzer and fixer (two separate roles)
+
+We started with a **split system**: one component played **analyzer** (diagnose the flaky test, name a root cause) and another played **fixer** (propose a patch). The intuition was classic divide-and-conquer: specialization should make each part easier to train or prompt.
+
+In practice, **segregated roles created friction**.
+
+- **Hand-offs broke coherence.** The fixer only saw what the analyzer chose to pass along. A slightly wrong label or a missing detail cascaded into the wrong file or the wrong kind of edit.
+- **Responsibility blurred.** When something failed, it was unclear whether the analyzer misread the failure, the fixer misapplied the intent, or the task was impossible in one step.
+- **Training signals split awkwardly.** Rewarding "good analysis" and "good patching" separately does not match how engineers debug: they hypothesize and edit in a tight loop, and they revise the hypothesis when the run disagrees.
+
+We asked a simple question: **why separate what humans do in one mental thread?** That pushed us toward a **unified agent** that emits both diagnosis and patch in a single structured action, so the model can keep hypothesis and edit aligned at every step.
+
+### Adding a judge: help that became a bottleneck
+
+To stabilize the two-head design, we introduced a **third model** that acted as a **judge**: it critiqued the analyzer and fixer and steered the next move.
+
+The theory was sound—explicit critique can catch inconsistent plans—but the system paid a heavy price in practice.
+
+- **Inference cost tripled** in the worst case. Each turn required reasoning traces from the analyzer, the fixer, and the judge. Latency and token budgets ballooned before we even measured learning.
+- **The reward story weakened at training time.** The judge was wired mainly for **inference-time orchestration**, not a closed loop with the same **verifiable** reward we wanted for GRPO. The two roles were **guided** by the judge, but we never had a **first-class way to supervise the judge**—no one consistently "checked the checker." A weak or biased judge could steer the team without paying the same cost as a bad patch.
+- **The learning objective drifted** toward "please the critic" instead of "stabilize the test under repeated `pytest`."
+
+That experience pushed a hard rule: **the environment must be the final authority**, not a third language model. Static checks, test outcomes, and explicit reward terms are cheaper to audit than another opaque verdict.
+
+### The fork in the road: detection, big models, and a different goal
+
+We also confronted an honest product question. **Detecting** flaky tests is genuinely hard. If we solved detection well, a tempting shortcut is: *call a large general-purpose code model to patch, or even stop at flagging the test and hand off to a human.*
+
+That path is defensible, but it would have **narrowed the story to detection** or to **"big model does everything."** We chose a more ambitious target:
+
+> Show that a **smaller** code model (on the order of **7B–8B parameters**), **trained in a specialized FlakeForge environment**—with preflight, repeated runs, causal and deep flakiness signals, and **verifiable reward**—can **match or beat** **zero-shot** prompting of **much larger** models on **detection and repair together**.
+
+In other words: the win is not "we used the biggest model." The win is **a compact policy that internalizes what makes flaky tests flaky** because it was trained where flaky behavior is *measured*, not only described.
+
+That is where brainstorming converged: **unified structured actions**, **no LLM judge in the training loop**, **environment-grounded reward**, and a curriculum (IDoFT plus synthetic cases) that teaches the model to read this problem better than a generic chat-style agent.
+
+The sections that follow are the architecture, environment, and training stack that grew out of that bet.
+
+---
+
+## 4. The Core Idea
+
+FlakeForge turns flaky-test repair into a verifiable RL environment.
+
+At each step, the agent receives a structured observation, emits a diagnosis and patch, and the environment applies the patch, reruns the target test repeatedly, validates the result, and returns a scalar reward.
+
+The system is built around five ideas:
+
+- The agent should produce both a root-cause explanation and a patch in one structured action.
+- The environment should detect whether a test is truly flaky before spending training credit.
+- Reward should come mainly from repeated `pytest` outcomes, not subjective LLM judgment.
+- Patches should be minimal, applicable, syntax-valid, and near the failure frontier.
+- Reward hacking should be penalized: no skipping tests, swallowing exceptions, weakening assertions, or adding sleeps as fake fixes.
+
+In short: FlakeForge trains a model to behave less like an autocomplete tool and more like a debugging loop.
+
+---
+
+## 5. The Middle of the Build: Flaky vs Buggy, Two-Part Reward, and Why Validation Is First
+
+Once we moved to a **unified** agent, the next hard question was: **what exactly do we reward, and in what order?** The action has two human-readable halves—**structured thinking** (claims: category, entity, `path::function`, and a reason) and **search/replace patches** tied to real file locations. The reward system had to value **both** without letting fluent “thinking” stand in for a bad edit, or a lucky edit stand in for nonsense diagnosis.
+
+### Flaky training only: why pass rate alone is not enough
+
+A core constraint was: **we did not want to train a flaky-test fixer on ordinary buggy code.** The scenario we care about is *instability across runs*, not a test that is deterministically red because the product code is simply wrong.
+
+The natural first idea is to run the target test **n** times and look at the **pass rate**. That helps, but it is not a **strong** classifier on its own:
+
+- A **deterministic** bug can show up as `pass_rate = 0` for the first *n* runs, yet pass on run *n + 1* in principle if something external changes—so `0%` is **not** a reliable label for “definitely not flaky; definitely buggy.”
+- Conversely, a genuinely flaky test might look bad in a small batch of runs by chance.
+
+So we **prioritized what the test harness actually said** in **logs and error types**: e.g. **import errors** (`ModuleNotFoundError`, broken collectors), **syntax errors**, and other signals that the checkout or the code is **not even runnable** point to “this episode is not a clean flaky-repair target” rather than a subtle nondeterminism problem.
+
+When the logs are **ambiguous**—neither clearly infra-broken nor clearly a stable deterministic failure—**repeated runs are the fallback**: more samples to estimate **pass rate**, **failure entropy**, and whether the behavior looks **stable, flaky, or deterministic** before we let policy learning spend credit on a patch. That is the role of the **preflight** gate in the environment: it separates *trainable flaky-like* scenarios from *skip this example*.
+
+### The second non-negotiable: never let the model corrupt the program state
+
+Even a perfect “think” block is useless if the next line is a **patch that does not apply** or, worse, **breaks `ast.parse`**. If we wrote broken Python to disk, the **entire** interaction shifts: the next observation is dominated by **syntax and parse failures**, and the policy is no longer learning “how to stabilize a flaky test”—it is learning how to **recover from the agent’s own damage**.
+
+That is why we introduced a **`PatchValidator`**: a **code-side** gate that runs **before** durable writes. The validator answers a different question from the oracle: not “is the hypothesis true?” but “**is this patch well-formed, simulatable, and safe to apply?**”
+
+### `PatchValidator` in detail (stages, from `server/patch_validator.py`)
+
+The module docstring encodes a fixed pipeline. Invalid patches are **rejected before the repo on disk is mutated**.
+
+**Stage 1 — Format**  
+- The model must produce **SEARCH/REPLACE** hunks with the expected delimiters. Empty patches or missing markers fail fast.
+
+**Stage 1b — Anti-hack (hard errors)**  
+- Before any simulation, the validator looks for *known* reward hacks in the hunk text: e.g. **deleting more assertions** than it adds, **injecting** `time.sleep` / `asyncio.sleep`, **adding** `@pytest.mark.skip` / `pytest.skip`, or **swallowing exceptions** with `except: pass`. These patterns are cheap to catch and protect the *semantic* meaning of the test.
+
+**Stage 2 — Apply simulation (no disk write)**  
+- The patch is **simulated** against a snapshot of sources (`simulate_search_replace_patch`). Every `search` must **match** real file content (with optional **fuzzy** indent normalization, which is flagged as a **warning**). If simulation fails, the patch is **invalid**—there is nothing meaningful to test.
+
+**Stage 2b — Reasoning–action bridge (when structured claims exist)**  
+- If the think block **names** a function or file, the validator checks that the **patch actually edits** that locus. Example failure mode: the claim points at an entity, but the **AST text for that node is unchanged** after simulation—"you said you fixed X, but X is identical."
+
+**Smell checks on added lines**  
+- The validator scans **added** lines for **flakiness smells** the policy should not introduce: e.g. new uses of `random.random`, `datetime.now` at module level, **new** mutable global assignments, or **new** `lru_cache` (often warned rather than always hard-failed—see code paths).
+
+**Size and idempotency**  
+- **Very large** diffs are rejected (e.g. beyond a line-change budget) to block “rewrite the world” rewards. A **second simulated apply** checks **idempotency**—a good search/replace should not do something different on a second pass.
+
+**Stages 3–4–5 — Syntax, compile, structure (per modified file)**  
+- For each changed `.py` file, the post-patch text must pass **`ast.parse`**, then **`compile`**. Structural heuristics flag obviously broken trees (e.g. **empty** function or class bodies). Optional **LibCST** roundtrip checks add another layer. **Undefined-name** heuristics catch patches that reference `threading` / `Lock` / etc. without imports.
+
+**Stage 6 — Causal proximity (warnings)**  
+- If hunks **edit files far** from the **failure frontier** and call chain, the validator only **warns**—this mirrors the **causal_proximity_reward** signal; it is a hint that the edit may be a workaround, not a localized fix.
+
+**Output**  
+- A boolean **`is_valid`**, **errors** / **warnings**, and a **score in \([0,1]\)** used for **reward shaping** when the patch is valid (penalties for noop patches, fuzzy apply, or very large diffs).
+
+Together, these stages make one thing explicit: **the environment never asks pytest to arbitrate a patch that is not even a legal edit of the repository.**
+
+### `OracleEngine` in detail: verifying “think” against code (`server/oracle_engine.py`)
+
+The **oracle** is the complement of the **validator**. Where the validator cares about **edits**, the oracle (via `verify_structured_think`) asks: **given pre- and post-patch source, is each `ThinkClaim` actually supported, and does the patch address it?**
+
+**Per-category plugins**  
+- Each `ROOT_CAUSE_TYPES` value can register an **`OraclePlugin`** in a registry (examples in code include race / async-wait, LRU cache, mock leak, shared state, fixture scope, network, import side effect, and more). For a given claim category, the plugin uses **AST** (and **LibCST** when available) to check **static** conditions that match the kind of root cause (e.g. evidence of a lock, a problematic decorator, a boundary pattern).
+
+**Evidence object**  
+- Each claim is annotated with an **`OracleEvidence`**: e.g. whether the **entity** resolved in the file, pre/post conditions held, and whether the **patch addresses** the claim.
+
+**Patch coherence**  
+- A **`PatchCoherenceOracle`** cross-checks that the **patch** is consistent with the claim. If a plugin would say "confirmed" but the patch and claim **do not cohere**, the verdict is downgraded to **inconclusive**.
+
+**Scoring**  
+- `verify_structured_think` returns a **`StructuredThink` with per-claim `verdict` and `oracle_score`**, and an aggregate **oracle_score** in \([-1,1]\) used in **`compute_verifiable_reward`**. The oracle is **not** a chat model. It is **reproducible static checking** + **hunk–claim alignment**—the “process supervision” that stays cheap at scale.
+
+**Why both validator and oracle**  
+- **Validator**: *never* break the world; *never* let training collapse into "syntax repair."  
+- **Oracle**: *when the world is still intact*, score whether the **stated** diagnosis matches **what the code and patch actually do**—so the "thinking" channel cannot float free of the "editing" channel.
+
+In other words: **preflight and logs** keep us in the *right problem class*; the **patch validator** keeps the **workspace healthy**; the **oracle** keeps the **learned policy honest** about *why* a patch is supposed to work.
+
+---
+
+## 6. System Architecture
+
+FlakeForge is an OpenEnv-style environment served through FastAPI. The environment exposes the usual reset/step interaction, but the internals are specific to flaky-test repair.
+
+```mermaid
+flowchart TD
+    A[Repository + Target Test] --> B[Preflight Gate]
+    B --> C[Observation Builder]
+    C --> D[Unified Agent]
+    D --> E[Structured Think + Patch]
+    E --> F[Patch Validator]
+    F --> G[Apply Patch Atomically]
+    G --> H[Repeated Pytest Runs]
+    H --> I[Reward Function]
+    I --> J[Next Observation]
+    J --> D
+```
+
+The main components are:
+
+- **Environment**: `FlakeForgeEnvironment` controls episodes, snapshots source files, restores pristine state, applies patches, runs tests, and returns observations.
+- **Agent interface**: `UnifiedFlakeForgeAgent` prompts a code model to emit one JSON object containing `think` claims and `patch` hunks.
+- **Observation model**: `FlakeForgeObservation` carries source snippets, run history, pass rates, preflight results, deep flakiness signals, causal hints, reward breakdown, and termination status.
+- **Action model**: `FlakeForgeAction` represents a unified structured patch action with root-cause claims and search/replace hunks.
+- **Patch validator**: rejects malformed, non-applicable, syntactically invalid, or suspicious patches before they can corrupt the repo.
+- **Reward function**: `compute_verifiable_reward` combines pass-rate improvement, compile/apply checks, causal proximity, anti-hack penalties, reasoning consistency, and terminal success bonuses.
+- **Dataset builder**: the IDoFT builder curates real flaky-test cases with category labels, root-cause files, difficulty splits, and PR references.
+- **Training pipeline**: warm-up teaches valid JSON formatting and reasoning consistency; online GRPO uses environment reward from real rollouts.
+
+---
+
+## 7. Environment Design for RL
+
+FlakeForge is a partially observable Markov decision process. The true state includes the whole repository, hidden runtime behavior, ordering effects, cached state, previous patches, and test-run outcomes. The agent only sees a compressed observation.
+
+### State
+
+The hidden state includes:
+
+- The repository contents.
+- The target test identifier.
+- A pristine snapshot of Python files for reset.
+- Episode step count and maximum steps.
+- Baseline pass rate and current pass rate.
+- Previous patches and reward history.
+- Failure distribution across repeated runs.
+
+The environment restores a clean source snapshot between episodes so GRPO rollouts do not accidentally stack patches on top of each other.
+
+### Observation
+
+The observation is intentionally richer than a raw stack trace. It includes:
+
+- Test source and source under test.
+- File tree and relevant imports.
+- Repeated run history with pass/fail status, duration, error type, and stderr excerpts.
+- Baseline and current pass rates.
+- Preflight classification: stable, flaky, deterministic bug, infra broken, or unknown.
+- Deep flakiness signals from AST scans.
+- Failure frontier extracted from stack traces.
+- Causal graph summaries and boundary hints.
+- Reward breakdown from the previous step.
+- Think and patch history so the model can avoid repeating dead hypotheses.
+
+This matters because flaky bugs are often not visible from one failure. The agent needs repeated evidence.
+
+### Action
+
+The action is a single JSON object:
+
+```json
+{
+  "think": {
+    "claims": [
+      {
+        "category": "concurrency",
+        "entity": "counter",
+        "location": "source.py::increment",
+        "polarity": "present",
+        "reason": "shared counter is updated without synchronization"
+      }
+    ],
+    "confidence": 0.87
+  },
+  "patch": {
+    "hunks": [
+      {
+        "file": "source.py",
+        "search": "counter = counter + 1",
+        "replace": "with _lock:\n    counter = counter + 1"
+      }
+    ]
+  }
+}
+```
+
+This structure forces the model to connect its explanation to the edit. The environment can then check whether the claimed category, location, and patch are coherent.
+
+### Transitions
+
+One environment step does the following:
+
+1. Parse the model output into structured think and patch objects.
+2. Validate the patch format and search/replace anchors.
+3. Simulate and apply the patch only if it is safe.
+4. Run the target test repeatedly.
+5. Measure pass-rate movement and failure distribution.
+6. Compute reward.
+7. Return a new observation with updated history.
+
+This is what makes the environment useful for RL: the agent does not get credit for saying the right thing. It gets credit for changing execution behavior.
+
+### Reward
+
+The reward is multi-signal and verifiable.
+
+Important components include:
+
+- **Format reward**: Did the model emit valid structured think and patch fields?
+- **Compile/apply reward**: Did the patch apply cleanly and keep Python syntax valid?
+- **Stability reward**: Did repeated test pass rate improve?
+- **Causal proximity reward**: Did the patch touch code near the failure frontier or call chain?
+- **Failure entropy reward**: Did chaotic failure modes collapse into a more stable pattern?
+- **Anti-hack penalty**: Did the patch try to skip tests, weaken assertions, add sleeps, or swallow exceptions?
+- **Regression penalty**: Did the patch break neighboring behavior?
+- **Reasoning consistency reward**: Did the stated root cause match the kind of edit made?
+- **Terminal bonus**: Did the target test reach fully stable repeated passes?
+
+The most important design choice is that pass-rate improvement is central, but it is not alone. Without patch validation and anti-hack penalties, the model could learn bad shortcuts. Without stability reward, it could learn pretty JSON that does not fix anything.
+
+---
+
+## 8. Deep Flakiness Signals
+
+FlakeForge adds static signals because the agent should not rediscover every common flaky pattern from scratch.
+
+The deep scanner looks for patterns such as:
+
+- Module-level caches and mutable globals.
+- Broad fixture scopes with mutable state.
+- Mock patches that may leak.
+- Import-time side effects.
+- Async or thread contamination.
+- Resource leaks involving files, sockets, subprocesses, or threads.
+
+These signals are not treated as final truth. They are hints. The reward still depends on whether the patch improves repeated execution.
+
+This combination is important: static signals make exploration less blind, while runtime validation prevents static warnings from becoming false confidence.
+
+---
+
+## 9. Dataset Construction
+
+For realistic training cases, FlakeForge uses a curated IDoFT-based dataset builder.
+
+The builder was designed with several constraints:
+
+- One unique repository and test pair per entry.
+- Coverage across IDoFT categories such as order dependency and infrastructure dependency.
+- Coverage across FlakeForge categories such as resource leak, shared state, ordering, timing, network, and nondeterminism.
+- Difficulty split across easy, medium, and hard cases.
+- Preference for cases with accepted or opened PRs, because real fixes provide useful supervision.
+- Preference for runnable and maintained repositories when possible.
+
+The target was not just to collect flaky tests. The goal was to build a curriculum where early cases teach simple localization and later cases force the agent to reason across timing, hidden state, and repository complexity.
+
+Synthetic test repositories are also useful because they isolate specific root causes: time-based nondeterminism, async leaks, fixture scope issues, shared state, cache pollution, platform dependency, network instability, and resource leaks.
+
+Real cases provide messiness. Synthetic cases provide control. FlakeForge needs both.
+
+---
+
+## 10. Training Pipeline
+
+The training setup uses a two-phase approach.
+
+### Phase 1: Warm-Up
+
+The warm-up phase teaches the model to emit valid FlakeForge actions before it interacts with real environments.
+
+This phase uses offline rewards for:
+
+- JSON format correctness.
+- Valid root-cause categories.
+- Structured claim fields.
+- Patch hunk fields.
+- Basic reasoning consistency.
+
+This is cheap and fast. It prevents online RL from wasting most of its budget on malformed output.
+
+### Phase 2: Online GRPO
+
+The online phase runs the actual environment.
+
+For each curriculum case:
+
+1. The model receives an observation prompt.
+2. It generates a group of candidate completions.
+3. Each candidate is applied on a clean repository copy.
+4. The environment reruns tests and computes reward.
+5. GRPO updates the model using relative performance within the group.
+
+The default training path targets Qwen2.5-Coder models, with QLoRA/Unsloth support for efficient fine-tuning. The code supports warm-up only, online only, or both phases.
+
+This setup is useful because flaky-test repair has sparse success signals. Many attempts do not fully fix the test. GRPO lets the model learn from relative differences: which candidate was more structured, more applicable, closer to the failure site, less hacky, or more stabilizing.
+
+---
+
+## 11. Results and Early Insights
+
+The most important early result is not a single leaderboard number. It is that the environment can distinguish cases that should and should not be used for flaky-fix training.
+
+During probing, many candidate IDoFT cases fell into different buckets:
+
+- Some tests were already stable and should not be used for repair training.
+- Some were deterministic failures, not flaky failures.
+- Some were infrastructure-broken because dependencies, paths, collectors, or imports did not work in the local checkout.
+- Some exposed the real target behavior and were suitable for training.
+
+That filtering matters. If a training loop treats stable tests, broken repos, deterministic bugs, and true flakes as the same task, the reward becomes noisy and misleading.
+
+The strongest insight so far is that flaky detection is itself a hard problem. Before an agent can learn to fix flaky tests, the environment must prove that the scenario is actually flaky and runnable.
+
+Another insight: the structure of the action matters. Asking the model for a patch alone loses useful information. Asking for a diagnosis alone does not change the program. Combining `think` and `patch` gives the environment something it can validate from both sides.
+
+---
+
+## 12. What Makes FlakeForge Different
+
+FlakeForge is not just a flaky-test detector and not just an LLM patch generator.
+
+It is an environment where:
+
+- The agent learns through interaction.
+- The reward is grounded in repeated test execution.
+- Static and causal signals guide exploration.
+- Patch validation blocks obvious bad edits.
+- The model must connect root cause to code change.
+- Training cases are organized as a curriculum.
+
+The central bet is simple: software repair agents should be trained inside environments that look like software engineering, not just text prediction.
+
+---
+
+## 13. Challenges We Faced
+
+*For the full design arc—two-head analyzer/fixer, the judge, and why we moved to a unified, environment-grounded policy—see [§3. How we got here](#3-how-we-got-here-two-heads-a-judge-and-the-unified-bet). For preflight (flaky vs buggy), logs vs pass rate, and the **patch validator** and **oracle** in depth, see [§5. The middle of the build](#5-the-middle-of-the-build-flaky-vs-buggy-two-part-reward-and-why-validation-is-first).*
+
+### 1. Detecting Flakiness Was Harder Than Fixing It
+
+The first challenge was separating true flaky tests from stable tests, deterministic failures, and broken infrastructure. A test that fails every time is not a flaky-test repair target. A test that cannot import its dependencies is not a learning signal. A test that passes ten times in a row may not be useful for training, even if it was historically flaky.
+
+This forced FlakeForge to add a preflight gate with sanity checks, deterministic checks, and flakiness confirmation runs.
+
+### 2. Real Repositories Are Messy
+
+IDoFT-style real-world cases are valuable, but they come with practical issues:
+
+- Missing dependencies.
+- Old package versions.
+- Broken test collectors.
+- Path assumptions.
+- Platform-specific behavior.
+- Repositories that no longer install cleanly.
+- Tests whose original flaky behavior depends on a historical CI environment.
+
+This made dataset construction more than a scraping task. Each case needed metadata, difficulty labels, root-cause hints, and runnability checks.
+
+### 3. Patch Validation Needed to Be Strict
+
+LLMs often produce patches that look reasonable but fail mechanically:
+
+- Search text does not match the file.
+- Indentation is wrong.
+- Multi-line replacements break JSON.
+- The patch edits the test instead of the source.
+- The code no longer parses.
+
+Without strict validation, the environment would reward noise or corrupt the repository. FlakeForge therefore validates patches before applying them and restores clean snapshots between episodes.
+
+### 4. Reward Hacking Was a Real Risk
+
+Any RL environment can be gamed. In flaky-test repair, obvious hacks include:
+
+- Adding `sleep()`.
+- Skipping the test.
+- Weakening assertions.
+- Catching broad exceptions.
+- Returning early.
+- Deleting meaningful checks.
+
+Those edits can make a test pass while destroying its value. The reward function had to include anti-hack penalties and hard gates so the model learns structural fixes instead of CI tricks.
+
+### 5. One Run Is Not Evidence
+
+A normal unit-test repair loop often runs a test once. Flaky tests require repeated runs. But repeated execution is expensive, especially inside online RL.
+
+FlakeForge had to balance cost and confidence: enough runs to estimate pass-rate movement, but not so many that training becomes impossible.
+
+### 6. Reasoning Needed Grounding
+
+The model can say "this is a race condition" even when the patch edits an unrelated line. It can claim "resource leak" while changing a timeout. That is why FlakeForge tracks reasoning consistency and uses structured claims tied to locations and patch hunks.
+
+The goal is not to reward chain-of-thought style prose. The goal is to reward diagnosis that is checkable against code and outcomes.
+
+### 7. Infrastructure Became Part of the Environment
+
+Running arbitrary repositories means the runner, Docker setup, dependencies, environment variables, and filesystem layout all become part of the task. A broken runner can look like a broken test. This made infrastructure classification essential.
+
+The environment must know when to say: "Do not train on this case."
+
+### 8. Multi-Role and Judge-Model Detours (Design, Not Data)
+
+Before we committed to a **single** unified action, we tried **separate** analyzer and fixer models and then a **judge** to critique them. The problems were not cosmetic: hand-offs split responsibility, **three** models made inference slow and expensive, and an inference-only judge **diluted** the training signal because the two workers were only steered by a critic that was **not** itself grounded in the same verifiable loop. That is why the shipped design folds diagnosis and patch into one pass and lets **`pytest` + static checks** carry the weight that we once tried to delegate to another LLM—see [§3](#3-how-we-got-here-two-heads-a-judge-and-the-unified-bet).
+
+---
+
+## 14. Lessons Learned
+
+Flaky-test repair is less about finding one failed assertion and more about stabilizing a system.
+
+The biggest lesson is that a good RL environment needs strong boundaries. It must define what counts as a valid action, what counts as evidence, what counts as success, and what behavior is forbidden.
+
+For FlakeForge, that meant:
+
+- Treat repeated execution as the primary truth.
+- Use static analysis as hints, not final judgment.
+- Make the action format structured and machine-checkable.
+- Reject invalid patches early.
+- Penalize shortcuts that reduce test meaning.
+- Separate runnable flaky cases from stable, deterministic, or broken ones.
+
+The second lesson is that curriculum matters. A model cannot jump directly into messy real repositories and learn efficiently if half the failures are infrastructure problems. Synthetic cases teach clean root-cause patterns; IDoFT cases test whether those skills survive contact with real projects.
+
+The third lesson is that verifiable rewards are worth the engineering cost. They are slower than asking an LLM judge, but they are aligned with the thing developers actually care about: a test suite that stays green for the right reason.
+
+---
+
+## 15. Closing
+
+FlakeForge is an attempt to make flaky-test repair trainable, measurable, and honest.
+
+Instead of asking a model to guess a fix from a stack trace, it places the model inside a debugging environment. The agent observes repeated failures, forms a structured hypothesis, patches the code, and receives reward from actual execution.
+
+That makes the environment harder to build, but also more meaningful. Flaky tests are caused by runtime behavior, so the learning signal should come from runtime behavior.
+
+The long-term vision is an agent that does not merely silence flaky tests, but repairs the underlying instability with small, verifiable patches.
+

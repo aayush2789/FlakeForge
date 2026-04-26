@@ -110,6 +110,77 @@ def _safe_read_text(path: Path, max_chars: int) -> str:
         return ""
 
 
+def _infer_imported_packages(repo_dir: Path) -> List[str]:
+    """Infer minimal pip packages needed to import and run tests for a synthetic repo.
+
+    We intentionally do NOT trust requirements.txt for synthetic repos because
+    it may contain old pins (e.g. sympy==0.7.5) that are incompatible with the
+    job's Python. Instead we install only what the code actually imports.
+    """
+    import ast
+
+    # Python 3.10+ provides stdlib module names.
+    try:
+        stdlib = set(sys.stdlib_module_names)  # type: ignore[attr-defined]
+    except Exception:
+        stdlib = set()
+
+    # Local modules that should not be treated as pip deps.
+    local_names: set[str] = {"source", "tests", "__future__"}
+    # Some common stdlib aliases that may not appear in stdlib_module_names on older versions.
+    stdlib |= {"typing", "pathlib", "dataclasses", "collections", "concurrent", "asyncio", "unittest"}
+
+    py_files: List[Path] = []
+    src = repo_dir / "source.py"
+    if src.exists():
+        py_files.append(src)
+    tests_dir = repo_dir / "tests"
+    if tests_dir.exists():
+        py_files.extend(sorted(tests_dir.rglob("*.py")))
+
+    imports: set[str] = set()
+    for p in py_files:
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name:
+                        imports.add(alias.name.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imports.add(node.module.split(".", 1)[0])
+
+    # Filter stdlib + local.
+    pkgs: List[str] = []
+    for name in sorted(imports):
+        if name in local_names:
+            continue
+        if name in stdlib:
+            continue
+        # pytest is installed separately
+        if name == "pytest":
+            continue
+        pkgs.append(name)
+
+    # Map common import->pip name mismatches (add more if encountered).
+    rename = {
+        "yaml": "pyyaml",
+        "PIL": "pillow",
+        "sklearn": "scikit-learn",
+    }
+    pkgs = [rename.get(p, p) for p in pkgs]
+
+    # Safety: never install ancient sympy from requirements; if imported, force modern.
+    if "sympy" in pkgs:
+        pkgs = [p for p in pkgs if p != "sympy"]
+        pkgs.append("sympy>=1.10")
+
+    return pkgs
+
+
 def _apply_hunks_in_place(repo_dir: Path, hunks: List[Dict[str, str]]) -> Dict[Path, str]:
     """Apply FlakeForge-style search/replace hunks. Returns {path: original_text} for rollback."""
     originals: Dict[Path, str] = {}
@@ -302,9 +373,11 @@ def load_synthetic_cases(seed_root: Path) -> List[SyntheticCase]:
 
 
 def select_balanced_synthetic(cases: List[SyntheticCase], *, total: int = 40) -> List[SyntheticCase]:
-    """Pick a near-equal easy/medium/hard subset, prioritizing cases we can SFT-label.
+    """Pick a near-equal easy/medium/hard subset (default total=40).
 
-    We only pick repos where `_synthetic_fix_hunks(...)` returns at least one hunk.
+    IMPORTANT: We do NOT pre-filter by patchability here. Patchability is decided
+    later by actually generating a candidate patch and verifying it with pytest.
+    Pre-filtering would under-select and reduce dataset size.
     """
     by: Dict[str, List[SyntheticCase]] = {"easy": [], "medium": [], "hard": []}
     for c in cases:
@@ -325,24 +398,9 @@ def select_balanced_synthetic(cases: List[SyntheticCase], *, total: int = 40) ->
             need[k] += 1
             rem -= 1
 
-    def can_patch(case: SyntheticCase) -> bool:
-        try:
-            m = json.loads(case.manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return bool(_synthetic_fix_hunks(m, case.repo_dir))
-
     picked: List[SyntheticCase] = []
     for d in ("easy", "medium", "hard"):
-        got = 0
-        for c in by[d]:
-            if got >= need[d]:
-                break
-            if can_patch(c):
-                picked.append(c)
-                got += 1
-        if got < need[d]:
-            print(f"[SELECT] WARN: only {got}/{need[d]} patchable cases for difficulty={d}", flush=True)
+        picked.extend(by[d][: need[d]])
 
     return picked
 
@@ -365,15 +423,25 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
 
     rel = str(target.relative_to(repo_dir)).replace("\\", "/")
 
-    def one(search: str, replace: str) -> List[Dict[str, str]]:
-        if search in src and replace:
-            return [{"file": rel, "search": search, "replace": replace}]
+    def one(search_line: str, replace_block: str) -> List[Dict[str, str]]:
+        """Create a single hunk. `search_line` must match exact line text (including indentation)."""
+        if not replace_block:
+            return []
+        if search_line in src:
+            return [{"file": rel, "search": search_line, "replace": replace_block}]
         return []
 
     if category == "shared_state":
         # Reset singleton-owned dict each instantiation (synthetic singleton template).
         return one("            cls._instance._settings = {}", "            cls._instance._settings = {}  # reset each time")
     if category == "nondeterminism":
+        # Synthetic token generator template: test expects alpha-only tokens.
+        if "string.ascii_lowercase + string.digits" in src:
+            return one(
+                "    chars = string.ascii_lowercase + string.digits",
+                "    chars = string.ascii_lowercase",
+            )
+        # Fallback: seed random if used.
         if "import random" in src and "random.seed(" not in src:
             return one("import random", "import random\nrandom.seed(0)")
         return []
@@ -384,7 +452,7 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
     if category == "concurrency":
         # Add a lock + wrap read-modify-write in a critical section (synthetic counter template).
         hunks: List[Dict[str, str]] = []
-        lock_hunk = one("# Bug: no lock protecting _value", "        self._lock = threading.Lock()")
+        lock_hunk = one("        # Bug: no lock protecting _value", "        self._lock = threading.Lock()")
         if lock_hunk:
             hunks.extend(lock_hunk)
         # Wrap increment.
@@ -397,8 +465,10 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
         return hunks
     if category == "import_side_effect":
         # Guard import-time registration so it doesn't accumulate.
-        return one("_auto_register()  # Bug: runs every time module is imported/reloaded",
-                   "if not _plugins:\n    _auto_register()  # guarded auto-register")
+        return one(
+            "_auto_register()  # Bug: runs every time module is imported/reloaded",
+            "if not _plugins:\n    _auto_register()  # guarded auto-register",
+        )
     if category == "test_order_dependency":
         # Hard to safely generalize across templates; skip by default.
         return []
@@ -453,16 +523,18 @@ def build_sft_rows_synthetic(
         print(f"[SYN] test={c.test_identifier} root_file={manifest.get('root_cause_file','source.py')}", flush=True)
 
         if install_deps:
-            req = c.repo_dir / "requirements.txt"
-            if req.exists() and req.stat().st_size > 0:
-                try:
-                    print(f"[SYNDEPS] installing requirements.txt ({req.stat().st_size} bytes)", flush=True)
-                    _pip_install(["install", "-r", str(req)], prefix=f"[SYNDEPS:{c.slug}] ")
-                except Exception as exc:
-                    deps_failed.append(c.slug)
-                    print(f"[SYNDEPS] FAIL {c.slug}: {exc}", flush=True)
-            else:
-                print("[SYNDEPS] no requirements.txt (skipping)", flush=True)
+            try:
+                # Always ensure pytest exists for verification.
+                _pip_install(["install", "-U", "pytest", "pytest-asyncio"], prefix=f"[SYNDEPS:{c.slug}] ")
+                pkgs = _infer_imported_packages(c.repo_dir)
+                print(f"[SYNDEPS] inferred_packages={pkgs}", flush=True)
+                if pkgs:
+                    _pip_install(["install", "-U", *pkgs], prefix=f"[SYNDEPS:{c.slug}] ")
+                else:
+                    print("[SYNDEPS] no external imports detected (stdlib-only)", flush=True)
+            except Exception as exc:
+                deps_failed.append(c.slug)
+                print(f"[SYNDEPS] FAIL {c.slug}: {exc}", flush=True)
 
         hunks = _synthetic_fix_hunks(manifest, c.repo_dir)
         if not hunks:
@@ -1053,6 +1125,11 @@ def submit_hf_job(
         f"git clone --depth 1 --branch {shlex.quote(branch)} {shlex.quote(git_url)} /workspace; "
         "cd /workspace; "
         "echo '[JOB] repo HEAD='$(git rev-parse HEAD); "
+        # Global pip constraints for ancient pinned deps on modern Python (py3.11+).
+        # pip honors PIP_CONSTRAINT for *all* installs, including build isolation.
+        "echo 'sympy>=1.10' > /workspace/.flakeforge_global_constraints.txt; "
+        "export PIP_CONSTRAINT=/workspace/.flakeforge_global_constraints.txt; "
+        "echo '[JOB] PIP_CONSTRAINT='${PIP_CONSTRAINT}; "
         "python -m pip install --upgrade pip wheel setuptools; "
         "pip install -r training-requirements.txt; "
         f"python training/sft_hf_onefile.py run {forwarded}"
@@ -1232,7 +1309,7 @@ def main() -> None:
         seed_root = Path(args.seed_root)
         workdir = Path(args.workdir)
         repo_clone_root = workdir / "cloned_repos"
-        dataset_path = workdir / "datasets" / "idoft_sft.jsonl"
+        dataset_path = workdir / "datasets" / "sft.jsonl"
         graph_path = workdir / "graphs" / "sft_pipeline.mmd"
         summary_path = workdir / "reports" / "run_summary.json"
 
