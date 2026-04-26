@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>FlakeForge — RL Agent for Flaky Test Repair</title>
+<title>FlakeForge</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet"/>
 <style>
 :root {
@@ -31,7 +31,6 @@
 html { scroll-behavior: smooth; }
 body { background: var(--bg); color: var(--text); font-family: 'Inter', -apple-system, sans-serif; overflow-x: hidden; -webkit-font-smoothing: antialiased; }
 
-/* NAV */
 nav {
   position: fixed; top: 0; left: 0; right: 0; z-index: 200;
   display: flex; align-items: center; justify-content: space-between;
@@ -46,7 +45,6 @@ nav {
 .nav-links a:hover { color: var(--text); }
 .nav-badge { background: var(--amber-dim); border: 1px solid rgba(245,158,11,.2); color: var(--amber); padding: .3rem .75rem; border-radius: 100px; font-family: 'JetBrains Mono', monospace; font-size: .6rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 
-/* HERO */
 .hero {
   min-height: 100vh; display: flex; flex-direction: column;
   align-items: center; justify-content: center;
@@ -70,7 +68,7 @@ h1.hero-title {
 }
 h1.hero-title em { color: var(--amber); font-style: normal; }
 .hero-sub {
-  max-width: 520px; color: var(--dim); font-size: .95rem;
+  max-width: 560px; color: var(--dim); font-size: .95rem;
   line-height: 1.7; margin-top: 1.2rem; font-weight: 400;
   opacity: 0; animation: fadeUp .5s .3s ease forwards;
 }
@@ -93,7 +91,6 @@ h1.hero-title em { color: var(--amber); font-style: normal; }
 }
 .btn-ghost:hover { border-color: var(--amber); color: var(--amber); }
 
-/* HERO TERMINAL */
 .hero-terminal {
   width: 100%; max-width: 780px; margin-top: 3.5rem;
   background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius);
@@ -107,22 +104,10 @@ h1.hero-title em { color: var(--amber); font-style: normal; }
 .tdot { width: 10px; height: 10px; border-radius: 50%; }
 .tdot.r { background: #ef4444; } .tdot.y { background: #f59e0b; } .tdot.g { background: #22c55e; }
 .term-title { margin-left: .5rem; font-family: 'JetBrains Mono', monospace; font-size: .68rem; color: var(--muted); }
-.term-body { display: grid; grid-template-columns: 1fr 1fr; }
-.term-col {
-  padding: 1.2rem 1.4rem; font-family: 'JetBrains Mono', monospace;
-  font-size: .72rem; line-height: 1.9;
-}
-.term-col:first-child { border-right: 1px solid var(--border); }
-.term-col-label {
-  font-size: .58rem; letter-spacing: .14em; text-transform: uppercase;
-  color: var(--muted); margin-bottom: .7rem; padding-bottom: .45rem; border-bottom: 1px solid var(--border);
-}
+.term-body { padding: 1.2rem 1.4rem; font-family: 'JetBrains Mono', monospace; font-size: .72rem; line-height: 1.9; text-align: left; }
 .c-red { color: var(--red); } .c-green { color: var(--green); } .c-amber { color: var(--amber); }
-.c-teal { color: var(--teal); } .c-purple { color: var(--purple); } .c-dim { color: var(--muted); }
-.flicker { animation: flk 2.2s infinite; }
-@keyframes flk { 0%,48% { color: var(--red); } 50%,98% { color: var(--green); } 100% { color: var(--red); } }
+.c-teal { color: var(--teal); } .c-dim { color: var(--muted); }
 
-/* STATS ROW */
 .stats-row {
   display: grid; grid-template-columns: repeat(4, 1fr);
   border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
@@ -138,7 +123,6 @@ h1.hero-title em { color: var(--amber); font-style: normal; }
   color: var(--muted); margin-top: .5rem; letter-spacing: .05em; text-transform: uppercase;
 }
 
-/* SECTIONS */
 section { padding: 6rem 2rem; }
 .sec-inner { max-width: 1100px; margin: 0 auto; }
 .sec-label {
@@ -147,14 +131,12 @@ section { padding: 6rem 2rem; }
   margin-bottom: .6rem;
 }
 .sec-title { font-size: clamp(1.6rem, 2.8vw, 2.2rem); font-weight: 800; letter-spacing: -.03em; line-height: 1.15; }
-.sec-desc { color: var(--dim); font-size: .9rem; line-height: 1.7; margin-top: .7rem; max-width: 520px; }
+.sec-desc { color: var(--dim); font-size: .9rem; line-height: 1.7; margin-top: .7rem; max-width: 560px; }
 .sec-header { margin-bottom: 3.5rem; }
 
-/* REVEAL */
 .reveal { opacity: 0; transform: translateY(20px); transition: opacity .6s ease, transform .6s ease; }
 .reveal.on { opacity: 1; transform: translateY(0); }
 
-/* HOW IT WORKS */
 .steps-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
 .step-card {
   background: var(--bg2); border: 1px solid var(--border);
@@ -169,16 +151,11 @@ section { padding: 6rem 2rem; }
 }
 .step-icon { margin-bottom: 1rem; color: var(--amber); line-height: 0; }
 .step-icon svg { width: 28px; height: 28px; display: block; }
-.action-card .ac-icon { line-height: 0; color: var(--muted); }
-.action-card .ac-icon svg { width: 20px; height: 20px; display: block; margin: 0 auto .25rem; }
-.action-card.selected .ac-icon { color: var(--amber); }
-.action-card.considering .ac-icon { color: var(--dim); }
 .step-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: .5rem; }
 .step-card p { font-size: .82rem; color: var(--dim); line-height: 1.65; }
 
-/* EPISODE SECTION */
 .ep-section { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.run-controls { display: flex; align-items: center; gap: 1rem; margin-bottom: 2.5rem; }
+.run-controls { display: flex; align-items: center; gap: 1rem; margin-bottom: 2.5rem; flex-wrap: wrap; }
 .run-btn {
   background: var(--amber); color: #000; border: none;
   padding: .65rem 1.5rem; border-radius: 8px;
@@ -190,10 +167,8 @@ section { padding: 6rem 2rem; }
 .ep-status { font-family: 'JetBrains Mono', monospace; font-size: .72rem; color: var(--muted); }
 .ep-status em { color: var(--amber); font-style: normal; }
 
-/* EPISODE GRID — wide, clean 2-col */
 .ep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
 
-/* PANEL SHARED */
 .panel {
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: var(--radius); overflow: hidden;
@@ -209,47 +184,28 @@ section { padding: 6rem 2rem; }
   padding: 1rem; font-family: 'JetBrains Mono', monospace;
   font-size: .72rem; line-height: 1.85;
 }
-.panel-body::-webkit-scrollbar { width: 3px; } .panel-body::-webkit-scrollbar-thumb { background: var(--border2); }
-
-/* CODE PANEL */
-.hi-line {
-  display: block; background: rgba(239,68,68,.08);
-  border-left: 2px solid var(--red); padding-left: .5rem;
-  animation: pulse-r 2s infinite;
+.panel-body pre {
+  white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: inherit;
+  margin: 0; max-height: 280px; overflow: auto;
 }
-@keyframes pulse-r { 0%,100% { background: rgba(239,68,68,.06); } 50% { background: rgba(239,68,68,.15); } }
-.patch-line { display: block; opacity: 0; transform: translateX(-6px); transition: opacity .25s, transform .25s; }
-.patch-line.show { opacity: 1; transform: translateX(0); }
-.p-add { border-left: 2px solid var(--green); padding-left: .5rem; color: var(--green); }
-.p-rem { border-left: 2px solid var(--red); padding-left: .5rem; color: var(--red); text-decoration: line-through; opacity: .6; }
-.p-neu { color: var(--dim); }
-
-/* CAUSAL GRAPH */
 canvas#cgCanvas { display: block; width: 100%; height: 220px; }
 
-/* ACTION GRID */
-.action-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: .45rem; padding: 1rem; }
-.action-card {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-  padding: .55rem .5rem; font-family: 'JetBrains Mono', monospace;
-  font-size: .58rem; color: var(--muted); text-align: center; cursor: default;
-  transition: all .3s;
+.step-pill-wrap { display: flex; flex-wrap: wrap; gap: .4rem; padding: 1rem; }
+.step-pill {
+  font-family: 'JetBrains Mono', monospace; font-size: .58rem;
+  padding: .35rem .6rem; border-radius: 6px; border: 1px solid var(--border);
+  color: var(--muted);
 }
-.action-card .ac-name { font-size: .55rem; letter-spacing: .04em; text-transform: uppercase; display: block; }
-.action-card.considering { border-color: rgba(245,158,11,.4); background: rgba(245,158,11,.04); color: var(--dim); animation: consider-pulse .6s ease infinite alternate; }
-@keyframes consider-pulse { 0% { border-color: rgba(245,158,11,.3); } 100% { border-color: rgba(245,158,11,.7); } }
-.action-card.selected { border-color: var(--amber); background: rgba(245,158,11,.1); color: var(--amber); box-shadow: 0 0 16px var(--amber-glow); }
-.action-card.rejected { opacity: .2; }
+.step-pill.current { border-color: var(--amber); color: var(--amber); background: rgba(245,158,11,.08); }
 
-/* REWARD BARS */
 .reward-bars { padding: 1rem; display: flex; flex-direction: column; gap: .45rem; }
 .rbar-row { display: flex; align-items: center; gap: .6rem; }
-.rbar-label { font-family: 'JetBrains Mono', monospace; font-size: .6rem; color: var(--muted); width: 130px; flex-shrink: 0; text-align: right; }
+.rbar-label { font-family: 'JetBrains Mono', monospace; font-size: .58rem; color: var(--muted); width: 140px; flex-shrink: 0; text-align: right; }
 .rbar-track { flex: 1; height: 14px; background: var(--bg); border-radius: 4px; overflow: hidden; }
-.rbar-fill { height: 100%; width: 0%; border-radius: 4px; transition: width .6s cubic-bezier(.22,1,.36,1); }
+.rbar-fill { height: 100%; width: 0%; border-radius: 4px; transition: width .5s cubic-bezier(.22,1,.36,1); }
 .rbar-fill.pos { background: linear-gradient(90deg, rgba(34,197,94,.35), var(--green)); }
 .rbar-fill.neg { background: linear-gradient(90deg, rgba(239,68,68,.35), var(--red)); float: right; }
-.rbar-val { font-family: 'JetBrains Mono', monospace; font-size: .58rem; width: 45px; flex-shrink: 0; color: var(--dim); }
+.rbar-val { font-family: 'JetBrains Mono', monospace; font-size: .58rem; width: 52px; flex-shrink: 0; color: var(--dim); text-align: right; }
 .rbar-val.pos { color: var(--green); } .rbar-val.neg { color: var(--red); }
 .reward-total {
   display: flex; justify-content: space-between; align-items: center;
@@ -258,26 +214,16 @@ canvas#cgCanvas { display: block; width: 100%; height: 220px; }
 }
 .reward-total-val { color: var(--amber); font-size: .95rem; }
 
-/* THINK STREAM */
-.think-body { min-height: 80px; max-height: 160px; overflow-y: auto; }
-.th { color: var(--amber); background: rgba(245,158,11,.08); padding: 0 4px; border-radius: 3px; font-weight: 700; }
-.think-cursor { display: inline-block; width: 2px; height: .85em; background: var(--amber); vertical-align: middle; margin-left: 1px; animation: blink .8s step-end infinite; }
-@keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+.think-body { min-height: 100px; max-height: 220px; overflow-y: auto; white-space: pre-wrap; }
 
-/* TIMELINE */
 .timeline-body { padding: 1rem; display: flex; gap: .5rem; align-items: flex-end; min-height: 60px; overflow-x: auto; }
-.timeline-body::-webkit-scrollbar { height: 3px; } .timeline-body::-webkit-scrollbar-thumb { background: var(--border2); }
-.tl-step { display: flex; flex-direction: column; align-items: center; gap: .25rem; flex-shrink: 0; opacity: 0; transform: translateY(8px); transition: all .3s; }
-.tl-step.show { opacity: 1; transform: translateY(0); }
-.tl-bar { width: 26px; border-radius: 3px 3px 0 0; transition: height .4s ease; background: var(--border2); }
-.tl-bar.done { background: linear-gradient(180deg, var(--amber), var(--amber2)); }
+.tl-step { display: flex; flex-direction: column; align-items: center; gap: .25rem; flex-shrink: 0; }
+.tl-bar { width: 26px; border-radius: 3px 3px 0 0; background: linear-gradient(180deg, var(--amber), var(--amber2)); }
 .tl-bar.pass { background: linear-gradient(180deg, var(--green), #16a34a); }
 .tl-label { font-family: 'JetBrains Mono', monospace; font-size: .5rem; color: var(--muted); }
 
-/* FULL-WIDTH PANELS */
 .ep-full { grid-column: 1 / -1; }
 
-/* REWARD CHART */
 .chart-section { border-bottom: 1px solid var(--border); }
 .chart-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 2.5rem; }
 .chart-head {
@@ -285,49 +231,21 @@ canvas#cgCanvas { display: block; width: 100%; height: 220px; }
   padding: .65rem 1.2rem; background: var(--bg3); border-bottom: 1px solid var(--border);
   font-family: 'JetBrains Mono', monospace; font-size: .68rem; color: var(--muted);
 }
-.legend { display: flex; gap: 1.5rem; }
-.leg { display: flex; align-items: center; gap: .4rem; font-size: .65rem; }
-.leg-dot { width: 8px; height: 8px; border-radius: 50%; }
+.chart-empty { padding: 2rem; text-align: center; color: var(--muted); font-size: .85rem; }
 canvas#rwChart { display: block; width: 100%; height: 220px; }
 
-/* COMPARE */
-.cmp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.2rem; }
-.cmp-card {
+.cap-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.2rem; }
+.cap-card {
   background: var(--bg2); border: 1px solid var(--border);
-  border-radius: var(--radius); overflow: hidden; transition: transform .2s, border-color .3s;
+  border-radius: var(--radius); padding: 1.25rem 1.4rem;
 }
-.cmp-card:hover { transform: translateY(-3px); }
-.cmp-card.win { border-color: rgba(245,158,11,.3); }
-.cmp-head {
-  padding: .9rem 1.1rem; background: var(--bg3); border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-}
-.cmp-title { font-weight: 700; font-size: .88rem; }
-.badge { font-family: 'JetBrains Mono', monospace; font-size: .55rem; padding: .2rem .6rem; border-radius: 4px; font-weight: 700; letter-spacing: .04em; }
-.b-red { background: rgba(239,68,68,.12); color: var(--red); }
-.b-dim { background: rgba(255,255,255,.05); color: var(--muted); }
-.b-amb { background: rgba(245,158,11,.12); color: var(--amber); }
-.cmp-body { padding: 1.2rem; }
-.cmp-item { display: flex; gap: .5rem; font-size: .8rem; color: var(--dim); line-height: 1.55; margin-bottom: .5rem; }
-.cmp-code {
-  background: var(--bg3); border: 1px solid var(--border); border-radius: 8px;
-  padding: .65rem .85rem; margin-top: .7rem;
-  font-family: 'JetBrains Mono', monospace; font-size: .65rem; color: var(--muted); line-height: 1.75;
-}
-.cmp-result {
-  display: flex; align-items: center; gap: .4rem; margin-top: .9rem;
-  padding: .4rem .75rem; border-radius: 6px; font-size: .72rem;
-  font-weight: 700; font-family: 'JetBrains Mono', monospace;
-}
-.cr-fail { background: rgba(239,68,68,.08); color: var(--red); }
-.cr-pass { background: rgba(34,197,94,.08); color: var(--green); }
+.cap-card h3 { font-size: .9rem; margin-bottom: .75rem; }
+.cap-card ul { font-size: .78rem; color: var(--dim); line-height: 1.65; padding-left: 1.1rem; }
 
-/* CHALLENGE */
 .chal-box {
   background: var(--bg2); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 2rem; position: relative; overflow: hidden;
 }
-.chal-presets { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
 .preset {
   background: var(--bg3); border: 1px solid var(--border); color: var(--dim);
   padding: .35rem .85rem; border-radius: 100px;
@@ -335,13 +253,6 @@ canvas#rwChart { display: block; width: 100%; height: 220px; }
   cursor: pointer; transition: all .2s;
 }
 .preset:hover { border-color: var(--amber); color: var(--amber); }
-.chal-ta {
-  width: 100%; height: 140px; background: var(--bg3); border: 1px solid var(--border);
-  border-radius: 8px; padding: 1rem; color: var(--text);
-  font-family: 'JetBrains Mono', monospace; font-size: .74rem; line-height: 1.7;
-  resize: none; outline: none; transition: border-color .2s;
-}
-.chal-ta:focus { border-color: var(--amber); }
 .chal-out {
   background: var(--bg3); border: 1px solid var(--border); border-radius: 8px;
   padding: 1rem; margin-top: 1rem;
@@ -349,21 +260,20 @@ canvas#rwChart { display: block; width: 100%; height: 220px; }
   color: var(--dim); line-height: 1.9; display: none; white-space: pre-wrap;
 }
 
-/* FOOTER */
 footer {
   padding: 2rem; display: flex; align-items: center; justify-content: space-between;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border); flex-wrap: wrap; gap: 1rem;
 }
 .ft-logo { font-weight: 800; font-size: .95rem; }
 .ft-logo em { color: var(--amber); font-style: normal; }
-.ft-right { font-family: 'JetBrains Mono', monospace; font-size: .62rem; color: var(--muted); }
+.ft-right { font-family: 'JetBrains Mono', monospace; font-size: .62rem; color: var(--muted); max-width: 520px; text-align: right; }
 
 @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg2); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 @media (max-width: 900px) {
-  .steps-grid, .cmp-grid { grid-template-columns: 1fr; }
+  .steps-grid, .cap-grid { grid-template-columns: 1fr; }
   .ep-grid { grid-template-columns: 1fr; }
   .stats-row { grid-template-columns: repeat(2, 1fr); }
   .stat-cell:nth-child(2) { border-right: none; }
@@ -371,8 +281,6 @@ footer {
 @media (max-width: 600px) {
   .stats-row { grid-template-columns: 1fr; }
   .stat-cell { border-right: none; border-bottom: 1px solid var(--border); }
-  .term-body { grid-template-columns: 1fr; }
-  .term-col:first-child { border-right: none; border-bottom: 1px solid var(--border); }
   nav { padding: 0 1rem; }
   .nav-links { display: none; }
 }
@@ -380,324 +288,212 @@ footer {
 </head>
 <body>
 
-<!-- NAV -->
 <nav>
   <div class="logo"><span>Flake<em>Forge</em></span></div>
   <div class="nav-links">
     <a href="#how">How It Works</a>
-    <a href="#episode">Live Demo</a>
-    <a href="#results">Results</a>
-    <a href="#challenge">Challenge</a>
+    <a href="#episode">Live run</a>
+    <a href="#results">Training</a>
+    <a href="#capabilities">Signals</a>
+    <a href="#challenge">Analyze</a>
   </div>
-  <div class="nav-badge">Team Prism</div>
+  <div class="nav-badge" id="navBadge" style="display:none"></div>
 </nav>
 
-<!-- HERO -->
 <section class="hero">
   <div class="hero-glow"></div>
-  <div class="hero-eyebrow">RLVR + GRPO + Causal Reasoning</div>
-  <h1 class="hero-title">The agent that knows<br/><em>why</em> tests break.</h1>
-  <p class="hero-sub">FlakeForge reasons about root causes using a causal graph, runs chaos probes, and applies verified structural fixes. Trained end-to-end with GRPO and verifiable environment rewards.</p>
+  <div class="hero-eyebrow" id="heroEyebrow"></div>
+  <h1 class="hero-title" id="heroTitle"></h1>
+  <p class="hero-sub" id="heroSub"></p>
   <div class="hero-actions">
-    <button class="btn-primary" onclick="scrollTo('#episode')">Watch it reason</button>
-    <button class="btn-ghost" onclick="scrollTo('#challenge')">Try it yourself</button>
+    <button type="button" class="btn-primary" id="heroRunBtn">Run episode</button>
+    <button type="button" class="btn-ghost" onclick="document.getElementById('challenge').scrollIntoView({behavior:'smooth'})">Analyze files</button>
   </div>
 
   <div class="hero-terminal">
-    <div class="term-bar"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><div class="term-title">cpu_timing_race — before / after</div></div>
-    <div class="term-body">
-      <div class="term-col">
-        <div class="term-col-label">Before — Flaky</div>
-        <span class="c-dim">$ pytest test_counter.py --count=5</span><br/>
-        Run 1: <span class="c-red">FAILED</span> <span class="c-dim">[assert 97 == 100]</span><br/>
-        Run 2: <span class="c-green">passed</span> <span class="c-dim">[32ms]</span><br/>
-        Run 3: <span class="flicker">FAILED</span> <span class="c-dim">[assert 98 == 100]</span><br/>
-        Run 4: <span class="c-green">passed</span><br/>
-        Run 5: <span class="c-red">FAILED</span><br/><br/>
-        <span class="c-red">flakiness: 60% — root cause unknown</span>
-      </div>
-      <div class="term-col">
-        <div class="term-col-label">After — FlakeForge</div>
-        <span class="c-amber">root_cause: TIMING_RACE</span><br/>
-        <span class="c-dim">boundary: counter.py:increment()</span><br/>
-        <span class="c-teal">fix: threading.Lock (+2 lines)</span><br/><br/>
-        <span class="c-dim">$ pytest test_counter.py --count=20</span><br/>
-        <span class="c-green">20/20 passed</span><br/>
-        <span class="c-green">no regressions</span><br/>
-        <span class="c-amber">reward: +7.4</span>
-      </div>
+    <div class="term-bar">
+      <div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div>
+      <div class="term-title" id="termTitle">environment</div>
     </div>
+    <div class="term-body" id="envSummary">Loading…</div>
   </div>
 </section>
 
-<!-- STATS -->
-<div class="stats-row">
-  <div class="stat-cell"><div class="stat-val" data-to="8">0</div><div class="stat-lbl">Flake Categories</div></div>
-  <div class="stat-cell"><div class="stat-val" data-to="94" data-sfx="%">0%</div><div class="stat-lbl">Fix Accuracy</div></div>
-  <div class="stat-cell"><div class="stat-val" data-to="14">0</div><div class="stat-lbl">Max Steps / Episode</div></div>
-  <div class="stat-cell"><div class="stat-val" data-to="3" data-sfx=".5B">0</div><div class="stat-lbl">Agent Parameters</div></div>
+<div class="stats-row" id="statsRow">
+  <div class="stat-cell"><div class="stat-val" id="statCat">—</div><div class="stat-lbl">Root-cause categories</div></div>
+  <div class="stat-cell"><div class="stat-val" id="statFix">—</div><div class="stat-lbl">Historical fix rate</div></div>
+  <div class="stat-cell"><div class="stat-val" id="statSteps">—</div><div class="stat-lbl">Max steps / episode</div></div>
+  <div class="stat-cell"><div class="stat-val" id="statModel">—</div><div class="stat-lbl">Model</div></div>
 </div>
 
-<!-- HOW IT WORKS -->
 <section id="how">
 <div class="sec-inner">
   <div class="sec-header reveal">
-    <div class="sec-label">How it works</div>
-    <h2 class="sec-title">Three-phase causal reasoning.</h2>
-    <p class="sec-desc">Every episode follows the same disciplined pipeline: probe the environment, trace the causal boundary, and apply a verified minimal fix.</p>
+    <div class="sec-label">Pipeline</div>
+    <h2 class="sec-title">Environment-in-the-loop repair.</h2>
+    <p class="sec-desc">Each episode resets a real test repo in Docker, observes pytest stability, applies a structured patch action, and scores with verifiable signals from the environment (not an LLM judge).</p>
   </div>
   <div class="steps-grid reveal">
     <div class="step-card">
-      <div class="step-num">Phase 01</div>
-      <div class="step-icon" title="Chaos probe"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z" stroke-linejoin="round"/></svg></div>
-      <h3>Chaos Probe</h3>
-      <p>Inject CPU stress, network delay, or I/O contention to amplify the flake. If the failure rate spikes, the test is infrastructure-sensitive — a strong causal signal.</p>
+      <div class="step-num">01</div>
+      <div class="step-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z" stroke-linejoin="round"/></svg></div>
+      <h3>Observe</h3>
+      <p>Reset the repo, run repeated pytest samples, and record pass rates, errors, and causal hints from the codebase.</p>
     </div>
     <div class="step-card">
-      <div class="step-num">Phase 02</div>
-      <div class="step-icon" title="Diagnose"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg></div>
-      <h3>Diagnose Boundary</h3>
-      <p>Build a causal graph from test entry to failure point. Isolate the exact file, function, and variable where non-determinism enters the execution path.</p>
+      <div class="step-num">02</div>
+      <div class="step-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg></div>
+      <h3>Reason + patch</h3>
+      <p>The agent emits structured claims and search/replace hunks. The server validates format, applies the patch in the container, and re-runs tests.</p>
     </div>
     <div class="step-card">
-      <div class="step-num">Phase 03</div>
-      <div class="step-icon" title="Apply and verify"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
-      <h3>Apply &amp; Verify</h3>
-      <p>Generate a minimal patch using the correct synchronization primitive. Verify with 20 pytest runs — zero regressions required to earn the full reward.</p>
+      <div class="step-num">03</div>
+      <div class="step-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+      <h3>Verify</h3>
+      <p>Rewards combine stability, compile success, regression checks, and oracle-aligned reasoning — all computed from environment state.</p>
     </div>
   </div>
 </div>
 </section>
 
-<!-- EPISODE VISUALIZER -->
 <section class="ep-section" id="episode">
 <div class="sec-inner">
   <div class="sec-header reveal">
-    <div class="sec-label">Live demo</div>
-    <h2 class="sec-title">Watch the agent think, step by step.</h2>
-    <p class="sec-desc">Every internal signal visualised in real time — causal graph, action selection, reward breakdown, and chain-of-thought reasoning.</p>
+    <div class="sec-label">Live run</div>
+    <h2 class="sec-title">Real episode from your <code style="font-family:'JetBrains Mono',monospace;font-size:.85em;color:var(--amber)">FF_REPO_PATH</code>.</h2>
+    <p class="sec-desc">Calls <span class="c-dim">POST /api/episode/run</span> with repo path, test id, and limits from the server environment. Results below are returned JSON — not scripted demos.</p>
   </div>
 
   <div class="run-controls reveal">
-    <button class="run-btn" id="runBtn" onclick="startEpisode()">Run Episode</button>
-    <div class="ep-status">Status: <em id="epStatus">ready</em></div>
+    <button type="button" class="run-btn" id="runBtn">Run episode</button>
+    <div class="ep-status">Status: <em id="epStatus">idle</em></div>
   </div>
 
   <div class="ep-grid reveal">
-
-    <!-- Source code -->
     <div class="panel">
       <div class="panel-head">
-        <span>counter.py</span>
-        <span class="panel-head-tag c-red" id="srcTag">FLAKY</span>
+        <span id="srcHead">Source</span>
+        <span class="panel-head-tag c-red" id="srcTag">—</span>
       </div>
-      <div class="panel-body">
-<span class="c-dim">import threading</span><br/><br/>
-<span class="c-dim">counter = 0</span><br/><br/>
-<span class="c-dim">def increment():</span><br/>
-<span class="hi-line" id="raceLine">  global counter<br/>  temp = counter<br/>  temp += 1<br/>  counter = temp</span><br/><br/>
-<span class="c-dim">def run_threads(n):</span><br/>
-<span class="c-dim">  threads = [threading.Thread(</span><br/>
-<span class="c-dim">    target=increment) for _ in range(n)]</span><br/>
-<span class="c-dim">  for t in threads: t.start()</span><br/>
-<span class="c-dim">  for t in threads: t.join()</span>
-      </div>
+      <div class="panel-body"><pre id="srcBody"></pre></div>
     </div>
 
-    <!-- Causal Graph -->
     <div class="panel" id="causal">
       <div class="panel-head">
-        <span>Causal Graph</span>
-        <span class="panel-head-tag c-amber" id="cgStatus">idle</span>
+        <span>Causal graph</span>
+        <span class="panel-head-tag c-amber" id="cgStatus">—</span>
       </div>
       <canvas id="cgCanvas" height="220"></canvas>
     </div>
 
-    <!-- Patch -->
-    <div class="panel">
+    <div class="panel ep-full">
       <div class="panel-head">
-        <span>counter.py — patch</span>
-        <span class="panel-head-tag" id="patchTag">pending</span>
+        <span>Steps</span>
+        <span class="panel-head-tag" id="stepMeta">—</span>
       </div>
-      <div class="panel-body" id="patchBody"><span class="c-dim">// patch will appear here...</span></div>
+      <div class="step-pill-wrap" id="stepPills"></div>
     </div>
 
-    <!-- Action Space -->
     <div class="panel">
       <div class="panel-head">
-        <span>Action Space</span>
-        <span class="panel-head-tag" id="actionStatus">7 actions</span>
-      </div>
-      <div class="action-grid" id="actionGrid">
-        <div class="action-card" data-action="GATHER_EVIDENCE"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4-4"/></svg></div><span class="ac-name">gather</span></div>
-        <div class="action-card" data-action="CHAOS_PROBE"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z" stroke-linejoin="round"/></svg></div><span class="ac-name">chaos</span></div>
-        <div class="action-card" data-action="DIAGNOSE_BOUNDARY"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/></svg></div><span class="ac-name">diagnose</span></div>
-        <div class="action-card" data-action="ADD_SYNCHRONIZATION"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div><span class="ac-name">add_sync</span></div>
-        <div class="action-card" data-action="REFACTOR_CONCURRENCY"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6 8v2a4 4 0 0 0 4 4h2a4 4 0 0 1 4 4v2"/></svg></div><span class="ac-name">refactor</span></div>
-        <div class="action-card" data-action="ADD_RETRY"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-7.1L3 8M21 12a9 9 0 1 1-3-7.1L21 16"/></svg></div><span class="ac-name">retry</span></div>
-        <div class="action-card" data-action="MOCK_DEPENDENCY"><div class="ac-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div><span class="ac-name">mock</span></div>
-      </div>
-    </div>
-
-    <!-- Pytest results -->
-    <div class="panel">
-      <div class="panel-head">
-        <span id="pytestTitle">pytest — before fix</span>
+        <span id="pytestTitle">Pytest sample</span>
       </div>
       <div class="panel-body">
         <div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:.5rem" id="testDots"></div>
-        <div style="font-size:.68rem;color:var(--muted)" id="testSummary">pass rate: 60% (12/20)</div>
+        <div style="font-size:.68rem;color:var(--muted)" id="testSummary"></div>
       </div>
     </div>
 
-    <!-- Reward Breakdown -->
     <div class="panel">
       <div class="panel-head">
-        <span>Reward Breakdown</span>
-        <span class="panel-head-tag c-amber" id="rewardStep">step 0 / 3</span>
+        <span>Reward breakdown</span>
+        <span class="panel-head-tag c-amber" id="rewardStep">—</span>
       </div>
-      <div class="reward-bars" id="rewardBars">
-        <div class="rbar-row"><div class="rbar-label">r_action_match</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_action" style="width:0%"></div></div><div class="rbar-val pos" id="rv_action">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">r_chaos_probe</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_chaos" style="width:0%"></div></div><div class="rbar-val pos" id="rv_chaos">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">r_root_cause</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_root" style="width:0%"></div></div><div class="rbar-val pos" id="rv_root">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">r_primitive</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_prim" style="width:0%"></div></div><div class="rbar-val pos" id="rv_prim">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">r_pass_rate</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_pass" style="width:0%"></div></div><div class="rbar-val pos" id="rv_pass">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">r_diff_sim</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_diff" style="width:0%"></div></div><div class="rbar-val pos" id="rv_diff">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">r_efficiency</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_eff" style="width:0%"></div></div><div class="rbar-val pos" id="rv_eff">&mdash;</div></div>
-        <div class="rbar-row"><div class="rbar-label">p_step_budget</div><div class="rbar-track" style="direction:rtl"><div class="rbar-fill neg" id="rb_pen" style="width:0%"></div></div><div class="rbar-val neg" id="rv_pen">&mdash;</div></div>
-      </div>
-      <div class="reward-total"><span>Episode Reward</span><span class="reward-total-val" id="rewardTotal">&mdash;</span></div>
+      <div class="reward-bars" id="rewardBars"></div>
+      <div class="reward-total"><span>Step reward</span><span class="reward-total-val" id="rewardTotal">—</span></div>
     </div>
 
-    <!-- Chain of Thought -->
     <div class="panel ep-full">
       <div class="panel-head">
-        <span>Chain-of-Thought</span>
-        <span class="panel-head-tag" id="cotLabel">idle</span>
+        <span>Agent output (truncated)</span>
+        <span class="panel-head-tag" id="cotLabel">—</span>
       </div>
-      <div class="panel-body think-body" id="thinkBody"><span class="c-dim">// agent reasoning streams here...</span></div>
+      <div class="panel-body think-body" id="thinkBody"></div>
     </div>
 
-    <!-- Manifest Oracle -->
-    <div class="panel">
+    <div class="panel ep-full">
       <div class="panel-head">
-        <span>flake_manifest.json</span>
-        <span class="panel-head-tag c-amber">ORACLE</span>
+        <span id="manifestHead">flake_manifest.json</span>
+        <span class="panel-head-tag c-amber" id="manifestTag">—</span>
       </div>
-      <div class="panel-body" style="font-size:.68rem;line-height:2;">
-<span class="c-amber">"flake_category"</span>: <span class="c-green">"TIMING_RACE"</span><br/>
-<span class="c-amber">"correct_actions"</span>: <span class="c-teal">["CHAOS_PROBE","ADD_SYNC"]</span><br/>
-<span class="c-amber">"root_cause_file"</span>: <span class="c-green">"counter.py"</span><br/>
-<span class="c-amber">"root_cause_function"</span>: <span class="c-green">"increment"</span><br/>
-<span class="c-amber">"correct_primitive"</span>: <span class="c-green">"threading.Lock"</span><br/>
-<span class="c-amber">"min_pass_rate"</span>: <span style="color:#60a5fa">0.95</span>
-      </div>
+      <div class="panel-body"><pre id="manifestBody"></pre></div>
     </div>
 
-    <!-- Timeline -->
-    <div class="panel">
+    <div class="panel ep-full">
       <div class="panel-head">
-        <span>Episode Timeline</span>
-        <span class="panel-head-tag" id="tlLabel">0 steps</span>
+        <span>Episode timeline</span>
+        <span class="panel-head-tag" id="tlLabel">—</span>
       </div>
-      <div class="timeline-body" id="timelineBody">
-        <span style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--muted)">steps appear as episode runs</span>
-      </div>
+      <div class="timeline-body" id="timelineBody"></div>
     </div>
-
   </div>
 </div>
 </section>
 
-<!-- RESULTS CHART -->
 <section class="chart-section" id="results">
 <div class="sec-inner reveal">
   <div class="sec-header">
-    <div class="sec-label">Training dynamics</div>
-    <h2 class="sec-title">Learning, episode by episode.</h2>
-    <p class="sec-desc">GRPO with verifiable manifest rewards. The growing gap between FlakeForge and the random baseline is the RL signal working.</p>
+    <div class="sec-label">Training</div>
+    <h2 class="sec-title">Completed episode rewards (server memory).</h2>
+    <p class="sec-desc">Plotted from <span class="c-dim">GET /api/training/stats</span> — <code class="c-dim">reward_history</code>. If empty, complete an episode on this server first.</p>
   </div>
   <div class="chart-wrap">
     <div class="chart-head">
-      <span>Average Episode Reward</span>
-      <div class="legend">
-        <div class="leg"><div class="leg-dot" style="background:var(--amber)"></div><span>FlakeForge RLVR</span></div>
-        <div class="leg"><div class="leg-dot" style="background:#52525b"></div><span>Baseline</span></div>
-      </div>
+      <span id="chartTitle">Total reward per completed episode</span>
     </div>
+    <div class="chart-empty" id="chartEmpty" style="display:none">No completed episodes in this process yet.</div>
     <canvas id="rwChart"></canvas>
   </div>
 </div>
 </section>
 
-<!-- COMPARE -->
-<section>
+<section id="capabilities">
 <div class="sec-inner reveal">
   <div class="sec-header">
-    <div class="sec-label">vs. the alternatives</div>
-    <h2 class="sec-title">Others suppress. We understand.</h2>
+    <div class="sec-label">Signals</div>
+    <h2 class="sec-title">What the environment actually scores.</h2>
+    <p class="sec-desc">From <span class="c-dim">GET /api/info</span> — the reward signal names exposed by this build.</p>
   </div>
-  <div class="cmp-grid">
-    <div class="cmp-card">
-      <div class="cmp-head"><span class="cmp-title">Traditional Heuristics</span><span class="badge b-red">BRITTLE</span></div>
-      <div class="cmp-body">
-        <div class="cmp-item"><span>Hard-coded rules based on surface patterns, no causal understanding.</span></div>
-        <div class="cmp-item"><span>"If timeout, add sleep" — symptom suppression, never the real fix.</span></div>
-        <div class="cmp-code"><span class="c-dim"># heuristic</span><br/><span class="c-red">if "timeout" in err:</span><br/>&nbsp;&nbsp;sleep(5) <span class="c-dim"># treats symptom</span></div>
-        <div class="cmp-result cr-fail">Fails on novel flake patterns</div>
-      </div>
-    </div>
-    <div class="cmp-card">
-      <div class="cmp-head"><span class="cmp-title">Static Analysis</span><span class="badge b-dim">NO RUNTIME</span></div>
-      <div class="cmp-body">
-        <div class="cmp-item"><span>Parses AST and call graphs. Blind to runtime behaviour under CPU load.</span></div>
-        <div class="cmp-item"><span>Cannot detect races that only manifest under scheduler preemption.</span></div>
-        <div class="cmp-code"><span class="c-dim"># static sees threads</span><br/><span class="c-red">misses: read-modify-write race</span></div>
-        <div class="cmp-result cr-fail">Misses infra-sensitive bugs</div>
-      </div>
-    </div>
-    <div class="cmp-card win">
-      <div class="cmp-head"><span class="cmp-title">FlakeForge</span><span class="badge b-amb">ROOT CAUSE</span></div>
-      <div class="cmp-body">
-        <div class="cmp-item"><span>Causal graph tracing + chaos probes + RL-trained reasoning on exact boundaries.</span></div>
-        <div class="cmp-item"><span>Rewards from the environment — not an LLM judge's subjective opinion.</span></div>
-        <div class="cmp-code"><span class="c-amber">TIMING_RACE &rarr; counter.py:increment()</span><br/><span class="c-teal">threading.Lock applied</span><br/><span class="c-green">20/20 pass, 0 regressions</span></div>
-        <div class="cmp-result cr-pass">Verified fix, reward +7.4</div>
-      </div>
-    </div>
-  </div>
+  <div class="cap-grid" id="capGrid"></div>
 </div>
 </section>
 
-<!-- CHALLENGE -->
 <section id="challenge" style="border-top:1px solid var(--border)">
 <div class="sec-inner reveal" style="max-width:800px">
   <div class="sec-header">
-    <div class="sec-label">Try it yourself</div>
-    <h2 class="sec-title">Upload a codebase to test.</h2>
-    <p class="sec-desc">Upload a folder, multiple files, or a zip. FlakeForge will trace the causal boundary and propose a verified fix.</p>
+    <div class="sec-label">Analyze</div>
+    <h2 class="sec-title">Pattern + optional model analysis.</h2>
+    <p class="sec-desc">Uploads are read in the browser and sent to <span class="c-dim">POST /api/challenge/analyze</span>. There is no canned “FlakeForge Analysis” fallback text.</p>
   </div>
   <div class="chal-box">
-    <div class="chal-presets" style="gap:.6rem;flex-wrap:wrap">
+    <div class="chal-presets" style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin-bottom:1rem">
       <span style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--muted)">Input:</span>
       <label class="preset" style="cursor:pointer">
-        Upload folder
+        Folder
         <input id="chalFolder" type="file" webkitdirectory directory multiple style="display:none"/>
       </label>
       <label class="preset" style="cursor:pointer">
-        Upload files
+        Files
         <input id="chalFiles" type="file" multiple style="display:none"/>
       </label>
       <label class="preset" style="cursor:pointer">
-        Upload zip
+        Zip
         <input id="chalZip" type="file" accept=".zip,application/zip" style="display:none"/>
       </label>
-      <button class="preset" onclick="clearChallengeFiles()">Clear</button>
+      <button type="button" class="preset" onclick="clearChallengeFiles()">Clear</button>
     </div>
-    <div class="chal-out" id="chalFilesMeta" style="display:block;margin-top:.8rem;background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:.8rem 1rem;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:.7rem;line-height:1.7;">
-      No files selected.
-    </div>
-    <div style="margin-top:1rem"><button class="run-btn" id="chalRunBtn" onclick="runChallenge()">Forge a Fix</button></div>
+    <div id="chalFilesMeta" style="background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:.8rem 1rem;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:.7rem;line-height:1.7;white-space:pre-wrap">No files selected.</div>
+    <div style="margin-top:1rem"><button type="button" class="run-btn" id="chalRunBtn" disabled>Analyze</button></div>
     <div class="chal-out" id="chalOut"></div>
   </div>
 </div>
@@ -705,422 +501,459 @@ footer {
 
 <footer>
   <div class="ft-logo">Flake<em>Forge</em></div>
-  <div class="ft-right">Team Prism &middot; OpenEnv Hackathon &middot; GRPO + RLVR + Causal Verification</div>
+  <div class="ft-right" id="footerLine"></div>
 </footer>
 
 <script>
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-function scrollTo(sel) { document.querySelector(sel)?.scrollIntoView({ behavior: 'smooth' }); }
+
+let bootstrap = null;
+let episodeRunning = false;
 
 const revObs = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) e.target.classList.add('on'); }), { threshold: .08 });
 document.querySelectorAll('.reveal').forEach(r => revObs.observe(r));
 
-const statObs = new IntersectionObserver(es => {
-  es.forEach(e => {
-    if (!e.isIntersecting) return;
-    e.target.querySelectorAll('[data-to]').forEach(el => {
-      const to = +el.dataset.to, sfx = el.dataset.sfx || '';
-      let v = 0; const step = Math.ceil(to / 40);
-      const iv = setInterval(() => { v = Math.min(v + step, to); el.textContent = v + sfx; if (v >= to) clearInterval(iv); }, 30);
-    });
-    statObs.unobserve(e.target);
-  });
-}, { threshold: .5 });
-document.querySelectorAll('.stats-row').forEach(s => statObs.observe(s));
-
-const dotsCon = document.getElementById('testDots');
-for (let i = 0; i < 20; i++) {
-  const d = document.createElement('div');
-  d.style.cssText = `width:13px;height:13px;border-radius:3px;background:${i < 12 ? 'var(--green)' : 'var(--red)'}`;
-  dotsCon.appendChild(d);
+function shortModelLabel(name) {
+  if (!name) return '—';
+  const parts = name.split('/');
+  return (parts[parts.length - 1] || name).slice(0, 24);
 }
 
-// CAUSAL GRAPH
+function renderEnvSummary() {
+  const el = document.getElementById('envSummary');
+  const ed = bootstrap.episode_defaults;
+  const dr = bootstrap.default_repo;
+  const ui = bootstrap.ui;
+  const lines = [];
+  lines.push('<span class="c-dim">repo_path</span> <span class="c-teal">' + escapeHtml(ed.repo_path) + '</span>');
+  lines.push('<span class="c-dim">test_identifier</span> <span class="c-teal">' + escapeHtml(ed.test_identifier) + '</span>');
+  lines.push('<span class="c-dim">max_steps</span> ' + ed.max_steps + ' &nbsp; <span class="c-dim">num_runs</span> ' + ed.num_runs);
+  if (ui.model_name) lines.push('<span class="c-dim">MODEL_NAME</span> <span class="c-amber">' + escapeHtml(shortModelLabel(ui.model_name)) + '</span>');
+  if (ui.api_host) lines.push('<span class="c-dim">API_BASE_URL host</span> <span class="c-dim">' + escapeHtml(ui.api_host) + '</span>');
+  if (dr) {
+    lines.push('');
+    lines.push('<span class="c-dim">matched repo</span> <span class="c-green">' + escapeHtml(dr.name) + '</span> <span class="c-dim">(' + escapeHtml(dr.category) + ')</span>');
+  } else {
+    lines.push('');
+    lines.push('<span class="c-amber">No repo metadata match for FF_REPO_PATH — episode still uses the path above.</span>');
+  }
+  el.innerHTML = lines.join('<br/>');
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function animateStat(el, target, suffix = '', decimals = 0) {
+  const n = Number(target);
+  if (!Number.isFinite(n)) { el.textContent = '—'; return; }
+  const dur = 40;
+  let v = 0;
+  const step = Math.max(1, Math.ceil(Math.abs(n) / dur));
+  const iv = setInterval(() => {
+    v = n >= 0 ? Math.min(v + step, n) : Math.max(v - step, n);
+    el.textContent = (decimals ? v.toFixed(decimals) : v) + suffix;
+    if (v === n) clearInterval(iv);
+  }, 16);
+}
+
+function applyBootstrap() {
+  document.title = bootstrap.ui.hero_title + ' — FlakeForge';
+  const badge = document.getElementById('navBadge');
+  if (bootstrap.ui.team_name) {
+    badge.textContent = bootstrap.ui.team_name;
+    badge.style.display = '';
+  } else badge.style.display = 'none';
+
+  document.getElementById('heroEyebrow').textContent = bootstrap.ui.hero_eyebrow;
+  const ht = bootstrap.ui.hero_title || 'FlakeForge';
+  const hEl = document.getElementById('heroTitle');
+  if (ht === 'FlakeForge') hEl.innerHTML = 'Flake<em>Forge</em>';
+  else hEl.textContent = ht;
+  document.getElementById('heroSub').textContent = bootstrap.ui.hero_subtitle;
+  document.getElementById('footerLine').textContent = bootstrap.ui.footer_line;
+
+  renderEnvSummary();
+
+  const p = bootstrap.project;
+  const t = bootstrap.training;
+  animateStat(document.getElementById('statCat'), p.root_cause_categories.length, '', 0);
+  const fixPct = t.fix_rate * 100;
+  animateStat(document.getElementById('statFix'), fixPct, '%', fixPct % 1 ? 1 : 0);
+  animateStat(document.getElementById('statSteps'), p.max_steps_per_episode, '', 0);
+  document.getElementById('statModel').textContent = shortModelLabel(bootstrap.ui.model_name);
+
+  const cap = document.getElementById('capGrid');
+  cap.innerHTML = '';
+  const c1 = document.createElement('div');
+  c1.className = 'cap-card';
+  c1.innerHTML = '<h3>Root-cause categories</h3><ul>' + p.root_cause_categories.map(c => '<li>' + escapeHtml(c) + '</li>').join('') + '</ul>';
+  const c2 = document.createElement('div');
+  c2.className = 'cap-card';
+  c2.innerHTML = '<h3>Reward signals</h3><ul>' + p.reward_signals.map(c => '<li>' + escapeHtml(c) + '</li>').join('') + '</ul>';
+  cap.appendChild(c1);
+  cap.appendChild(c2);
+
+  const man = document.getElementById('manifestBody');
+  const tag = document.getElementById('manifestTag');
+  const mh = document.getElementById('manifestHead');
+  if (bootstrap.default_repo && bootstrap.default_repo.manifest) {
+    man.textContent = JSON.stringify(bootstrap.default_repo.manifest, null, 2);
+    tag.textContent = 'manifest';
+    tag.className = 'panel-head-tag c-green';
+    mh.textContent = (bootstrap.default_repo.name || 'repo') + '/flake_manifest.json';
+  } else {
+    man.textContent = '(no flake_manifest.json for matched repo — run still uses FF_REPO_PATH)';
+    tag.textContent = 'none';
+    tag.className = 'panel-head-tag c-dim';
+  }
+
+  loadDefaultSource();
+  renderTrainingChart();
+}
+
+async function loadDefaultSource() {
+  const pre = document.getElementById('srcBody');
+  const head = document.getElementById('srcHead');
+  pre.textContent = '';
+  const dr = bootstrap.default_repo;
+  if (!dr) {
+    head.textContent = 'Source';
+    pre.textContent = 'Select FF_REPO_PATH that matches a scanned test_repos entry to load file contents via /api/repos/{name}/source.';
+    return;
+  }
+  let file = 'source.py';
+  const m = dr.manifest;
+  if (m && typeof m.root_cause_file === 'string' && m.root_cause_file) file = m.root_cause_file;
+  head.textContent = file;
+  try {
+    const r = await fetch('/api/repos/' + encodeURIComponent(dr.name) + '/source?file=' + encodeURIComponent(file));
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    pre.textContent = data.content || '(empty)';
+  } catch (e) {
+    pre.textContent = 'Could not load source: ' + e;
+  }
+}
+
+function renderTestDots(passRate, n, container, summaryEl) {
+  container.innerHTML = '';
+  const passes = Math.round(Math.max(0, Math.min(1, passRate)) * n);
+  for (let i = 0; i < n; i++) {
+    const d = document.createElement('div');
+    d.style.cssText = 'width:13px;height:13px;border-radius:3px;background:' + (i < passes ? 'var(--green)' : 'var(--red)');
+    container.appendChild(d);
+  }
+  summaryEl.textContent = 'pass rate: ' + (passRate * 100).toFixed(1) + '% (' + passes + '/' + n + ')';
+}
+
 const cgCanvas = document.getElementById('cgCanvas');
 const cgCtx = cgCanvas.getContext('2d');
 
-const CG_NODES = [
-  { id: 'test', label: 'test_counter.py', x: .05, y: .5, color: '#52525b', glow: '#52525b' },
-  { id: 'runner', label: 'run_threads()', x: .22, y: .5, color: '#52525b', glow: '#52525b' },
-  { id: 'thread', label: 'Thread x100', x: .4, y: .25, color: '#52525b', glow: '#52525b' },
-  { id: 'inc', label: 'increment()', x: .58, y: .5, color: '#52525b', glow: '#52525b' },
-  { id: 'global', label: 'counter (global)', x: .78, y: .5, color: '#52525b', glow: '#52525b' },
-  { id: 'race', label: 'RACE CONDITION', x: .78, y: .2, color: '#ef4444', glow: '#ef4444' },
-  { id: 'lock', label: 'threading.Lock', x: .78, y: .78, color: '#22c55e', glow: '#22c55e' },
-];
-const CG_EDGES = [
-  { from: 'test', to: 'runner' },
-  { from: 'runner', to: 'thread' },
-  { from: 'thread', to: 'inc' },
-  { from: 'inc', to: 'global' },
-  { from: 'global', to: 'race' },
-  { from: 'lock', to: 'global', label: 'FIX' },
-];
+function resizeCG() {
+  cgCanvas.width = cgCanvas.offsetWidth || 600;
+  cgCanvas.height = 220;
+}
 
-let cgActivatedNodes = new Set();
-let cgActivatedEdges = new Set();
+function layoutCausalGraph(cg) {
+  const nodes = (cg && cg.nodes) ? cg.nodes : [];
+  const edges = (cg && cg.edges) ? cg.edges : [];
+  const n = nodes.length;
+  const laid = nodes.map((node, i) => {
+    const angle = n ? (2 * Math.PI * i) / n - Math.PI / 2 : 0;
+    const rx = n > 1 ? 0.38 : 0;
+    return {
+      id: node.id,
+      label: (node.file ? node.file + ' · ' : '') + String(node.id).slice(0, 18),
+      x: 0.5 + rx * Math.cos(angle),
+      y: 0.5 + rx * Math.sin(angle) * 0.85,
+      color: node.boundary ? '#f59e0b' : '#71717a',
+    };
+  });
+  return { laid, edges };
+}
 
-function resizeCG() { cgCanvas.width = cgCanvas.offsetWidth; cgCanvas.height = 220; }
-resizeCG();
-window.addEventListener('resize', () => { resizeCG(); drawCG(); });
-
-function drawCG() {
+function drawCausalGraph(cg) {
+  resizeCG();
   const W = cgCanvas.width, H = cgCanvas.height;
   cgCtx.clearRect(0, 0, W, H);
-
-  CG_EDGES.forEach((e, i) => {
-    const fn = CG_NODES.find(n => n.id === e.from);
-    const tn = CG_NODES.find(n => n.id === e.to);
+  const { laid, edges } = layoutCausalGraph(cg);
+  const idTo = Object.fromEntries(laid.map(n => [n.id, n]));
+  edges.forEach((e, i) => {
+    const fn = idTo[e.from], tn = idTo[e.to];
     if (!fn || !tn) return;
     const fx = fn.x * W, fy = fn.y * H, tx = tn.x * W, ty = tn.y * H;
-    const active = cgActivatedEdges.has(i);
     cgCtx.save();
-    cgCtx.strokeStyle = active ? (e.label === 'FIX' ? '#22c55e' : '#f59e0b') : 'rgba(255,255,255,.06)';
-    cgCtx.lineWidth = active ? 2 : 1;
-    if (active) { cgCtx.shadowColor = cgCtx.strokeStyle; cgCtx.shadowBlur = 8; }
+    cgCtx.strokeStyle = 'rgba(245,158,11,.35)';
+    cgCtx.lineWidth = 1.5;
     cgCtx.beginPath();
-    const mx = (fx + tx) / 2, my = (fy + ty) / 2 - 20;
-    cgCtx.moveTo(fx, fy); cgCtx.quadraticCurveTo(mx, my, tx, ty);
+    cgCtx.moveTo(fx, fy);
+    cgCtx.lineTo(tx, ty);
     cgCtx.stroke();
-    const angle = Math.atan2(ty - my, tx - mx);
-    cgCtx.fillStyle = cgCtx.strokeStyle;
-    cgCtx.beginPath();
-    cgCtx.moveTo(tx, ty);
-    cgCtx.lineTo(tx - 9 * Math.cos(angle - 0.4), ty - 9 * Math.sin(angle - 0.4));
-    cgCtx.lineTo(tx - 9 * Math.cos(angle + 0.4), ty - 9 * Math.sin(angle + 0.4));
-    cgCtx.fill();
-    if (e.label && active) {
-      cgCtx.font = 'bold 9px JetBrains Mono';
-      cgCtx.fillStyle = '#22c55e';
-      cgCtx.fillText(e.label, (fx + tx) / 2, (fy + ty) / 2 - 28);
-    }
     cgCtx.restore();
   });
-
-  CG_NODES.forEach(n => {
+  laid.forEach(n => {
     const x = n.x * W, y = n.y * H;
-    const active = cgActivatedNodes.has(n.id);
-    const r = active ? 36 : 28;
+    const r = 30;
     cgCtx.save();
-    if (active) { cgCtx.shadowColor = n.glow; cgCtx.shadowBlur = 16; }
-    cgCtx.fillStyle = active ? n.color + '25' : 'rgba(255,255,255,.02)';
-    cgCtx.strokeStyle = active ? n.color : 'rgba(255,255,255,.08)';
-    cgCtx.lineWidth = active ? 1.5 : 1;
-    cgCtx.beginPath(); cgCtx.ellipse(x, y, r, 15, 0, 0, Math.PI * 2); cgCtx.fill(); cgCtx.stroke();
-    cgCtx.fillStyle = active ? n.color : '#52525b';
-    cgCtx.font = `${active ? 'bold ' : ''}9px JetBrains Mono`;
-    cgCtx.textAlign = 'center'; cgCtx.textBaseline = 'middle';
+    cgCtx.fillStyle = n.color + '22';
+    cgCtx.strokeStyle = n.color;
+    cgCtx.lineWidth = 1;
+    cgCtx.beginPath();
+    cgCtx.ellipse(x, y, r, 14, 0, 0, Math.PI * 2);
+    cgCtx.fill();
+    cgCtx.stroke();
+    cgCtx.fillStyle = n.color;
+    cgCtx.font = '9px JetBrains Mono';
+    cgCtx.textAlign = 'center';
+    cgCtx.textBaseline = 'middle';
     cgCtx.fillText(n.label, x, y);
     cgCtx.restore();
   });
 }
-drawCG();
 
-async function animateCG(nodeIds, edgeIds, delay = 300) {
-  for (let i = 0; i < nodeIds.length; i++) {
-    cgActivatedNodes.add(nodeIds[i]);
-    if (edgeIds[i] != null) cgActivatedEdges.add(edgeIds[i]);
-    drawCG();
-    await sleep(delay);
-  }
+window.addEventListener('resize', () => { if (bootstrap && bootstrap._lastCg) drawCausalGraph(bootstrap._lastCg); });
+
+function renderRewardBars(breakdown, stepReward) {
+  const host = document.getElementById('rewardBars');
+  host.innerHTML = '';
+  const entries = Object.entries(breakdown || {}).filter(([k]) => k !== 'total');
+  const maxAbs = Math.max(0.5, ...entries.map(([, v]) => Math.abs(Number(v) || 0)));
+  entries.forEach(([k, v]) => {
+    const val = Number(v) || 0;
+    const row = document.createElement('div');
+    row.className = 'rbar-row';
+    const neg = val < 0;
+    const pct = Math.min(100, (Math.abs(val) / maxAbs) * 100);
+    const lbl = document.createElement('div');
+    lbl.className = 'rbar-label';
+    lbl.textContent = k.replace(/_/g, ' ');
+    const track = document.createElement('div');
+    track.className = 'rbar-track';
+    if (neg) track.style.direction = 'rtl';
+    const fill = document.createElement('div');
+    fill.className = 'rbar-fill ' + (neg ? 'neg' : 'pos');
+    fill.style.width = pct + '%';
+    const rv = document.createElement('div');
+    rv.className = 'rbar-val ' + (neg ? 'neg' : 'pos');
+    rv.textContent = (val >= 0 ? '+' : '') + val.toFixed(3);
+    track.appendChild(fill);
+    row.appendChild(lbl);
+    row.appendChild(track);
+    row.appendChild(rv);
+    host.appendChild(row);
+  });
+  document.getElementById('rewardTotal').textContent = (stepReward >= 0 ? '+' : '') + Number(stepReward).toFixed(4);
 }
 
-function resetActions() {
-  document.querySelectorAll('.action-card').forEach(c => c.classList.remove('considering', 'selected', 'rejected'));
-}
-async function animateActions(selected) {
-  resetActions();
-  const cards = [...document.querySelectorAll('.action-card')];
-  cards.forEach(c => c.classList.add('considering'));
-  await sleep(800);
-  cards.forEach(c => {
-    c.classList.remove('considering');
-    if (c.dataset.action === selected) c.classList.add('selected');
-    else c.classList.add('rejected');
+function setStepPills(steps, currentIdx) {
+  const el = document.getElementById('stepPills');
+  el.innerHTML = '';
+  steps.forEach((s, i) => {
+    const p = document.createElement('div');
+    p.className = 'step-pill' + (i === currentIdx ? ' current' : '');
+    p.textContent = 'step ' + s.step + ' · ' + (s.action || '—');
+    el.appendChild(p);
   });
 }
 
-const rewardConfig = {
-  rb_action: { max: 5 }, rb_chaos: { max: 1 }, rb_root: { max: 1.5 },
-  rb_prim: { max: 1.5 }, rb_pass: { max: 10 }, rb_diff: { max: 2 },
-  rb_eff: { max: 3 }, rb_pen: { max: 2 }
-};
-
-function setRewardBar(id, value) {
-  const cfg = rewardConfig['rb_' + id];
-  const pct = Math.min(100, (Math.abs(value) / cfg.max) * 100);
-  document.getElementById('rb_' + id).style.width = pct + '%';
-  const rv = document.getElementById('rv_' + id);
-  rv.textContent = (value > 0 ? '+' : '') + value.toFixed(1);
-  rv.className = 'rbar-val ' + (value >= 0 ? 'pos' : 'neg');
-}
-
-function clearRewardBars() {
-  ['action', 'chaos', 'root', 'prim', 'pass', 'diff', 'eff', 'pen'].forEach(k => {
-    document.getElementById('rb_' + k).style.width = '0%';
-    document.getElementById('rv_' + k).textContent = '\u2014';
-  });
-  document.getElementById('rewardTotal').textContent = '\u2014';
-}
-
-async function typeThink(text, delay = 12) {
-  const el = document.getElementById('thinkBody');
-  el.innerHTML = '';
-  const cursor = '<span class="think-cursor"></span>';
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    const rest = text.slice(i);
-    if (rest.startsWith('[[')) {
-      const end = text.indexOf(']]', i);
-      const tag = text.slice(i + 2, end);
-      el.innerHTML = el.innerHTML.replace(cursor, '') + `<span class="th">${tag}</span>` + cursor;
-      i = end + 1; await sleep(delay * tag.length * .3); continue;
-    }
-    el.innerHTML = el.innerHTML.replace(cursor, '') + (ch === '\n' ? '<br/>' : ch) + cursor;
-    await sleep(delay);
-  }
-  el.innerHTML = el.innerHTML.replace(cursor, '');
-}
-
-const PATCH = [
-  { t: 'neu', c: 'import threading' },
-  { t: 'neu', c: '' },
-  { t: 'add', c: '_lock = threading.Lock()' },
-  { t: 'neu', c: 'counter = 0' },
-  { t: 'neu', c: '' },
-  { t: 'neu', c: 'def increment():' },
-  { t: 'neu', c: '  global counter' },
-  { t: 'rem', c: '  temp = counter' },
-  { t: 'rem', c: '  temp += 1' },
-  { t: 'rem', c: '  counter = temp' },
-  { t: 'add', c: '  with _lock:' },
-  { t: 'add', c: '    counter += 1' },
-];
-async function applyPatch() {
-  const el = document.getElementById('patchBody');
-  el.innerHTML = '';
-  document.getElementById('patchTag').textContent = 'applying...';
-  document.getElementById('patchTag').style.color = 'var(--amber)';
-  for (const line of PATCH) {
-    const sp = document.createElement('span');
-    sp.className = `patch-line ${line.t === 'add' ? 'p-add' : line.t === 'rem' ? 'p-rem' : 'p-neu'}`;
-    sp.innerHTML = (line.t === 'add' ? '<span style="color:var(--muted)">+</span> ' : line.t === 'rem' ? '<span style="color:var(--muted)">-</span> ' : '  ') + line.c + '<br/>';
-    el.appendChild(sp);
-    await sleep(70);
-    sp.classList.add('show');
-  }
-  document.getElementById('patchTag').textContent = 'patched';
-  document.getElementById('patchTag').style.color = 'var(--green)';
-}
-
-async function runAfterTests() {
-  const dots = document.getElementById('testDots');
-  const summary = document.getElementById('testSummary');
-  document.getElementById('pytestTitle').textContent = 'pytest — after fix (20 runs)';
-  dots.innerHTML = '';
-  for (let i = 0; i < 20; i++) {
-    const d = document.createElement('div');
-    d.style.cssText = 'width:13px;height:13px;border-radius:3px;background:var(--border2);transition:background .2s;';
-    dots.appendChild(d);
-    await sleep(80);
-    d.style.background = 'var(--green)';
-  }
-  summary.textContent = 'pass rate: 100% (20/20)';
-  summary.style.color = 'var(--green)';
-}
-
-const TL_STEPS = [
-  { label: 'GATHER', h: 30 },
-  { label: 'CHAOS', h: 50 },
-  { label: 'DIAGNOSE', h: 65 },
-  { label: 'ADD_SYNC', h: 95 },
-];
-async function addTimelineStep(i) {
+function buildTimeline(steps) {
   const el = document.getElementById('timelineBody');
-  if (i === 0) el.innerHTML = '';
-  const s = TL_STEPS[i];
-  const div = document.createElement('div');
-  div.className = 'tl-step';
-  const bar = document.createElement('div');
-  bar.className = 'tl-bar'; bar.style.height = '0px'; bar.style.width = '26px';
-  const lbl = document.createElement('div');
-  lbl.className = 'tl-label'; lbl.textContent = s.label;
-  div.appendChild(bar); div.appendChild(lbl);
-  el.appendChild(div);
-  await sleep(30); div.classList.add('show');
-  await sleep(50); bar.style.height = s.h + 'px';
-  await sleep(200); bar.className = 'tl-bar ' + (i === TL_STEPS.length - 1 ? 'pass' : 'done');
-  document.getElementById('tlLabel').textContent = `${i + 1} step${i > 0 ? 's' : ''}`;
+  el.innerHTML = '';
+  const maxR = Math.max(...steps.map(s => Math.abs(s.reward || 0)), 0.1);
+  steps.forEach((s, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'tl-step';
+    const bar = document.createElement('div');
+    const h = 20 + (Math.abs(s.reward) / maxR) * 70;
+    bar.className = 'tl-bar' + (i === steps.length - 1 && s.pass_rate_after >= 1 ? ' pass' : '');
+    bar.style.height = h + 'px';
+    const lbl = document.createElement('div');
+    lbl.className = 'tl-label';
+    lbl.textContent = '#' + s.step;
+    wrap.appendChild(bar);
+    wrap.appendChild(lbl);
+    el.appendChild(wrap);
+  });
 }
-
-const EP_STEPS = [
-  {
-    action: 'CHAOS_PROBE',
-    cgNodes: ['test', 'runner', 'thread', 'inc', 'global', 'race'],
-    cgEdges: [0, 1, 2, 3, 4],
-    think: `Analyzing observation...\n\nTest asserts counter == 100 after 100 threads call increment(). Failure is non-deterministic \u2014 3/5 runs fail. Pattern strongly suggests [[TIMING_RACE]] rather than logic error.\n\nIncrement() does: temp = counter / temp += 1 / counter = temp \u2014 non-atomic read-modify-write. Under CPU stress, threads preempt at the vulnerability window.\n\nRunning [[CHAOS_PROBE]] with CPU profile to amplify race window and confirm causal attribution...`,
-    rewards: { action: 1.0, chaos: 1.0, root: 0.5, prim: 0, pass: 0, diff: 0, eff: 0, pen: -0.3 },
-    total: '+2.2',
-  },
-  {
-    action: 'DIAGNOSE_BOUNDARY',
-    cgNodes: ['inc', 'global'],
-    cgEdges: [3, 4],
-    think: `CHAOS_PROBE complete \u2014 failure rate 60% \u2192 100% under CPU load. Infrastructure-sensitive confirmed.\n\nTracing [[causal boundary]]... Causal graph isolates counter.py:increment() as the exact boundary. The read-modify-write sequence on 'counter' (global) has no synchronization.\n\nCorrect primitive: [[threading.Lock]] \u2014 wrapping the critical section will make the operation atomic. Category match: [[TIMING_RACE]]`,
-    rewards: { action: 0, chaos: 0, root: 1.5, prim: 0, pass: 0, diff: 0, eff: 0, pen: -0.3 },
-    total: '+3.4',
-  },
-  {
-    action: 'ADD_SYNCHRONIZATION',
-    cgNodes: ['lock', 'global'],
-    cgEdges: [5],
-    think: `Boundary confirmed: counter.py:increment() \u2014 global counter, non-atomic increment.\n\nApplying [[ADD_SYNCHRONIZATION]] with [[threading.Lock]]. Patch is minimal \u2014 3 lines changed, scoped exactly to root_cause_function increment().\n\nPredicted pass_rate_after: [[1.0]] \u2014 race condition eliminated, all 20 runs should pass deterministically.\n\nManifest oracle confirms: correct_actions, correct_primitive, root_cause_file, root_cause_function \u2014 all matched.`,
-    rewards: { action: 3.0, chaos: 0, root: 0, prim: 1.5, pass: 8.0, diff: 1.8, eff: 3.0, pen: -0.3 },
-    total: '+17.0',
-    applyPatch: true, runTests: true,
-  },
-];
-
-let running = false;
 
 async function startEpisode() {
-  if (running) return;
-  running = true;
+  if (episodeRunning || !bootstrap) return;
+  episodeRunning = true;
   const btn = document.getElementById('runBtn');
-  btn.disabled = true; btn.textContent = 'Running...';
-  document.getElementById('epStatus').textContent = 'initializing';
+  const heroBtn = document.getElementById('heroRunBtn');
+  btn.disabled = true;
+  heroBtn.disabled = true;
+  btn.textContent = 'Running…';
+  heroBtn.textContent = 'Running…';
+  document.getElementById('epStatus').textContent = 'POST /api/episode/run';
 
-  cgActivatedNodes.clear(); cgActivatedEdges.clear(); drawCG();
-  resetActions(); clearRewardBars();
-  document.getElementById('patchBody').innerHTML = '<span class="c-dim">// patch will appear here...</span>';
-  document.getElementById('patchTag').textContent = 'pending'; document.getElementById('patchTag').style.color = '';
-  document.getElementById('pytestTitle').textContent = 'pytest \u2014 before fix';
-  const dots = document.getElementById('testDots'); dots.innerHTML = '';
-  for (let i = 0; i < 20; i++) { const d = document.createElement('div'); d.style.cssText = `width:13px;height:13px;border-radius:3px;background:${i < 12 ? 'var(--green)' : 'var(--red)'}`; dots.appendChild(d); }
-  document.getElementById('testSummary').textContent = 'pass rate: 60% (12/20)'; document.getElementById('testSummary').style.color = '';
-  document.getElementById('thinkBody').innerHTML = '<span class="c-dim">initializing agent...</span>';
-  document.getElementById('timelineBody').innerHTML = '<span style="font-family:\'JetBrains Mono\',monospace;font-size:.65rem;color:var(--muted)">steps appear as episode runs</span>';
-  document.getElementById('tlLabel').textContent = '0 steps';
-  document.getElementById('cotLabel').textContent = 'idle';
-  document.getElementById('rewardStep').textContent = 'step 0 / 3';
-  document.getElementById('cgStatus').textContent = 'tracing...';
+  const ed = bootstrap.episode_defaults;
+  document.getElementById('cgStatus').textContent = '…';
+  document.getElementById('rewardBars').innerHTML = '';
+  document.getElementById('rewardTotal').textContent = '—';
+  document.getElementById('thinkBody').textContent = '';
+  document.getElementById('stepPills').innerHTML = '';
+  document.getElementById('timelineBody').innerHTML = '';
+  document.getElementById('srcTag').textContent = '…';
 
-  await sleep(600);
+  try {
+    const resp = await fetch('/api/episode/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        repo_path: ed.repo_path,
+        test_identifier: ed.test_identifier,
+        max_steps: ed.max_steps,
+        num_runs: ed.num_runs,
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data.detail ? JSON.stringify(data.detail) : JSON.stringify(data));
+    }
 
-  for (let i = 0; i < EP_STEPS.length; i++) {
-    const step = EP_STEPS[i];
-    document.getElementById('epStatus').textContent = `step ${i + 1} \u2014 ${step.action}`;
-    document.getElementById('rewardStep').textContent = `step ${i + 1} / 3`;
-    document.getElementById('cotLabel').textContent = step.action;
-    document.getElementById('actionStatus').textContent = `evaluating \u2192 ${step.action}`;
-    document.getElementById('cgStatus').textContent = `tracing \u2192 ${step.action}`;
+    document.getElementById('epStatus').textContent = data.status || 'done';
+    document.getElementById('stepMeta').textContent = (data.steps && data.steps.length) ? data.steps.length + ' steps' : '0 steps';
 
-    await animateCG(step.cgNodes, step.cgEdges, 250);
-    await animateActions(step.action);
-    await typeThink(step.think, 11);
+    if (data.causal_graph) {
+      bootstrap._lastCg = data.causal_graph;
+      drawCausalGraph(data.causal_graph);
+      document.getElementById('cgStatus').textContent = ((data.causal_graph.nodes || []).length) + ' nodes';
+    } else {
+      document.getElementById('cgStatus').textContent = 'none';
+    }
 
-    const r = step.rewards;
-    setRewardBar('action', r.action); setRewardBar('chaos', r.chaos);
-    setRewardBar('root', r.root); setRewardBar('prim', r.prim);
-    setRewardBar('pass', r.pass); setRewardBar('diff', r.diff);
-    setRewardBar('eff', r.eff); setRewardBar('pen', r.pen);
-    document.getElementById('rewardTotal').textContent = step.total;
+    const n = ed.num_runs;
+    const dots = document.getElementById('testDots');
+    const summ = document.getElementById('testSummary');
+    document.getElementById('pytestTitle').textContent = 'Pytest stability (baseline → final)';
+    renderTestDots(data.baseline_pass_rate || 0, n, dots, summ);
+    setTimeout(() => {
+      renderTestDots(data.final_pass_rate != null ? data.final_pass_rate : 0, n, dots, summ);
+      if ((data.final_pass_rate || 0) >= 1) summ.style.color = 'var(--green)';
+    }, 400);
 
-    await addTimelineStep(i);
-    if (step.applyPatch) await applyPatch();
-    if (step.runTests) await runAfterTests();
-    await sleep(500);
+    const steps = data.steps || [];
+    setStepPills(steps, -1);
+    buildTimeline(steps);
+
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      document.getElementById('cotLabel').textContent = s.action || 'step';
+      document.getElementById('rewardStep').textContent = 'step ' + s.step + ' / ' + steps.length;
+      setStepPills(steps, i);
+      document.getElementById('thinkBody').textContent = s.think_summary || '(no think_summary)';
+      renderRewardBars(s.reward_breakdown || {}, s.reward || 0);
+      await sleep(350);
+    }
+
+    document.getElementById('tlLabel').textContent = steps.length + ' steps · total ' + (data.total_reward || 0);
+    document.getElementById('rewardTotal').textContent = Number(data.total_reward || 0).toFixed(4);
+    const fixed = (data.final_pass_rate || 0) >= 1;
+    document.getElementById('srcTag').textContent = fixed ? 'PASS RATE 100%' : 'OPEN';
+    document.getElementById('srcTag').style.color = fixed ? 'var(--green)' : 'var(--amber)';
+  } catch (err) {
+    document.getElementById('epStatus').textContent = 'error';
+    document.getElementById('thinkBody').textContent = String(err);
+    document.getElementById('cgStatus').textContent = 'error';
+  } finally {
+    btn.disabled = false;
+    heroBtn.disabled = false;
+    btn.textContent = 'Run again';
+    heroBtn.textContent = 'Run episode';
+    episodeRunning = false;
+    try {
+      const tr = await fetch('/api/training/stats');
+      if (tr.ok) {
+        const j = await tr.json();
+        bootstrap.training = j.stats;
+      }
+    } catch (_) {}
+    renderTrainingChart();
   }
-
-  document.getElementById('cgStatus').textContent = 'resolved';
-  document.getElementById('cotLabel').textContent = 'complete';
-  document.getElementById('epStatus').textContent = 'done \u2014 reward +7.4';
-  document.getElementById('srcTag').textContent = 'FIXED'; document.getElementById('srcTag').style.color = 'var(--green)';
-  document.getElementById('raceLine').style.animation = 'none'; document.getElementById('raceLine').style.borderLeft = '2px solid var(--green)'; document.getElementById('raceLine').style.background = 'rgba(34,197,94,.06)';
-
-  btn.disabled = false; btn.textContent = 'Run Again';
-  btn.onclick = () => { running = false; startEpisode(); };
-  running = false;
 }
 
-// REWARD CHART
 const rwCanvas = document.getElementById('rwChart');
 const rwCtx = rwCanvas.getContext('2d');
 let rwDrawn = 0;
-const N = 50;
-const flakeD = [], baseD = [];
-for (let i = 0; i < N; i++) {
-  const p = i / N;
-  flakeD.push(Math.max(-2, Math.min(10, -2 + p * 11.5 + Math.sin(i * .7) * .9 + (Math.random() - .5) * 1.1)));
-  baseD.push(Math.max(-2, Math.min(3, .4 + (Math.random() - .5) * 1.8)));
-}
 
-function drawRwChart(upTo) {
-  rwCanvas.width = rwCanvas.offsetWidth || 960; rwCanvas.height = 220;
+function renderTrainingChart() {
+  const empty = document.getElementById('chartEmpty');
+  const hist = (bootstrap && bootstrap.training && bootstrap.training.reward_history) ? bootstrap.training.reward_history : [];
+  if (!hist.length) {
+    empty.style.display = 'block';
+    rwCanvas.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  rwCanvas.style.display = 'block';
+  const N = hist.length;
+  rwCanvas.width = rwCanvas.offsetWidth || 960;
+  rwCanvas.height = 220;
   const W = rwCanvas.width, H = 220, pad = { t: 20, r: 20, b: 36, l: 44 };
   const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
   rwCtx.clearRect(0, 0, W, H);
+  const vmin = Math.min(...hist, -0.5);
+  const vmax = Math.max(...hist, 0.5);
+  const span = Math.max(vmax - vmin, 1e-6);
+  const xp = i => pad.l + (N <= 1 ? cW / 2 : (i / (N - 1)) * cW);
+  const yp = v => pad.t + cH - ((v - vmin) / span) * cH;
+
   for (let g = 0; g <= 4; g++) {
     const y = pad.t + (g / 4) * cH;
-    rwCtx.strokeStyle = 'rgba(255,255,255,.04)'; rwCtx.lineWidth = 1;
-    rwCtx.beginPath(); rwCtx.moveTo(pad.l, y); rwCtx.lineTo(W - pad.r, y); rwCtx.stroke();
-    rwCtx.fillStyle = '#52525b'; rwCtx.font = '10px JetBrains Mono'; rwCtx.textAlign = 'right';
-    rwCtx.fillText((10 - g * 2.5).toFixed(0), pad.l - 6, y + 4);
-  }
-  const xp = i => pad.l + (i / (N - 1)) * cW;
-  const yp = v => pad.t + cH - ((v + 2) / 14) * cH;
-
-  function drawLine(data, color, glow, lw) {
-    if (data.length < 2) return;
-    rwCtx.save();
-    if (glow) { rwCtx.shadowColor = glow; rwCtx.shadowBlur = 8; }
-    rwCtx.strokeStyle = color; rwCtx.lineWidth = lw || 2; rwCtx.lineJoin = 'round'; rwCtx.lineCap = 'round';
+    rwCtx.strokeStyle = 'rgba(255,255,255,.04)';
     rwCtx.beginPath();
-    data.forEach((v, i) => i === 0 ? rwCtx.moveTo(xp(i), yp(v)) : rwCtx.lineTo(xp(i), yp(v)));
-    rwCtx.stroke(); rwCtx.restore();
+    rwCtx.moveTo(pad.l, y);
+    rwCtx.lineTo(W - pad.r, y);
+    rwCtx.stroke();
+    const val = vmax - (g / 4) * span;
+    rwCtx.fillStyle = '#52525b';
+    rwCtx.font = '10px JetBrains Mono';
+    rwCtx.textAlign = 'right';
+    rwCtx.fillText(val.toFixed(2), pad.l - 6, y + 4);
   }
-
-  const sub = flakeD.slice(0, upTo);
-  if (sub.length > 1) {
-    rwCtx.save(); rwCtx.beginPath();
-    sub.forEach((v, i) => i === 0 ? rwCtx.moveTo(xp(i), yp(v)) : rwCtx.lineTo(xp(i), yp(v)));
-    rwCtx.lineTo(xp(sub.length - 1), pad.t + cH); rwCtx.lineTo(xp(0), pad.t + cH); rwCtx.closePath();
-    const g = rwCtx.createLinearGradient(0, pad.t, 0, pad.t + cH);
-    g.addColorStop(0, 'rgba(245,158,11,.14)'); g.addColorStop(1, 'rgba(245,158,11,.01)');
-    rwCtx.fillStyle = g; rwCtx.fill(); rwCtx.restore();
-  }
-  drawLine(baseD.slice(0, upTo), '#3f3f46', null, 1.5);
-  drawLine(sub, '#f59e0b', 'rgba(245,158,11,.4)', 2);
-  rwCtx.fillStyle = '#52525b'; rwCtx.font = '10px JetBrains Mono'; rwCtx.textAlign = 'center';
-  for (let x = 0; x <= N; x += 10) rwCtx.fillText(x, xp(Math.min(x, N - 1)), H - 6);
-  rwCtx.fillText('Training Episodes', W / 2, H);
+  rwCtx.save();
+  rwCtx.beginPath();
+  hist.forEach((v, i) => i === 0 ? rwCtx.moveTo(xp(i), yp(v)) : rwCtx.lineTo(xp(i), yp(v)));
+  rwCtx.lineTo(xp(N - 1), pad.t + cH);
+  rwCtx.lineTo(xp(0), pad.t + cH);
+  rwCtx.closePath();
+  const g = rwCtx.createLinearGradient(0, pad.t, 0, pad.t + cH);
+  g.addColorStop(0, 'rgba(245,158,11,.14)');
+  g.addColorStop(1, 'rgba(245,158,11,.01)');
+  rwCtx.fillStyle = g;
+  rwCtx.fill();
+  rwCtx.restore();
+  rwCtx.save();
+  rwCtx.strokeStyle = '#f59e0b';
+  rwCtx.lineWidth = 2;
+  rwCtx.beginPath();
+  hist.forEach((v, i) => i === 0 ? rwCtx.moveTo(xp(i), yp(v)) : rwCtx.lineTo(xp(i), yp(v)));
+  rwCtx.stroke();
+  rwCtx.restore();
+  rwCtx.fillStyle = '#52525b';
+  rwCtx.font = '10px JetBrains Mono';
+  rwCtx.textAlign = 'center';
+  rwCtx.fillText('Episode index (last ' + N + ')', W / 2, H - 8);
 }
-drawRwChart(0);
+
 const rwObs = new IntersectionObserver(es => {
   es.forEach(e => {
     if (e.isIntersecting && rwDrawn === 0) {
-      const iv = setInterval(() => { rwDrawn = Math.min(rwDrawn + 1, N); drawRwChart(rwDrawn); if (rwDrawn >= N) clearInterval(iv); }, 35);
+      rwDrawn = 1;
+      renderTrainingChart();
       rwObs.unobserve(e.target);
     }
   });
-}, { threshold: .3 });
+}, { threshold: .2 });
 rwObs.observe(rwCanvas);
-window.addEventListener('resize', () => drawRwChart(rwDrawn));
 
-// CHALLENGE
-const chalResps = {
-  race: `FlakeForge Analysis \u2014 cpu_timing_race\n\n[CHAOS_PROBE]  CPU stress: failure rate 30% \u2192 100%\n               is_infrastructure_sensitive: TRUE\n\n[CAUSAL GRAPH] test \u2192 run_threads \u2192 Thread\u00d7N \u2192 increment() \u2192 counter (global)\n               RACE NODE: counter \u2014 non-atomic read-modify-write\n\n[DIAGNOSE]     root_cause_file:     counter.py\n               root_cause_function: increment\n               category:            TIMING_RACE\n               confidence:          0.97\n\n[PATCH APPLIED]\n  - global counter\n  - counter = counter + 1\n  + _lock = threading.Lock()\n  + with _lock:\n  +     counter += 1\n\n[VERIFICATION] pytest --count=20: 20/20 pass\n               regression_detected: False\n               diff_similarity: 0.94\n\nReward: +7.4  |  Category Match  |  Primitive Match`,
-  async: `FlakeForge Analysis \u2014 async_deadlock\n\n[CHAOS_PROBE]  Network delay: failure rate 25% \u2192 88%\n               is_infrastructure_sensitive: TRUE\n\n[CAUSAL GRAPH] test \u2192 asyncio.gather \u2192 session (shared) \u2192 CONTENTION NODE\n               asyncio event loop + blocking call detected\n\n[DIAGNOSE]     root_cause_file:     client.py\n               root_cause_function: fetch\n               category:            ASYNC_DEADLOCK\n               confidence:          0.91\n\n[PATCH APPLIED]\n  - lock = threading.Lock()      # wrong primitive for async\n  + lock = asyncio.Lock()        # correct async primitive\n  + async with lock:\n\n[VERIFICATION] 20/20 pass  |  Reward: +6.8`,
-  db: `FlakeForge Analysis \u2014 db_commit_scope\n\n[CHAOS_PROBE]  CPU/NET stress: minimal effect\n               is_infrastructure_sensitive: FALSE\n\n[CAUSAL GRAPH] test \u2192 conn.execute(INSERT) \u2192 [NO COMMIT] \u2192 conn.execute(SELECT)\n               SCOPE NODE: transaction not committed before read\n\n[DIAGNOSE]     root_cause_file:     db_ops.py\n               root_cause_function: test_isolation\n               category:            DB_COMMIT_SCOPE\n               confidence:          0.99\n\n[PATCH APPLIED]\n  conn.execute('INSERT INTO t VALUES (42)')\n  + conn.commit()   # flush write before read\n  val = conn.execute('SELECT v FROM t').fetchone()\n\n[VERIFICATION] 20/20 pass  |  Reward: +6.5`,
-  ext: `FlakeForge Analysis \u2014 external_dependency\n\n[CHAOS_PROBE]  Network delay 500ms: failure rate 20% \u2192 95%\n               is_infrastructure_sensitive: TRUE \u2014 external endpoint\n\n[CAUSAL GRAPH] test \u2192 requests.post(sandbox.pay.io) \u2192 EXTERNAL NODE\n               Non-determinism source: network / sandbox availability\n\n[DIAGNOSE]     root_cause_file:     test_payment.py\n               root_cause_function: test_payment\n               category:            EXTERNAL_DEPENDENCY\n               confidence:          0.95\n\n[PATCH APPLIED]\n  from unittest.mock import patch\n  + @patch('requests.post', return_value=MockResponse(200,{'status':'approved'}))\n  def test_payment(mock_post):\n      r = requests.post(...)\n\n[VERIFICATION] 20/20 pass  |  Reward: +6.2`,
-};
-
-const chalFolder = document.getElementById('chalFolder');
-const chalFiles = document.getElementById('chalFiles');
-const chalZip = document.getElementById('chalZip');
+let selectedFiles = [];
 const chalFilesMeta = document.getElementById('chalFilesMeta');
 const chalRunBtn = document.getElementById('chalRunBtn');
-let selectedFiles = [];
 
 function _setSelectedFiles(files) {
   selectedFiles = [...files];
@@ -1131,101 +964,114 @@ function _setSelectedFiles(files) {
     return;
   }
   const sample = selectedFiles.slice(0, 8).map(f => f.webkitRelativePath || f.name);
-  chalFilesMeta.textContent =
-    `Selected: ${n} file(s)\n` +
-    sample.map(s => `- ${s}`).join('\n') +
-    (n > sample.length ? `\n... +${n - sample.length} more` : '');
+  chalFilesMeta.textContent = 'Selected: ' + n + ' file(s)\n' + sample.map(s => '- ' + s).join('\n') + (n > sample.length ? '\n... +' + (n - sample.length) + ' more' : '');
   chalRunBtn.disabled = false;
 }
 
 function clearChallengeFiles() {
-  chalFolder.value = '';
-  chalFiles.value = '';
-  chalZip.value = '';
+  document.getElementById('chalFolder').value = '';
+  document.getElementById('chalFiles').value = '';
+  document.getElementById('chalZip').value = '';
   _setSelectedFiles([]);
   const out = document.getElementById('chalOut');
   out.style.display = 'none';
   out.textContent = '';
 }
 
-chalFolder?.addEventListener('change', (e) => _setSelectedFiles(e.target.files || []));
-chalFiles?.addEventListener('change', (e) => _setSelectedFiles(e.target.files || []));
-chalZip?.addEventListener('change', (e) => _setSelectedFiles(e.target.files || []));
-clearChallengeFiles();
+document.getElementById('chalFolder').addEventListener('change', e => _setSelectedFiles(e.target.files || []));
+document.getElementById('chalFiles').addEventListener('change', e => _setSelectedFiles(e.target.files || []));
+document.getElementById('chalZip').addEventListener('change', e => _setSelectedFiles(e.target.files || []));
 
-async function _readSomeText(files, maxFiles = 3, maxChars = 8000) {
-  const texts = [];
-  for (const f of files.slice(0, maxFiles)) {
+async function readFilesForChallenge(maxFiles = 6, maxCharsPer = 12000) {
+  const chunks = [];
+  for (const f of selectedFiles.slice(0, maxFiles)) {
+    if (f.size > 2_000_000) continue;
     try {
-      if (f.size > 2_000_000) continue;
-      const t = await f.text();
-      texts.push(t.slice(0, maxChars));
+      chunks.push('# ' + (f.webkitRelativePath || f.name) + '\n' + (await f.text()).slice(0, maxCharsPer));
     } catch (_) {}
   }
-  return texts.join('\n\n');
+  return chunks.join('\n\n');
 }
 
 function formatAnalysis(a) {
   const lines = [];
-  lines.push(`FlakeForge Analysis \u2014 ${a.detected_category}`);
+  lines.push('FlakeForge analysis — ' + a.detected_category);
   lines.push('');
-  lines.push(`[DIAGNOSE]     category:            ${a.detected_category}`);
-  lines.push(`               confidence:          ${a.confidence}`);
-  lines.push(`               root_cause_file:     ${a.root_cause_file || 'n/a'}`);
-  lines.push(`               root_cause_function: ${a.root_cause_function || 'n/a'}`);
-  lines.push(`               infra_sensitive:     ${a.infrastructure_sensitive}`);
+  lines.push('[category]      ' + a.detected_category);
+  lines.push('[confidence]    ' + a.confidence);
+  lines.push('[root file]     ' + (a.root_cause_file || 'n/a'));
+  lines.push('[root function] ' + (a.root_cause_function || 'n/a'));
+  lines.push('[infra sense]   ' + a.infrastructure_sensitive);
   lines.push('');
   if (a.causal_chain && a.causal_chain.length) {
-    lines.push('[CAUSAL CHAIN]');
-    a.causal_chain.forEach(c => lines.push(`               ${c}`));
+    lines.push('[causal chain]');
+    a.causal_chain.forEach(c => lines.push('  ' + c));
     lines.push('');
   }
-  lines.push(`[EXPLANATION]  ${a.explanation}`);
+  lines.push('[explanation]');
+  lines.push(a.explanation || '');
   lines.push('');
-  lines.push(`[SUGGESTED]    ${a.suggested_fix}`);
+  lines.push('[suggested fix]');
+  lines.push(a.suggested_fix || '');
   if (a.patch_diff) {
     lines.push('');
-    lines.push('[PATCH]');
+    lines.push('[patch diff]');
     lines.push(a.patch_diff);
   }
   lines.push('');
-  lines.push(`Estimated Reward: +${a.estimated_reward}`);
+  lines.push('[estimated reward] ' + a.estimated_reward);
   return lines.join('\n');
 }
 
 async function runChallenge() {
   if (!selectedFiles.length) return;
   const out = document.getElementById('chalOut');
-  out.style.display = 'block'; out.style.color = 'var(--amber)';
-
-  const steps = ['[CHAOS_PROBE] amplifying race window...', '[CAUSAL GRAPH] tracing boundary...', '[DIAGNOSE] classifying root cause...', '[PATCH] applying minimal fix...', '[VERIFY] running 20 pytest iterations...'];
-  for (const s of steps) { out.textContent = s; await sleep(650); }
-
+  out.style.display = 'block';
+  out.style.color = 'var(--amber)';
+  out.textContent = 'POST /api/challenge/analyze …';
   try {
+    const code = await readFilesForChallenge();
+    if (!code.trim()) {
+      out.style.color = 'var(--red)';
+      out.textContent = 'No readable text extracted from files (size limit or empty).';
+      return;
+    }
     const resp = await fetch('/api/challenge/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: input }),
+      body: JSON.stringify({ code, test_code: '', preset: '' }),
     });
-    if (resp.ok) {
-      const data = await resp.json();
-      const formatted = formatAnalysis(data.analysis);
-      out.style.color = 'var(--dim)'; out.textContent = '';
-      for (const ch of formatted) { out.textContent += ch; await sleep(6); }
-      return;
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data.detail ? JSON.stringify(data.detail) : JSON.stringify(data));
     }
-  } catch (e) { /* fall through to static responses */ }
-
-  let resp = chalResps.race;
-  const names = selectedFiles.map(f => (f.webkitRelativePath || f.name).toLowerCase()).join(' ');
-  const text = await _readSomeText(selectedFiles);
-  const hay = (names + '\n' + text).toLowerCase();
-  if (hay.includes('asyncio') || hay.includes('aiohttp') || hay.includes('async def')) resp = chalResps.async;
-  else if (hay.includes('sqlite') || hay.includes('commit') || hay.includes('transaction')) resp = chalResps.db;
-  else if (hay.includes('requests') || hay.includes('sandbox') || hay.includes('gateway') || hay.includes('http')) resp = chalResps.ext;
-  out.style.color = 'var(--dim)'; out.textContent = '';
-  for (const ch of resp) { out.textContent += ch; await sleep(6); }
+    out.style.color = 'var(--dim)';
+    out.textContent = formatAnalysis(data.analysis);
+  } catch (e) {
+    out.style.color = 'var(--red)';
+    out.textContent = 'Request failed:\n' + e;
+  }
 }
+
+async function init() {
+  const r = await fetch('/api/ui/bootstrap');
+  if (!r.ok) {
+    document.getElementById('envSummary').innerHTML = '<span class="c-red">Failed to load /api/ui/bootstrap</span>';
+    return;
+  }
+  bootstrap = await r.json();
+  applyBootstrap();
+  document.getElementById('runBtn').addEventListener('click', startEpisode);
+  document.getElementById('heroRunBtn').addEventListener('click', (e) => {
+    e.preventDefault();
+    document.getElementById('episode').scrollIntoView({ behavior: 'smooth' });
+    startEpisode();
+  });
+  chalRunBtn.addEventListener('click', runChallenge);
+  clearChallengeFiles();
+}
+
+init();
 </script>
 </body>
 </html>

@@ -16,3 +16,7 @@ ollama>=0.3.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 pytest-cov>=4.0.0
+
+[viz]
+matplotlib>=3.8.0
+numpy>=1.26.0

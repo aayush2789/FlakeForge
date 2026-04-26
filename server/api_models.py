@@ -159,6 +159,38 @@ class TrainingStatsResponse(BaseModel):
     stats: TrainingStats
 
 
+# ── Web UI bootstrap (env + live project state) ──────────────────────────────
+
+
+class UIConfig(BaseModel):
+    """Copy and labels driven by environment variables (optional overrides)."""
+
+    team_name: str = ""
+    hero_eyebrow: str = ""
+    hero_title: str = ""
+    hero_subtitle: str = ""
+    footer_line: str = ""
+    model_name: str = ""
+    api_host: str = ""
+
+
+class EpisodeDefaults(BaseModel):
+    """Defaults used by /api/episode/run when the UI omits overrides."""
+
+    repo_path: str = ""
+    test_identifier: str = ""
+    max_steps: int = 8
+    num_runs: int = 10
+
+
+class UIBootstrapResponse(BaseModel):
+    ui: UIConfig
+    project: ProjectInfo
+    default_repo: Optional[RepoInfo] = None
+    training: TrainingStats
+    episode_defaults: EpisodeDefaults
+
+
 # ── WebSocket messages ───────────────────────────────────────────────────────
 
 class WSMessage(BaseModel):

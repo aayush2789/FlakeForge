@@ -9,12 +9,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from .api_models import (
     ChallengeRequest,
     ChallengeResponse,
+    EpisodeDefaults,
     EpisodeStartRequest,
     EpisodeStartResponse,
     EpisodeStatusResponse,
@@ -29,6 +32,8 @@ from .api_models import (
     StepResult,
     TrainingStats,
     TrainingStatsResponse,
+    UIBootstrapResponse,
+    UIConfig,
 )
 from .challenge_engine import analyze_challenge
 from .episode_runner import get_episode_runner
@@ -50,6 +55,97 @@ def health_check():
         version="0.1.0",
         uptime_seconds=round(time.time() - _START_TIME, 1),
         environment_ready=True,
+    )
+
+
+def _api_host_only(url: str) -> str:
+    if not (url or "").strip():
+        return ""
+    try:
+        parsed = urlparse(url.strip())
+        if parsed.netloc:
+            return parsed.netloc
+        return url.strip()[:80]
+    except Exception:
+        return ""
+
+
+def _resolve_default_repo(repos: List[RepoInfo], ff_repo_path: str) -> Optional[RepoInfo]:
+    raw = (ff_repo_path or "").strip().replace("\\", "/")
+    if not raw:
+        return None
+    for r in repos:
+        if r.path.replace("\\", "/") == raw:
+            return r
+    name = Path(raw).name
+    for r in repos:
+        if r.name == name:
+            return r
+    for r in repos:
+        rp = r.path.replace("\\", "/")
+        if rp.endswith(raw) or raw.endswith(rp):
+            return r
+    return None
+
+
+def _episode_defaults() -> EpisodeDefaults:
+    project_root = _PROJECT_ROOT
+    default_repo = os.environ.get(
+        "FF_REPO_PATH",
+        str(project_root / "test_repos" / "timing_race_minimal"),
+    ).strip()
+    test_id = os.environ.get(
+        "FF_TEST_ID",
+        "tests/test_flaky.py::test_fetch_should_complete",
+    ).strip()
+    max_steps = int(os.environ.get("INFERENCE_MAX_STEPS", os.environ.get("FF_MAX_STEPS", "8")))
+    num_runs = int(os.environ.get("FF_NUM_RUNS", "10"))
+    return EpisodeDefaults(
+        repo_path=default_repo,
+        test_identifier=test_id,
+        max_steps=max_steps,
+        num_runs=num_runs,
+    )
+
+
+@router.get("/ui/bootstrap", response_model=UIBootstrapResponse)
+def ui_bootstrap():
+    """Single payload for the homepage: env-based copy, repo manifest, training history."""
+    project = project_info()
+    repos = _scan_test_repos()
+    ed = _episode_defaults()
+    repo_match = _resolve_default_repo(repos, ed.repo_path)
+
+    team = os.environ.get("FF_UI_TEAM_NAME", os.environ.get("FF_DISPLAY_TEAM", "")).strip()
+    hero_eyebrow = os.environ.get("FF_UI_HERO_EYEBROW", "").strip()
+    hero_title = os.environ.get("FF_UI_HERO_TITLE", "").strip() or project.name
+    hero_subtitle = os.environ.get("FF_UI_HERO_SUBTITLE", "").strip() or project.description
+    footer_line = os.environ.get("FF_UI_FOOTER", "").strip()
+    if not footer_line:
+        footer_line = f"{project.name} v{project.version} · {project.total_test_repos} demo repos"
+
+    model_name = os.environ.get("MODEL_NAME", "").strip()
+    api_url = os.environ.get("API_BASE_URL", "").strip()
+
+    ui = UIConfig(
+        team_name=team,
+        hero_eyebrow=hero_eyebrow
+        or f"{len(project.root_cause_categories)} root-cause categories · verifiable rewards",
+        hero_title=hero_title,
+        hero_subtitle=hero_subtitle,
+        footer_line=footer_line,
+        model_name=model_name,
+        api_host=_api_host_only(api_url),
+    )
+
+    training = training_stats().stats
+
+    return UIBootstrapResponse(
+        ui=ui,
+        project=project,
+        default_repo=repo_match,
+        training=training,
+        episode_defaults=ed,
     )
 
 
