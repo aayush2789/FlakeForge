@@ -1,33 +1,10 @@
-# Training dependencies for FlakeForge RL (GRPO)
-torch==2.4.0
-torchvision
-torchaudio
---extra-index-url https://download.pytorch.org/whl/cu121
-
-# Core training stack
-unsloth[cu121-torch240]@git+https://github.com/unslothai/unsloth.git  # Latest with GRPO support
-trl>=0.11.0
-transformers==4.45.0
-peft==0.12.0
-datasets>=2.21.0
-accelerate>=0.34.0
-deepspeed==0.15.0
-bitsandbytes>=0.43.3       # 8-bit AdamW for the online GRPO loop
+unsloth
+transformers
+datasets
+trl
+accelerate
+bitsandbytes
 wandb
-huggingface_hub>=0.25      # run_job / fetch_job_logs (HF Jobs launcher)
-python-dotenv               # .env loading in train_grpo / launch_hf_job
-
-# FlakeForge deps
-docker==7.1.0
-pytest-json-report
-unidiff
-jsonschema
-pyyaml
-libcst
-tree-sitter
-tree-sitter-python
-
-# Optional for evaluation
-pandas
-matplotlib
-seaborn
+huggingface_hub
+sentencepiece
+peft
