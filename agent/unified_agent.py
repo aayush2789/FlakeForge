@@ -73,7 +73,7 @@ NEVER:
 """
 
 
-_CATEGORY_CHEATSHEET = (
+CATEGORY_CHEATSHEET = (
     "=== HOW TO PICK A CATEGORY (read RECENT RUNS / LAST FAILURE first) ===\n"
     "- TimeoutError, hang, slow run, asyncio.wait_for / await        -> async_wait\n"
     "- random.random(), time.time(), datetime.now(), shuffle         -> nondeterminism\n"
@@ -150,7 +150,7 @@ def _last_attempt_diagnosis(observation: FlakeForgeObservation) -> List[str]:
     return lines
 
 
-def _scenario_hints(observation: FlakeForgeObservation) -> List[str]:
+def scenario_hints(observation: FlakeForgeObservation) -> List[str]:
     """Per-state guidance the model can act on without re-reading everything."""
     history = observation.think_history or []
     if not history:
@@ -178,6 +178,15 @@ def _scenario_hints(observation: FlakeForgeObservation) -> List[str]:
         "- If pass_rate did not move: try a different LINE (still in source.py) or a related category.",
     ])
     return hints
+
+
+UNIFIED_EXAMPLE_JSON = (
+    '{"think":{"claims":[{"category":"<one>","entity":"<symbol>",'
+    '"location":"source.py::<func>","polarity":"present","reason":"<short>"}],'
+    '"confidence":0.0},"patch":{"hunks":[{"file":"source.py",'
+    '"search":"<one distinctive line copied from SOURCE UNDER TEST>",'
+    '"replace":"<replacement line>"}]}}'
+)
 
 
 def build_unified_prompt(observation: FlakeForgeObservation) -> str:
@@ -264,22 +273,16 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
         parts.append("")
 
     parts.append("=== SCENARIO GUIDE (do this now) ===")
-    parts.extend(_scenario_hints(observation))
+    parts.extend(scenario_hints(observation))
     parts.append("")
 
-    parts.append(_CATEGORY_CHEATSHEET)
+    parts.append(CATEGORY_CHEATSHEET)
     parts.append("")
 
     parts.append("=== YOUR TURN ===")
     parts.append("Reply with ONE JSON object. No markdown, no XML, no commentary.")
     parts.append("Single-line example shape (do NOT copy values, just the structure):")
-    parts.append(
-        '{"think":{"claims":[{"category":"<one>","entity":"<symbol>",'
-        '"location":"source.py::<func>","polarity":"present","reason":"<short>"}],'
-        '"confidence":0.0},"patch":{"hunks":[{"file":"source.py",'
-        '"search":"<one distinctive line copied from SOURCE UNDER TEST>",'
-        '"replace":"<replacement line>"}]}}'
-    )
+    parts.append(UNIFIED_EXAMPLE_JSON)
     return "\n".join(parts)
 
 
