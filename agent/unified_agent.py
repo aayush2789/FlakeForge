@@ -141,35 +141,6 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
         parts.append(observation.source_under_test[:3000])
         parts.append("")
 
-        src_lower = observation.source_under_test.lower()
-        if (
-            "queue_full" in src_lower
-            and "workerpool" in src_lower
-            and "random.random() < 0.30" in observation.source_under_test
-        ):
-            parts.append("=== HIGH-CONFIDENCE LOCALIZATION HINT ===")
-            parts.append("This repo's observed flake is the false queue_full path in source.py::WorkerPool.submit.")
-            parts.append("Use category concurrency. Patch source.py, not tests/test_flaky.py.")
-            parts.append("Remove this exact branch from WorkerPool.submit:")
-            parts.append("        if random.random() < 0.30:")
-            parts.append("            return False")
-            parts.append("Keep the existing with self._lock: capacity check.")
-            parts.append("")
-
-        if (
-            "class connectionpool" in src_lower
-            and "def acquire" in src_lower
-            and "connection pool exhausted" in src_lower
-            and "_in_use" in src_lower
-            and "max_size" in src_lower
-        ):
-            parts.append("=== HIGH-CONFIDENCE LOCALIZATION HINT ===")
-            parts.append("This repo's flake is in source.py::ConnectionPool.acquire.")
-            parts.append("Use category network or concurrency. Patch source.py, not tests/test_flaky.py.")
-            parts.append("Do NOT patch random.random or WorkerPool patterns from other repos.")
-            parts.append("Fix acquire() to wait/retry until timeout before raising pool exhaustion.")
-            parts.append("")
-
     if observation.run_history:
         parts.append("=== RUN HISTORY (last 10) ===")
         for r in observation.run_history[-10:]:

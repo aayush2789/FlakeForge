@@ -4,6 +4,17 @@ Creates supervised fine-tuning data from iDFlakies/FlakyDoctor datasets
 with ground-truth reasoning chains. Uses template expansion for generating
 diverse think+patch training examples.
 
+IMPORTANT — V3 format:
+    Completions are single JSON objects matching the unified agent schema:
+        {
+          "think": { "claims": [...], "confidence": 0.9 },
+          "patch": { "hunks": [...] }
+        }
+    This is the format the live agent produces and the format the reward
+    function expects.  The legacy XML format (<think>, <patch>) is accepted
+    by the reward function as a fallback but should NOT be used for new SFT
+    data.
+
 Research basis:
 - iDFlakies ICST 2019: OD (order-dependent) and NOD (non-order-dependent) classification
 - FlakyDoctor: Ground-truth patches for common flakiness patterns
@@ -13,6 +24,7 @@ Research basis:
 from __future__ import annotations
 
 import json
+import re
 import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,7 +32,18 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from models import ROOT_CAUSE_TYPES
 except ImportError:
-    from ..models import ROOT_CAUSE_TYPES
+    try:
+        from ..models import ROOT_CAUSE_TYPES
+    except (ImportError, ValueError):
+        try:
+            from FlakeForge.models import ROOT_CAUSE_TYPES
+        except ImportError:
+            ROOT_CAUSE_TYPES = [
+                "async_wait", "concurrency", "test_order_dependency", "resource_leak",
+                "shared_state", "network", "platform_dependency", "nondeterminism",
+                "import_side_effect", "module_cache_pollution", "fixture_scope_leak",
+                "mock_residue", "unknown",
+            ]
 
 
 # ── Reasoning Template Library ───────────────────────────────────────────────
@@ -157,22 +180,61 @@ STRATEGY_TEMPLATES = {
 }
 
 
+def _parse_search_replace_to_hunks(patch_text: str, file_hint: str = "") -> List[Dict[str, str]]:
+    """Convert a search/replace patch block into a list of hunk dicts for V3 JSON."""
+    import re
+    hunks: List[Dict[str, str]] = []
+    # Pattern: optional "--- file\n" header, then <<<<<<< SEARCH … ======= … >>>>>>> REPLACE
+    blocks = re.split(r"\n?---\s+", patch_text.strip())
+    for block in blocks:
+        if not block.strip():
+            continue
+        # Try to extract file name from first line
+        lines = block.split("\n", 1)
+        file_path = file_hint
+        rest = block
+        if len(lines) > 1 and not lines[0].startswith("<"):
+            file_path = lines[0].strip() or file_hint
+            rest = lines[1]
+
+        search_match = re.search(r"<<<<<<< SEARCH\n(.*?)\n=======", rest, re.DOTALL)
+        replace_match = re.search(r"=======\n(.*?)\n?>>>>>>> REPLACE", rest, re.DOTALL)
+
+        if search_match and replace_match:
+            hunks.append({
+                "hunk_id": f"h{len(hunks)+1}",
+                "file": file_path or "tests/test_flaky.py",
+                "search": search_match.group(1),
+                "replace": replace_match.group(1),
+                "rationale": "",
+                "addresses_claim": f"c{len(hunks)+1}",
+            })
+    return hunks
+
+
 def generate_sft_example(
     category: str,
     template_vars: Dict[str, str],
     observation_text: str,
     patch_text: str,
+    file_hint: str = "",
 ) -> Dict[str, Any]:
-    """Generate a single SFT training example.
+    """Generate a single SFT training example in V3 JSON format.
+
+    The completion is a single JSON object with "think" and "patch" keys
+    that matches exactly the unified agent's response schema.  This ensures
+    the model fine-tuned on this data produces outputs parseable by
+    the V3 reward system.
 
     Args:
-        category: Root cause category
-        template_vars: Variables to fill into the reasoning template
-        observation_text: The observation context
-        patch_text: The ground-truth patch (search/replace format)
+        category: Root cause category (must be in ROOT_CAUSE_TYPES).
+        template_vars: Variables to fill into the reasoning template.
+        observation_text: The observation context (becomes the prompt).
+        patch_text: Ground-truth patch in search/replace format.
+        file_hint: Fallback file path for hunks when not encoded in patch_text.
 
     Returns:
-        Training example dict with prompt/completion fields
+        Training example dict with prompt/completion fields, or {} on failure.
     """
     templates = REASONING_TEMPLATES.get(category, [])
     strategies = STRATEGY_TEMPLATES.get(category, ["Fix the root cause."])
@@ -183,19 +245,60 @@ def generate_sft_example(
     template = random.choice(templates)
     strategy = random.choice(strategies)
 
-    # Fill template
-    template_vars.setdefault("confidence", str(round(random.uniform(0.75, 0.95), 2)))
-    template_vars.setdefault("strategy", strategy.format(**template_vars) if "{" in strategy else strategy)
+    confidence = round(random.uniform(0.75, 0.95), 2)
+    template_vars.setdefault("confidence", str(confidence))
+    template_vars.setdefault(
+        "strategy",
+        strategy.format(**template_vars) if "{" in strategy else strategy,
+    )
 
     try:
-        reasoning = template.format(**template_vars)
+        reasoning_text = template.format(**template_vars)
     except KeyError:
-        # Fill missing keys with placeholders
-        reasoning = template
-        for key in template_vars:
-            reasoning = reasoning.replace(f"{{{key}}}", template_vars[key])
+        reasoning_text = template
+        for key, val in template_vars.items():
+            reasoning_text = reasoning_text.replace(f"{{{key}}}", val)
 
-    completion = f"<think>\n{reasoning}\n</think>\n\n<patch>\n{patch_text}\n</patch>"
+    # Build the V3 JSON "think" block
+    think_block: Dict[str, Any] = {
+        "claims": [
+            {
+                "claim_id": "c1",
+                "category": category,
+                "entity": template_vars.get("function_name", "unknown"),
+                "location": (
+                    f"{template_vars.get('file_path', 'tests/test_flaky.py')}"
+                    f"::{template_vars.get('function_name', 'unknown')}"
+                ),
+                "ast_node_type": "FunctionDef",
+                "polarity": "present",
+                "predicted_effect": (
+                    f"Fixing the {category} root cause should increase test pass rate to 1.0."
+                ),
+                "reason": reasoning_text[:200],
+            }
+        ],
+        "confidence": confidence,
+    }
+
+    # Build the V3 JSON "patch" block
+    hunks = _parse_search_replace_to_hunks(patch_text, file_hint=file_hint)
+    if not hunks:
+        # Minimal hunk so the example is still parseable
+        hunks = [{
+            "hunk_id": "h1",
+            "file": file_hint or "tests/test_flaky.py",
+            "search": "",
+            "replace": patch_text.strip(),
+            "rationale": f"Apply {category} fix.",
+            "addresses_claim": "c1",
+        }]
+
+    patch_block: Dict[str, Any] = {"hunks": hunks}
+
+    # Completion is a single JSON object — no XML, no markdown fences
+    completion_obj: Dict[str, Any] = {"think": think_block, "patch": patch_block}
+    completion = json.dumps(completion_obj, ensure_ascii=False, indent=2)
 
     return {
         "prompt": observation_text,
@@ -203,7 +306,8 @@ def generate_sft_example(
         "category": category,
         "metadata": {
             "template_used": template[:50],
-            "strategy": strategy[:50],
+            "strategy": (strategy.format(**template_vars) if "{" in strategy else strategy)[:50],
+            "format": "v3_json",
         },
     }
 
@@ -272,6 +376,7 @@ def generate_sft_dataset_from_manifest(
                 template_vars=template_vars,
                 observation_text=entry.get("observation", ""),
                 patch_text=entry.get("patch", ""),
+                file_hint=entry.get("file_path", ""),
             )
 
             if example:
