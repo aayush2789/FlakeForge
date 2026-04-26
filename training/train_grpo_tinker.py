@@ -187,7 +187,18 @@ def build_compact_observation(case: Dict[str, Any]) -> str:
     """
     manifest = case.get("manifest", {})
     test_id = case.get("test_identifier", "tests/test_flaky.py")
-    category = str(manifest.get("flake_category") or manifest.get("category") or "unknown").lower()
+    # Normalise raw category values (e.g. TIMING, ORDER_DEPENDENCY, RACE_CONDITION)
+    # that live in the manifests in uppercase and non-standard forms.
+    _raw_cat = str(manifest.get("flake_category") or manifest.get("category") or "unknown").lower()
+    _MANIFEST_NORM = {
+        "timing": "async_wait",
+        "race_condition": "concurrency",
+        "order_dependency": "test_order_dependency",
+        "shared_state": "shared_state",
+        "nondeterminism": "nondeterminism",
+        "resource_leak": "resource_leak",
+    }
+    category = _MANIFEST_NORM.get(_raw_cat, _raw_cat)
     difficulty = str(manifest.get("difficulty") or "medium").lower()
 
     repo_dir = Path(case.get("repo_path", ""))
@@ -217,12 +228,21 @@ def _try_read_file(repo_dir: Path, manifest: Dict[str, Any], max_chars: int = 12
         rel = manifest.get(key)
         if not rel:
             continue
+        # 1. Try exact relative path first
         candidate = repo_dir / rel
         try:
             if candidate.is_file():
                 return candidate.read_text(encoding="utf-8", errors="ignore")[:max_chars]
         except Exception:
-            continue
+            pass
+        # 2. Fallback: rglob by filename anywhere under repo_dir (handles
+        #    repos where the manifest path is relative to a sub-directory)
+        try:
+            for match in repo_dir.rglob(Path(rel).name):
+                if match.is_file():
+                    return match.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+        except Exception:
+            pass
     return ""
 
 
