@@ -29,6 +29,7 @@ tags:
 ## Table of contents
 
 1. [Intuition and inspiration](#1-intuition-and-inspiration)
+   - [Flaky test root causes (visual taxonomy)](#flaky-test-root-causes-visual-taxonomy)
 2. [Problem we solve](#2-problem-we-solve)
 3. [Environment interface (POMDP view)](#3-environment-interface-pomdp-view)
 4. [Observation space](#4-observation-space)
@@ -54,6 +55,69 @@ tags:
 Flaky tests are a major source of **wasted CI time** and **wrong signals** for both humans and ML. Classic fixes (bigger timeouts, more retries, blanket skips) often **mask** symptoms while hiding deeper bugs. We wanted a setting where an agent is pushed toward **structural, minimal fixes** that **survive repeated validation**—closer to how a senior engineer reasons (hypothesis → small edit → re-run) than to a one-shot “rewrite the file” code completion task.
 
 **Inspiration** comes from three lines of work: (1) **POMDP / RL** for sequential decision making under partial observability, (2) **software engineering** research on flaky-test patterns (concurrency, order, I/O, shared state, fixtures, mocks, imports), and (3) **verifiable** training signals: what you can *measure* in pytest output and in the repo’s AST beats what you can only *opine* with another LLM.
+
+### Flaky test root causes (visual taxonomy)
+
+A **flaky test** is one that **sometimes passes and sometimes fails** for the **same version** of the code. The *symptom* is always “CI is noisy”; the *cause* is usually **hidden shared state**, **timing**, or **environment** coupling. FlakeForge labels hypotheses with the **`ROOT_CAUSE_TYPES`** enum in `models.py` (used in structured `think` claims). Below is how those labels relate to each other and what they mean in practice.
+
+**Map — how the official categories cluster** (read the table after the diagrams for details):
+
+```mermaid
+mindmap
+  root((ROOT_CAUSE_TYPES))
+    Timing and races
+      async_wait
+      concurrency
+      nondeterminism
+    Shared world and order
+      shared_state
+      test_order_dependency
+      module_cache_pollution
+    Imports and module lifecycle
+      import_side_effect
+    Harness and doubles
+      fixture_scope_leak
+      mock_residue
+    External and resources
+      network
+      platform_dependency
+      resource_leak
+    Fallback
+      unknown
+```
+
+**Conceptual chain** (how families interact—not separate bugs, but **layers** that stack): **timing races** expose **shared mutable state**; **imports and caches** make that state global; **fixtures and mocks** can spread or hide it; **network/platform** and **leaks** turn small races into **order-dependent** failures. Use the table below for precise definitions.
+
+**Lifecycle view — where nondeterminism sneaks in** (collection → run → teardown):
+
+```mermaid
+sequenceDiagram
+  participant C as Test collection / import
+  participant R as Run body
+  participant T as Teardown / next test
+  C->>R: import_side_effect, module_cache_pollution
+  R->>R: async_wait, concurrency, nondeterminism, network
+  R->>T: fixture_scope_leak, mock_residue, resource_leak
+  T->>C: shared_state, test_order_dependency
+```
+
+| Category | What typically goes wrong | Why the outcome flickers | Fix direction (high level) |
+|----------|-----------------------------|----------------------------|----------------------------|
+| **`async_wait`** | `async`/`await` misuse, wrong timeout, background tasks not awaited | Event-loop scheduling and I/O completion order change between runs | Correct `await`, bounded waits, deterministic async teardown |
+| **`concurrency`** | Threads, locks, shared mutable state without proper synchronization | Race windows open/close depending on CPU scheduling | Narrow critical sections, proper locks/events, avoid data races |
+| **`test_order_dependency`** | Test A leaves state that test B reads; suite order varies | Different collection or parallel workers → different interleaving | Isolate tests, reset globals, avoid cross-test dependencies |
+| **`resource_leak`** | Files, sockets, threads, subprocesses not closed | Later tests hit **FD limits**, port exhaustion, or zombie processes | Deterministic `close()` / context managers, pool limits in tests |
+| **`shared_state`** | Globals, class attributes, singletons, mutable defaults | Leftover mutations change assertions on the next run | Reset in fixtures, copy-on-write test data, no module-level mutation |
+| **`network`** | Real HTTP/DB without hermetic doubles | Latency spikes, rate limits, remote flakiness | Mocks, recorded responses, local fakes, retry policy in **SUT** not tests |
+| **`platform_dependency`** | Paths, clocks, timezones, OS-specific APIs | CI image vs laptop differs; wall-clock assumptions | `pathlib`, inject clock, freeze time in tests, portable APIs |
+| **`nondeterminism`** | Unseeded randomness, iteration over unordered sets, wall-clock timing in logic | Different values or ordering each run | Seed RNG, sort for stability, replace “sleep for sync” with signals |
+| **`import_side_effect`** | Module body runs DB/network/setup on import | Import order or first-import timing changes global state | Move side effects behind `main()` or explicit init functions |
+| **`module_cache_pollution`** | `sys.modules` / `@lru_cache` / process-wide caches retain stale data | “First import wins”; order defines cache contents | Clear caches in teardown, avoid process-wide caches in tests, reload strategy |
+| **`fixture_scope_leak`** | `session`/`module`-scoped fixtures mutate shared resources | Wide scope + mutation leaks across tests | Narrow fixture scope, factory fixtures, explicit reset fixtures |
+| **`mock_residue`** | `patch`/`mock` not stopped or leaks into imports | Later tests see patched symbols or half-mocked deps | `with patch(...)`, `addCleanup`, pytest plugins that enforce cleanup |
+| **`unknown`** | Signal is weak or cause is outside the taxonomy | Needs more observation or human triage | Gather more runs, shrink repro, refine category |
+
+**Related labels:** `RELATED_CATEGORIES` in `models.py` defines **soft neighbors** (e.g. `async_wait` ↔ `concurrency`) so small taxonomy mismatches in the model’s `think` block do not get punished as harshly during **reasoning consistency** reward.
 
 ---
 
@@ -118,7 +182,7 @@ V3 uses a **single** high-level action type: **`UNIFIED_PATCH`**. The policy doe
 
 ## 6. Root-cause categories
 
-`ROOT_CAUSE_TYPES` in `models.py` enumerates the taxonomy the think block is supposed to use, for example: `async_wait`, `concurrency`, `test_order_dependency`, `resource_leak`, `shared_state`, `network`, `platform_dependency`, `nondeterminism`, `import_side_effect`, `module_cache_pollution`, `fixture_scope_leak`, `mock_residue`, and `unknown`.
+The canonical list is **`ROOT_CAUSE_TYPES`** in `models.py`. Each value is documented with symptoms and fix direction in **[§1 — Flaky test root causes](#flaky-test-root-causes-visual-taxonomy)** (Mermaid mindmap, lifecycle sequence diagram, and reference table).
 
 `RELATED_CATEGORIES` defines **soft** relatedness for **reasoning consistency** reward when the model’s stated category and the patch-inferred category differ slightly.
 
@@ -195,7 +259,16 @@ This is **not** a “judge model”: it is **code-facing** and **template-aware*
 
 ## 10. Verifiable reward system
 
-`compute_verifiable_reward` in `server/reward.py` assembles a **`RewardBreakdown`**:
+Training a policy on **natural-language “scores” from another LLM** is fast to prototype but fragile: the judge can be **gamed**, **biased toward fluent nonsense**, and **misaligned** with what CI actually cares about (repeatable green builds). FlakeForge instead follows a classic principle from **reinforcement learning** and **program repair** research: put most of the learning signal on **outcomes and checks you can re-run**, then add **light shaping** so credit goes to edits that look like real engineering—not clever ways to pass a rubric.
+
+**Reading map (how the pieces fit):**
+
+1. **Gates first** — If the action is not parseable or the patch does not apply cleanly, there is little point in interpreting test outcomes; the environment **short-circuits** to a strong negative total (see below). This mirrors *constraint-based* action spaces in RL and *reject sampling* in repair pipelines.
+2. **Primary outcome** — **Pass rate** under repeated `pytest` is the main “task reward”; shaping uses a **potential function** of pass rate so improvements are comparable across episodes.
+3. **Secondary structure** — Proximity to the **failure frontier**, **entropy** of failure *types*, and **anti-hack** heuristics encode inductive biases from flaky-test studies and APR practice: fix the **right** place, collapse **chaotic** failure modes, and do not **delete** the test’s meaning.
+4. **Reasoning channel** — When the **oracle** (`verify_structured_think`) runs, it supplies a **code-grounded** score; otherwise a lighter **category consistency** term ties the stated root cause to what the patch actually does.
+
+`compute_verifiable_reward` in `server/reward.py` assembles a **`RewardBreakdown`**. The table below is the **contract**; the **weights** and **thresholds** in code are authoritative (see the `breakdown.total_reward = round(...)` block and the gate on `format_reward` / `compile_reward` / `anti_hack_penalty`).
 
 | Signal | Role |
 |--------|------|
@@ -212,11 +285,42 @@ This is **not** a “judge model”: it is **code-facing** and **template-aware*
 | **think_history_penalty** | Repeating the same diagnosis without new evidence. |
 | **terminal_bonus** | Large bonus when pass rate hits **1.0** or major improvements. |
 
-**Hard short-circuit:** If **format** is too low, **compile** is bad, or **anti_hack** is negative, the total is clamped to a **strong negative** (see the `if breakdown.format_reward < 0.75 or ...` block) so the policy cannot grind partial credit on garbage.
+### Intuition per signal (why it is there)
 
-**Total** is a **weighted sum** of the above (see the final `breakdown.total_reward = round(...)` block in `reward.py` for exact coefficients).
+- **format_reward** — A structured **hypothesis + edit** is easier to validate, audit, and compose with oracles than a blob of prose. This is the same motivation as *chain-of-thought* interfaces in tool-using agents: separate **intent** from **mechanism** so downstream code can check both.
+- **compile_reward** — Program repair literature treats **plausible but non-compiling** patches as a dominant failure mode; rewarding **apply + parse + compile** filters a huge class of spurious edits before tests even speak.
+- **stability_reward** (\(\Phi(p)=p^2\)) — Squaring pass rate makes **late** progress toward a fully green suite **more** valuable than the same absolute gain from a very red baseline, which matches the “last mile” cost of killing residual flakes. Formally, the step reward uses a **potential difference** \(\Phi(p_{\text{after}})-\Phi(p_{\text{before}})\), which preserves the **optimal policy** under standard assumptions (see references below).
+- **causal_proximity_reward** — Flaky failures often localize to a small **dynamic slice** of the codebase; patches that edit the **frontier file** or **stack neighborhood** are more likely to be **minimal** and **causal** than edits three modules away. This aligns with **fault localization** and **minimal repair** goals in APR.
+- **failure_entropy_reward** — If every rerun fails differently, the system is still **non-stationary** from the agent’s perspective. **Collapsing** diversity of `error_type` labels is a cheap proxy for “we moved from chaotic nondeterminism toward a **single** addressable failure mode”—consistent with how flaky-test studies categorize **order-, async-, and state-dependent** symptoms.
+- **anti_hack_penalty** — Any scalar reward invites **Goodharting**: weaken assertions, swallow exceptions, skip tests, or sleep until races vanish. Penalties target **known** shortcuts so the policy cannot trade away **semantic** test intent for **numeric** reward (see **specification gaming** references).
+- **regression_penalty** — A fix that **breaks neighbors** is not acceptable in CI; this term encodes a **multi-test** notion of correctness familiar from regression testing research.
+- **oracle_reasoning_reward** vs **reasoning_consistency_reward** — When the oracle runs, reasoning is graded by **static alignment** between claims, locations, and hunks—closer to **process supervision** (“check the steps”) than to an LLM grader. Without the oracle, a lighter **taxonomy** match keeps the stated category from drifting entirely away from the patch.
+- **patch_validation_signal**, **noop_patch_penalty**, **think_history_penalty** — Respectively: reward **quality of application** beyond binary success, block **empty** credit loops, and nudge the policy away from **repeating** the same ineffective narrative when the environment has not changed.
+- **terminal_bonus** — Sparse **success** signals (full pass or large jumps) are emphasized so GRPO-style training does not drown in **tiny** shaped increments.
 
-**Intuition in one line:** *Reward what **pytest and static checks** can verify, punish **hacks and regressions**, and gently align **stated** diagnosis with **actual** code change.*
+### Hard short-circuit (credit only when basics pass)
+
+If **format** is too low, **compile** is bad, or **anti_hack** is negative, the total is clamped to a **strong negative** (see the `if breakdown.format_reward < 0.75 or ...` block in `server/reward.py`) so the policy cannot grind partial credit on garbage.
+
+### Weighted total
+
+**Total** is a **weighted sum** of the terms above; coefficients are in the final `breakdown.total_reward = round(...)` assignment in `server/reward.py` (e.g. stability is up-weighted relative to format because **outcome** is the primary learning signal once gates pass).
+
+### Research connections (selected)
+
+These papers and reports are not an exhaustive bibliography, but they justify **why** each family of terms exists:
+
+| Theme | Pointer | Relevance to FlakeForge |
+|-------|---------|-------------------------|
+| **Potential-based shaping** | Ng, Harada, Russell, [*Policy Invariance Under Reward Transformations: Theory and Application to Reward Shaping*](https://people.eecs.berkeley.edu/~russell/papers/icml99-shaping.pdf) (ICML 1999) | Justifies \(\Phi(p)=p^2\) and **difference** shaping so auxiliary reward does not invent spurious optima (implementation comment in `server/reward.py`). |
+| **Flaky tests (empirics)** | Luo et al., [*An Empirical Analysis of Flaky Tests*](https://dl.acm.org/doi/10.1145/2635868.2635920) (FSE 2014) | Motivates **repeatable** evaluation, **order/async** failure modes, and why **pass-rate stability** must be central. |
+| **Process / verifiable feedback** | Lightman et al., [*Let’s Verify Step by Step*](https://arxiv.org/abs/2305.20050) (ICLR 2024) | Intuition for **oracle_score**: reward **checkable** reasoning traces, not just final answers. |
+| **Outcome training for reasoning** | Uesato et al., [*Solving Math Word Problems with Process- and Outcome-based Feedback*](https://arxiv.org/abs/2211.14275) (2022) | Complements the above: **outcome** (pytest) + **process** (oracle) hybrid. |
+| **Specification gaming** | Krakovna, [*Specification gaming examples in AI*](https://vkrakovna.wordpress.com/2018/04/02/specification-gaming-examples-in-ai/) (blog, 2018); Amodei et al., [*Concrete Problems in AI Safety*](https://arxiv.org/abs/1606.06565) (2016) | Motivates **anti_hack** and **hard gates**: misspecified rewards invite **perverse** shortcuts. |
+| **Program repair context** | Monperrus, [*Automatic Software Repair: A Bibliography*](https://hal.science/hal-01956501v1/document) (ACM CSUR 2018) | Surveys **compile-time** filters, **localization**, and **regression** awareness—same structural pressures as this reward stack. |
+| **Group RL for LLMs** | Shao et al., [*DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models*](https://arxiv.org/abs/2402.03300) (2024) | **GRPO**-style training benefits from **low-variance**, **comparable** rewards across a group; `RewardBreakdown` is designed for exactly that kind of logging and advantage estimation. |
+
+**Intuition in one line:** *Reward what **pytest and static checks** can verify, punish **hacks and regressions**, and gently align **stated** diagnosis with **actual** code change—using shaping theory so the extras do not fight the main objective.*
 
 ---
 
