@@ -17,9 +17,12 @@ import re
 import runpy
 import traceback
 import uuid
+import warnings
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 from openenv.core.env_server.interfaces import Environment
 
@@ -203,14 +206,31 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         file_tree = self._build_file_tree()
 
         # Three-stage gate: Sanity → Determinism → Flakiness.
-        preflight = self._preflight_gate(
-            quick_runs=int(kwargs.get("preflight_quick_runs", 5)),
-            confirm_runs=int(kwargs.get("preflight_confirm_runs", 10)),
-            drop_deterministic_bugs=bool(kwargs.get("drop_deterministic_bugs", True)),
-        )
-        baseline_runs = preflight["runs"]
-        baseline_pass_rate = preflight["pass_rate"]
-        baseline_entropy = preflight["failure_entropy"]
+        # skip_preflight=True reuses cached baseline from the previous reset
+        # (used during GRPO rollouts where flakiness was already confirmed).
+        skip_preflight = bool(kwargs.get("skip_preflight", False))
+        if skip_preflight and self._episode_state is not None:
+            baseline_runs = list(self._episode_state.run_history)
+            baseline_pass_rate = self._episode_state.baseline_pass_rate
+            baseline_entropy = self._episode_state.baseline_entropy
+            preflight = {
+                "runs": baseline_runs,
+                "pass_rate": baseline_pass_rate,
+                "failure_entropy": baseline_entropy,
+                "env_type": self._episode_state.env_type or "flaky",
+                "should_train": True,
+                "summary": dict(self._episode_state.preflight_result)
+                           if self._episode_state.preflight_result else {},
+            }
+        else:
+            preflight = self._preflight_gate(
+                quick_runs=int(kwargs.get("preflight_quick_runs", 5)),
+                confirm_runs=int(kwargs.get("preflight_confirm_runs", 10)),
+                drop_deterministic_bugs=bool(kwargs.get("drop_deterministic_bugs", True)),
+            )
+            baseline_runs = preflight["runs"]
+            baseline_pass_rate = preflight["pass_rate"]
+            baseline_entropy = preflight["failure_entropy"]
 
         # Extract failing stack trace
         failing_trace = ""
@@ -772,9 +792,13 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         return self._preflight_result(
             runs=runs,
-            env_type="flaky",
-            should_train=True,
-            reason="preflight_zero_passes_but_failure_entropy_high",
+            env_type="deterministic_bug",
+            should_train=not drop_deterministic_bugs,
+            reason=(
+                "preflight_deterministic_bug_dropped"
+                if drop_deterministic_bugs
+                else "preflight_deterministic_multi_error_labeled"
+            ),
             stage="flakiness_confirm",
             quick_runs=quick_runs,
             confirm_runs=confirm_runs,

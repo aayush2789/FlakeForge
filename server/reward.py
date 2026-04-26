@@ -366,9 +366,19 @@ def compute_verifiable_reward(
         action.patch_text, files_modified, lines_changed,
     )
 
-    # Fast-fail short circuits if hard gates are violated (Requires >= 0.75 format reward)
-    if breakdown.format_reward < 0.75 or breakdown.compile_reward < 1.0 or breakdown.anti_hack_penalty < 0.0:
+    # Fast-fail only for truly catastrophic issues (anti-hack or broken format).
+    # Compile/validation failures still get partial credit so GRPO groups have
+    # reward variance and can produce non-zero advantages.
+    if breakdown.format_reward < 0.75 or breakdown.anti_hack_penalty < 0.0:
         breakdown.total_reward = -2.0 if breakdown.anti_hack_penalty < 0.0 else -1.0
+        return breakdown
+
+    if breakdown.compile_reward < 1.0:
+        breakdown.total_reward = round(
+            breakdown.format_reward * 0.5
+            + breakdown.compile_reward * 1.0,
+            4,
+        )
         return breakdown
 
     # PatchValidator positive shaping

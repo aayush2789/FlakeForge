@@ -589,7 +589,7 @@ class PatchValidator:
             default_target=default_target,
             modified_sources=modified_sources,
         )
-        errors.extend(idempotency_errors)
+        warnings.extend(idempotency_errors)
         warnings.extend(idempotency_warnings)
 
         if errors:

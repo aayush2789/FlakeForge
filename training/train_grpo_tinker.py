@@ -34,7 +34,7 @@ Tuned for **~1.5 hour wall-clock** with real env execution:
   - **batch_size=6**: repos per step, processed in parallel threads (compensates for stable-rejected repos).
   - **G=3**: 3 rollouts per prompt → fewer pytest invocations per step.
   - **num_runs=10**: pytest passes per env.step (good balance of speed + signal).
-  - **Preflight**: 3 quick + 5 confirm (fast yet reliable flaky detection).
+  - **Preflight**: 5 quick + 5 confirm (reliable flaky detection, fast confirm).
   - **LoRA rank 64**: faster forward-backward than 128.
   - **max_completion_tokens=1024**: faster sampling.
   - **max_steps=90**: ~50s/step with num_runs=10 → fits in ~1.5h. Step-0 ETA printed.
@@ -55,11 +55,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import sys
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 try:
     from dotenv import load_dotenv
@@ -127,10 +131,8 @@ SAMPLE_TEMPERATURE = 0.85
 SAMPLE_TOP_P = 0.98
 ADAM_WEIGHT_DECAY = 0.01
 ENV_NUM_RUNS = 10
-PREFLIGHT_QUICK = 3
+PREFLIGHT_QUICK = 7
 PREFLIGHT_CONFIRM = 5
-ROLLOUT_PREFLIGHT_QUICK = 1
-ROLLOUT_PREFLIGHT_CONFIRM = 1
 
 SYSTEM_PROMPT_8B = """\
 You are FlakeForge, a debugging agent that fixes flaky Python tests.
@@ -247,18 +249,132 @@ def _reset_env(
 def _rollout_one(
     env: FlakeForgeEnvironment,
     completion_text: str,
-    quick: int = ROLLOUT_PREFLIGHT_QUICK,
-    confirm: int = ROLLOUT_PREFLIGHT_CONFIRM,
 ) -> float:
-    """Reset env to pristine, apply completion as action, return real reward."""
+    """Reset env to pristine, apply completion as action, return real reward.
+
+    Uses skip_preflight=True so the rollout reuses the flaky baseline from
+    the initial reset instead of re-running preflight (which would often
+    classify the test as 'stable' on a single lucky pass and return reward=0).
+    """
     try:
-        env.reset(preflight_quick_runs=quick, preflight_confirm_runs=confirm)
+        env.reset(skip_preflight=True)
         action = _completion_to_action(completion_text)
         step_obs = env.step(action)
         return float(getattr(step_obs, "reward", 0.0))
     except Exception as exc:
         print(f"  [ENV] rollout failed: {exc}", flush=True)
         return -1.0
+
+
+# ── Training plots ────────────────────────────────────────────────────────────
+
+def _plot_training_curves(
+    metrics: List[Dict[str, Any]],
+    output_dir: Path,
+) -> None:
+    """Generate and save reward / loss / utilization curves after training."""
+    if not metrics:
+        print("[PLOT] No metrics to plot.", flush=True)
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[PLOT] matplotlib not installed — skipping graphs.", flush=True)
+        return
+
+    steps = [m["step"] for m in metrics]
+    mean_rewards = [m["mean_reward"] for m in metrics]
+    max_rewards = [m["max_reward"] for m in metrics]
+    losses = [m.get("loss") for m in metrics]
+    n_datums = [m["n_datums"] for m in metrics]
+    n_envs = [m["n_envs"] for m in metrics]
+    frac_degen = [m["frac_degenerate"] for m in metrics]
+    elapsed = [m["elapsed_s"] for m in metrics]
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("FlakeForge GRPO Training", fontsize=16, fontweight="bold")
+
+    # 1) Mean & max reward
+    ax = axes[0, 0]
+    ax.plot(steps, mean_rewards, "o-", markersize=3, label="Mean reward", color="#2196F3")
+    ax.plot(steps, max_rewards, "s-", markersize=3, label="Max reward", color="#4CAF50", alpha=0.7)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Reward")
+    ax.set_title("Reward per Step")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # 2) Loss
+    ax = axes[0, 1]
+    valid_loss = [(s, l) for s, l in zip(steps, losses) if l is not None]
+    if valid_loss:
+        ls, lv = zip(*valid_loss)
+        ax.plot(ls, lv, "o-", markersize=3, color="#F44336")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss")
+    ax.set_title("GRPO Loss")
+    ax.grid(True, alpha=0.3)
+
+    # 3) Datums per step
+    ax = axes[0, 2]
+    ax.bar(steps, n_datums, color="#9C27B0", alpha=0.7)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Datums")
+    ax.set_title("Training Datums per Step")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # 4) Active envs per step
+    ax = axes[1, 0]
+    ax.bar(steps, n_envs, color="#FF9800", alpha=0.7)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Envs")
+    ax.set_title("Active Environments per Step")
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # 5) Degenerate fraction
+    ax = axes[1, 1]
+    ax.plot(steps, frac_degen, "o-", markersize=3, color="#795548")
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Fraction")
+    ax.set_title("Degenerate Group Fraction")
+    ax.grid(True, alpha=0.3)
+
+    # 6) Cumulative reward (learning curve)
+    ax = axes[1, 2]
+    cum_reward = []
+    running = 0.0
+    for r in mean_rewards:
+        running += r
+        cum_reward.append(running)
+    ax.plot(steps, cum_reward, "o-", markersize=3, color="#009688")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Cumulative Reward")
+    ax.set_title("Cumulative Mean Reward")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plot_path = output_dir / "training_curves.png"
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"[PLOT] Training curves saved -> {plot_path}", flush=True)
+
+    # Also save a small reward-only plot for quick inspection
+    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    ax2.plot(steps, mean_rewards, "o-", markersize=4, label="Mean reward", color="#2196F3", linewidth=2)
+    ax2.plot(steps, max_rewards, "s-", markersize=4, label="Max reward", color="#4CAF50", linewidth=2, alpha=0.7)
+    ax2.fill_between(steps, mean_rewards, alpha=0.1, color="#2196F3")
+    ax2.set_xlabel("Step", fontsize=12)
+    ax2.set_ylabel("Reward", fontsize=12)
+    ax2.set_title("FlakeForge GRPO — Reward Curve", fontsize=14, fontweight="bold")
+    ax2.legend(fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    reward_path = output_dir / "reward_curve.png"
+    fig2.savefig(reward_path, dpi=150)
+    plt.close(fig2)
+    print(f"[PLOT] Reward curve saved -> {reward_path}", flush=True)
 
 
 # ── GRPO training loop ───────────────────────────────────────────────────────
@@ -271,8 +387,8 @@ async def run_grpo_training(
     learning_rate: float = 6e-5,
     lora_rank: int = LORA_RANK,
     num_runs: int = ENV_NUM_RUNS,
-    curriculum_root: str = "seed_repos/idoft",
-    output_dir: str = "outputs/flakeforge-tinker-qwen3-8b",
+    curriculum_root: str = str(REPO_ROOT / "seed_repos" / "idoft"),
+    output_dir: str = str(REPO_ROOT / "outputs" / "flakeforge-tinker-qwen3-8b"),
     use_curriculum: bool = True,
     wandb_project: Optional[str] = None,
     temperature: float = SAMPLE_TEMPERATURE,
@@ -366,16 +482,25 @@ async def run_grpo_training(
 
     # ── 4. GRPO training loop ─────────────────────────────────────────────
     metrics_history: List[Dict[str, Any]] = []
+    rejected_case_ids: set = set()
 
     for step in range(max_steps):
         t0 = time.time()
 
         # ── 4a. Sample cases and build envs (parallel threads) ────────────
         cases: List[Dict[str, Any]] = []
-        for _ in range(batch_size):
+        seen_ids: set = set()
+        for _ in range(batch_size * 5):
+            if len(cases) >= batch_size:
+                break
             c = scheduler.sample()
-            if c is not None:
-                cases.append(c)
+            if c is None:
+                continue
+            cid = c.get("case_id") or str(c.get("repo_path", ""))
+            if cid in seen_ids or cid in rejected_case_ids:
+                continue
+            seen_ids.add(cid)
+            cases.append(c)
         if not cases:
             print(f"Step {step:3d} | SKIP (no cases sampled)", flush=True)
             continue
@@ -400,9 +525,19 @@ async def run_grpo_training(
                 envs.append(env)
                 prompts.append(prompt)
                 valid_cases.append(cases[i])
+            else:
+                cid = cases[i].get("case_id") or str(cases[i].get("repo_path", ""))
+                if cid:
+                    rejected_case_ids.add(cid)
 
         if not envs:
-            print(f"Step {step:3d} | SKIP (all resets failed/rejected)", flush=True)
+            n_rejected = len(rejected_case_ids)
+            n_total = sum(len(s.cases) for s in scheduler.stages)
+            print(
+                f"Step {step:3d} | SKIP (all resets failed/rejected) "
+                f"[blacklisted {n_rejected}/{n_total} repos]",
+                flush=True,
+            )
             continue
 
         t_env_reset = time.time() - t_env_start
@@ -481,7 +616,9 @@ async def run_grpo_training(
 
             if all(a == 0.0 for a in advantages_G):
                 n_degenerate += 1
-                continue
+                noise = [random.gauss(0, 0.01) for _ in advantages_G]
+                noise_mean = sum(noise) / len(noise)
+                advantages_G = [n - noise_mean for n in noise]
 
             ob_len = model_input.length - 1
             for seq, advantage in zip(sample_result.sequences, advantages_G):
@@ -510,10 +647,13 @@ async def run_grpo_training(
             fwd_bwd = await training_client.forward_backward_async(
                 datums, loss_fn="importance_sampling"
             )
-            optim = await training_client.optim_step_async(adam_params)
             fwd_bwd_result = await fwd_bwd.result_async()
+            optim = await training_client.optim_step_async(adam_params)
             await optim.result_async()
-            loss_val = getattr(fwd_bwd_result, "loss", None)
+            if fwd_bwd_result.metrics:
+                loss_val = next(iter(fwd_bwd_result.metrics.values()), None)
+            if step < 3:
+                print(f"  [DEBUG] fwd_bwd metrics={fwd_bwd_result.metrics}", flush=True)
 
         # ── 4g. Logging ──────────────────────────────────────────────────
         elapsed = time.time() - t0
@@ -632,7 +772,10 @@ async def run_grpo_training(
     except Exception as exc:
         print(f"[TINKER] Weight save failed: {exc}", flush=True)
 
-    # ── 6. Save training summary ──────────────────────────────────────────
+    # ── 6. Plot training curves ──────────────────────────────────────────
+    _plot_training_curves(metrics_history, output_path)
+
+    # ── 7. Save training summary ──────────────────────────────────────────
     summary = {
         "model": TINKER_MODEL_ID,
         "lora_rank": lora_rank,

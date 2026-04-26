@@ -97,11 +97,13 @@ class DockerTestRunner:
         # to be imported as part of the test package chain.
         abs_repo = str(self.repo_path.resolve())
         return [
-            sys.executable, "-m", "pytest", test_id,
+            sys.executable, "-W", "ignore::SyntaxWarning",
+            "-m", "pytest", test_id,
             "--rootdir", abs_repo,
             "--confcutdir", abs_repo,
             "--import-mode=importlib",
             "-p", "no:cacheprovider",
+            "-W", "ignore::SyntaxWarning",
             "--tb=short", "-q", "--no-header",
         ]
 
@@ -134,6 +136,7 @@ class DockerTestRunner:
             else:
                 env.pop("PYTHONPATH", None)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONWARNINGS"] = "ignore::SyntaxWarning"
         return env
 
     def _deps_marker_path(self) -> Path:
@@ -205,6 +208,11 @@ class DockerTestRunner:
             self._deps_error = f"{type(exc).__name__}: {exc}"
             return False
 
+    _CREATION_FLAGS = (
+        (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+        if sys.platform == "win32" else 0
+    )
+
     def _run_local_pytest(self, test_id: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             self._pytest_cmd(test_id),
@@ -213,6 +221,7 @@ class DockerTestRunner:
             timeout=timeout_seconds,
             cwd=self.repo_path,
             env=self._isolated_env(),
+            creationflags=self._CREATION_FLAGS,
         )
 
     def _run_docker_pytest(self, test_id: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
@@ -299,13 +308,15 @@ class DockerTestRunner:
 
         try:
             cmd = [
-                sys.executable, "-m", "pytest",
+                sys.executable, "-W", "ignore::SyntaxWarning",
+                "-m", "pytest",
                 str(tests_root),
                 f"--ignore={repo_root / exclude_test_file}",
                 "--rootdir", str(repo_root),
                 "--confcutdir", str(repo_root),
                 "--import-mode=importlib",
                 "-p", "no:cacheprovider",
+                "-W", "ignore::SyntaxWarning",
                 "-x",
                 "-q",
             ]
@@ -338,6 +349,7 @@ class DockerTestRunner:
                     timeout=timeout_seconds,
                     cwd=repo_root,
                     env=self._isolated_env(),
+                    creationflags=self._CREATION_FLAGS,
                 )
             # pytest exits with code 5 when every test file was excluded and
             # no tests were collected. That is not a regression; it just means
