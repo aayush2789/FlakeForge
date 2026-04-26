@@ -12,7 +12,10 @@ peft==0.12.0
 datasets>=2.21.0
 accelerate>=0.34.0
 deepspeed==0.15.0
+bitsandbytes>=0.43.3       # 8-bit AdamW for the online GRPO loop
 wandb
+huggingface_hub>=0.25      # run_job / fetch_job_logs (HF Jobs launcher)
+python-dotenv               # .env loading in train_grpo / launch_hf_job
 
 # FlakeForge deps
 docker==7.1.0

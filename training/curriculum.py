@@ -1,15 +1,22 @@
-"""V3 Curriculum Scheduler for FlakeForge GRPO Training.
+"""Curriculum scheduler for FlakeForge GRPO training.
 
-Three-stage curriculum: easy → medium → hard flakiness patterns.
+Three-stage curriculum: easy -> medium -> hard flakiness patterns.
 
 Stage 1 (easy):   timing_sensitive, random_seed, shared_state
 Stage 2 (medium): concurrency, async_wait, fixture_scope_leak, mock_residue
 Stage 3 (hard):   network, platform_dependency, import_side_effect, module_cache_pollution
 
 Advancement: rolling mean of last K episode rewards exceeds stage threshold.
-Repos are drawn from test_repos/synthetic/ grouped by the 'difficulty' field in
-flake_manifest.json, which allows the scheduler to work without any extra data
-directory setup.
+Repos are loaded from any of:
+
+    seed_repos/idoft/*/flake_manifest.json     (curated 40 IDoFT cases)
+    test_repos/synthetic/*/flake_manifest.json (synthetic cases)
+    data/manifests/*.json                       (notebook-style manifests)
+    data/curriculum_stages/**/*.json            (curriculum splits)
+
+The 'difficulty' field is the primary key for stage assignment; flake_category
+is used as a fallback. Each emitted case includes 'test_identifier', which the
+environment uses to launch pytest on the right test.
 
 Research basis:
 - Bengio ICLR 2009: Curriculum Learning (easy-to-hard improves convergence)
@@ -108,11 +115,13 @@ class CurriculumScheduler:
 
     def __init__(
         self,
-        synthetic_root: str = "test_repos/synthetic",
+        synthetic_root: str = "seed_repos/idoft",
         stages: Optional[List[CurriculumStage]] = None,
         reward_window: int = 10,
+        extra_roots: Optional[List[str]] = None,
     ) -> None:
         self.synthetic_root = Path(synthetic_root)
+        self.extra_roots = [Path(p) for p in (extra_roots or [])]
         self.stages = stages or [
             CurriculumStage(
                 name=s.name,
@@ -224,42 +233,71 @@ class CurriculumScheduler:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _load_cases(self) -> None:
-        """Discover synthetic cases + manifest-grounded data from the original notebook style.
+        """Discover cases from IDoFT-style and notebook-style manifests.
 
-        Supports:
-        1. test_repos/synthetic/*/flake_manifest.json (current V3 synthetic harness)
-        2. data/manifests/*.json (notebook-style flake manifests with flake_category, correct_action)
-        3. data/curriculum_stages/**/Stage*.json (curriculum split data)
+        Supports any of:
+        1. ``seed_repos/idoft/*/flake_manifest.json`` (default: curated 40-case IDoFT)
+        2. ``test_repos/synthetic/*/flake_manifest.json`` (synthetic harness)
+        3. ``data/manifests/*.json`` (notebook-style)
+        4. ``data/curriculum_stages/**/*.json`` (curriculum splits)
         """
-        search_paths = [
+        # (root, glob) pairs. We avoid recursive '**/*.json' because the IDoFT
+        # repos contain cloned source trees with arbitrary JSON files.
+        search_specs = [
             (self.synthetic_root, "*/flake_manifest.json"),
-            (Path("data/manifests"), "*.json"),
-            (Path("data/curriculum_stages"), "**/*.json"),
         ]
+        for extra in self.extra_roots:
+            search_specs.append((extra, "*/flake_manifest.json"))
+        for fallback in (Path("test_repos/synthetic"), Path("seed_repos/idoft")):
+            if not any(fallback == s[0] for s in search_specs):
+                search_specs.append((fallback, "*/flake_manifest.json"))
+        search_specs.append((Path("data/manifests"), "*.json"))
+        search_specs.append((Path("data/curriculum_stages"), "*.json"))
+        search_specs.append((Path("data/curriculum_stages"), "*/*.json"))
 
         loaded = 0
-        for root_path, glob_pattern in search_paths:
+        seen: set[str] = set()
+        for root_path, glob_pattern in search_specs:
             if not root_path.exists():
                 continue
-
             for manifest_path in sorted(root_path.glob(glob_pattern)):
+                key = str(manifest_path.resolve())
+                if key in seen:
+                    continue
+                if manifest_path.name == "curriculum_state.json":
+                    continue
+
                 try:
                     with open(manifest_path, encoding="utf-8") as f:
                         manifest = json.load(f)
                 except Exception as exc:
-                    logger.warning("[CURRICULUM] Failed to read %s: %s", manifest_path, exc)
+                    logger.debug("[CURRICULUM] Skipping unreadable %s: %s", manifest_path, exc)
+                    continue
+                if not isinstance(manifest, dict):
                     continue
 
-                case_id = manifest_path.parent.name if manifest_path.parent != root_path else manifest_path.stem
-                difficulty = manifest.get("difficulty", manifest.get("stage", "medium")).lower()
-                category = manifest.get(
-                    "category",
-                    manifest.get("flake_category", "unknown")
+                test_id = (
+                    manifest.get("flaky_test_path")
+                    or manifest.get("test_identifier")
+                    or manifest.get("test_id")
                 )
-                test_id = manifest.get(
-                    "test_identifier",
-                    manifest.get("test_id", "tests/test_flaky.py")
+                if not test_id:
+                    continue
+                seen.add(key)
+
+                case_id = (
+                    manifest_path.parent.name
+                    if manifest_path.parent != root_path
+                    else manifest_path.stem
                 )
+                difficulty = str(
+                    manifest.get("difficulty") or manifest.get("stage") or "medium"
+                ).lower()
+                category = str(
+                    manifest.get("category")
+                    or manifest.get("flake_category")
+                    or "unknown"
+                ).lower()
 
                 case = {
                     "case_id": case_id,
@@ -268,35 +306,43 @@ class CurriculumScheduler:
                     "manifest": manifest,
                     "difficulty": difficulty,
                     "category": category,
-                    "test_identifier": test_id,
-                    "source": "synthetic" if "synthetic" in str(manifest_path) else "manifest",
+                    "test_identifier": str(test_id),
+                    "repo_url": manifest.get("repo_url", ""),
+                    "source": (
+                        "idoft" if "idoft" in str(manifest_path).lower()
+                        else "synthetic" if "synthetic" in str(manifest_path).lower()
+                        else "manifest"
+                    ),
                 }
                 self._all_cases.append(case)
 
-                # Assign to stage
                 assigned = False
                 for stage in self.stages:
-                    if stage.difficulty == difficulty or category in stage.allowed_categories:
+                    if stage.difficulty == difficulty:
                         stage.cases.append(case)
                         assigned = True
                         break
-
                 if not assigned:
-                    self.stages[-1].cases.append(case)  # hardest stage
+                    for stage in self.stages:
+                        if category in stage.allowed_categories:
+                            stage.cases.append(case)
+                            assigned = True
+                            break
+                if not assigned:
+                    self.stages[-1].cases.append(case)
 
                 loaded += 1
 
         total = sum(len(s.cases) for s in self.stages)
         logger.info(
-            "[CURRICULUM] Loaded %d cases (%d from manifests) into %d stages: %s",
+            "[CURRICULUM] Loaded %d cases into %d stages: %s",
             total,
-            loaded,
             len(self.stages),
             {s.name: len(s.cases) for s in self.stages},
         )
 
         if total == 0:
             logger.warning(
-                "[CURRICULUM] No training data found. Create data/manifests/*.json "
-                "with 'flake_category' and 'correct_action' fields, or populate test_repos/synthetic/."
+                "[CURRICULUM] No training data found. Populate seed_repos/idoft/ or "
+                "test_repos/synthetic/ with */flake_manifest.json files."
             )

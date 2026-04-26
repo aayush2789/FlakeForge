@@ -389,3 +389,142 @@ def generate_sft_dataset_from_manifest(
             f.write(json.dumps(ex) + "\n")
 
     return len(examples)
+
+
+# ── Warm-up prompt dataset from IDoFT manifests ─────────────────────────────
+
+def _read_test_source(repo_path: Path, test_identifier: str, max_chars: int = 1500) -> str:
+    """Best-effort read of the flaky test source file from a cloned IDoFT repo.
+
+    The IDoFT ``flaky_test_path`` looks like ``"set_api_key_test.py::TestApiKey::test_x?"``.
+    We strip the ``::`` selectors and the trailing ``?`` (which IDoFT uses to mark
+    parametrized cases) and try to locate the file under ``repo_path``. Returns
+    an empty string on any failure -- the prompt builder treats that gracefully.
+    """
+    if not test_identifier:
+        return ""
+    file_part = test_identifier.split("::", 1)[0].rstrip("?").strip()
+    if not file_part:
+        return ""
+
+    candidates = [repo_path / file_part]
+    candidates.extend(repo_path.rglob(Path(file_part).name))
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+        except Exception:
+            continue
+    return ""
+
+
+def _read_root_cause_source(repo_path: Path, manifest: Dict[str, Any], max_chars: int = 1800) -> str:
+    """Read the source-under-test file referenced by the manifest, if any."""
+    candidates: List[Path] = []
+    for key in ("root_cause_file", "source_file", "fix_file"):
+        rel = manifest.get(key)
+        if rel:
+            candidates.append(repo_path / rel)
+            candidates.extend(repo_path.rglob(Path(rel).name))
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+        except Exception:
+            continue
+    return ""
+
+
+def _render_prompt_from_manifest(manifest: Dict[str, Any], repo_dir: Path) -> str:
+    """Render an observation-style prompt without spinning up the environment.
+
+    The result mirrors the layout of :func:`agent.unified_agent.build_unified_prompt`
+    closely enough that a model fine-tuned on these prompts will recognise the
+    real env prompts at evaluation time.
+    """
+    test_id = (
+        manifest.get("flaky_test_path")
+        or manifest.get("test_identifier")
+        or "tests/test_flaky.py"
+    )
+    test_src = _read_test_source(repo_dir, test_id)
+    src_under_test = _read_root_cause_source(repo_dir, manifest)
+    category = str(manifest.get("flake_category") or manifest.get("category") or "unknown").lower()
+    difficulty = str(manifest.get("difficulty") or "medium").lower()
+
+    parts: List[str] = []
+    parts.append("=== TASK ===")
+    parts.append(f"Test:       {test_id}")
+    parts.append("Step:       1 of 1")
+    parts.append("Pass rate:  baseline=0.00  current=0.00  goal=1.00")
+    parts.append("")
+    if src_under_test:
+        parts.append("=== SOURCE UNDER TEST ===")
+        parts.append(src_under_test)
+        parts.append("")
+    if test_src:
+        parts.append("=== TEST FUNCTION ===")
+        parts.append(test_src[:1000])
+        parts.append("")
+    parts.append("=== CATEGORY HINT ===")
+    parts.append(f"Likely root cause: {category}  (difficulty: {difficulty})")
+    parts.append("")
+    parts.append(
+        "Reply with ONE JSON object: {\"think\": {\"claims\": [...], \"confidence\": ...}, "
+        "\"patch\": {\"hunks\": [...]}}. No markdown, no XML."
+    )
+    return "\n".join(parts)
+
+
+def build_prompt_dataset_from_idoft(
+    seed_root: str | Path = "seed_repos/idoft",
+    out_path: str | Path = "outputs/sft/idoft_prompts.jsonl",
+    *,
+    max_rows: Optional[int] = None,
+    use_cache: bool = True,
+) -> Any:
+    """Build a HuggingFace ``Dataset`` of {``prompt``} rows for GRPO warm-up.
+
+    Walks ``seed_root/*/flake_manifest.json``, reads the flaky test + source
+    files from each cloned repo, and renders a compact observation-style prompt
+    per repo. The result is cached as JSONL at ``out_path`` so repeated training
+    launches are instant.
+
+    Returns:
+        A ``datasets.Dataset`` with a single ``prompt`` column. Raises
+        ``ImportError`` if the ``datasets`` package is not installed and
+        ``FileNotFoundError`` if no manifests are discovered.
+    """
+    from datasets import Dataset  # local import keeps cold path fast
+
+    seed_root = Path(seed_root)
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if use_cache and out_path.exists() and out_path.stat().st_size > 0:
+        return Dataset.from_json(str(out_path))
+
+    manifests = sorted(seed_root.glob("*/flake_manifest.json"))
+    if not manifests:
+        raise FileNotFoundError(f"No */flake_manifest.json under {seed_root}")
+
+    rows: List[Dict[str, str]] = []
+    for manifest_path in manifests:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(manifest, dict):
+            continue
+        repo_dir = manifest_path.parent
+        prompt = _render_prompt_from_manifest(manifest, repo_dir)
+        if prompt.strip():
+            rows.append({"prompt": prompt})
+        if max_rows is not None and len(rows) >= max_rows:
+            break
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    return Dataset.from_json(str(out_path))
