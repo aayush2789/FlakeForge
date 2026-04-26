@@ -5,11 +5,15 @@ client.py
 inference.py
 models.py
 pyproject.toml
+run_curriculum.py
 ./__init__.py
+./_curate_and_install.py
+./_tmp_inventory.py
 ./build_idoft_dataset.py
 ./client.py
 ./inference.py
 ./models.py
+./push_space.py
 ./run_curriculum.py
 ./templates/index.html
 openenv_FlakeForge.egg-info/PKG-INFO
@@ -32,5 +36,6 @@ server/perf_sentinel.py
 server/reward.py
 server/state.py
 server/tools.py
+templates/index.html
 tests/test_action_and_judge_regressions.py
 tests/test_flakeforge_integration.py
