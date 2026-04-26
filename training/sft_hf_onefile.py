@@ -241,6 +241,7 @@ def install_repo_dependencies(
     *,
     always: Optional[List[str]] = None,
     editable: bool = False,
+    safe_mode: bool = True,
 ) -> Dict[str, Any]:
     """Best-effort install of repo deps so repo imports won't error.
 
@@ -255,6 +256,47 @@ def install_repo_dependencies(
     skipped = 0
     failed = 0
     t0 = time.time()
+
+    def _write_filtered_requirements(req_path: Path) -> Optional[Path]:
+        """Filter/patch requirements.txt to be compatible with modern Python.
+
+        Strategy:
+        - Drop/comment lines that are known to break on py3.11+ (very old pins).
+        - Replace some pins with a modern lower bound (e.g. sympy>=1.10).
+        - Keep the file in-repo so it shows up in logs and is debuggable.
+        """
+        try:
+            raw = req_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except Exception:
+            return None
+
+        out_lines: List[str] = []
+        changed = False
+
+        # Known incompatible pins for py3.11+ seen in the wild
+        sympy_bad = re.compile(r"^\s*sympy\s*([<]=?|==)\s*([0-9][^;#\s]*)", re.I)
+
+        for line in raw:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                out_lines.append(line)
+                continue
+
+            m = sympy_bad.match(s)
+            if m:
+                # sympy 0.7.x breaks on py3.11 due to inspect.getargspec removal.
+                out_lines.append("sympy>=1.10  # patched by FlakeForge safe_mode (py3.11+)")
+                changed = True
+                continue
+
+            out_lines.append(line)
+
+        if not changed:
+            return None
+
+        filtered = req_path.parent / ".flakeforge_requirements.safe.txt"
+        filtered.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        return filtered
 
     for i, c in enumerate(cases, start=1):
         repo_dir = cloned_repo_paths.get(c.slug)
@@ -279,7 +321,18 @@ def install_repo_dependencies(
             setup_py = repo_dir / "setup.py"
 
             if req.exists() and req.stat().st_size > 0:
-                _pip_install(["install", "-r", str(req)], prefix=f"[DEPS:{c.slug}] ")
+                try:
+                    _pip_install(["install", "-r", str(req)], prefix=f"[DEPS:{c.slug}] ")
+                except Exception as exc:
+                    if not safe_mode:
+                        raise
+                    print(f"[DEPS] requirements.txt failed for {c.slug}: {exc}", flush=True)
+                    filtered = _write_filtered_requirements(req)
+                    if filtered is None:
+                        print(f"[DEPS] no safe_mode patch available for {c.slug}; continuing (deps may be incomplete)", flush=True)
+                    else:
+                        print(f"[DEPS] retry with filtered requirements: {filtered.name}", flush=True)
+                        _pip_install(["install", "-r", str(filtered)], prefix=f"[DEPS:{c.slug}] ")
             elif editable and (pyproject.exists() or setup_py.exists()):
                 # Editable installs can fail for older repos; keep it optional.
                 _pip_install(["install", "-e", "."], cwd=repo_dir, prefix=f"[DEPS:{c.slug}] ")
@@ -686,6 +739,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Optionally install each cloned repo's deps inside the job (slower).")
     s_submit.add_argument("--deps-editable", action="store_true", default=False,
                           help="If set, attempt `pip install -e .` when requirements.txt is missing (can fail).")
+    s_submit.add_argument("--deps-safe-mode", action="store_true", default=True,
+                          help="Patch known-incompatible pins (e.g. sympy 0.7.x) and retry installs (recommended).")
+    s_submit.add_argument("--no-deps-safe-mode", dest="deps_safe_mode", action="store_false",
+                          help="Disable safe-mode patching for dependency installs.")
 
     s_run = sub.add_parser("run", help="Run the pipeline locally/in-job (no HF submit).")
     s_run.add_argument("--seed-root", default=str(SEED_ROOT_DEFAULT))
@@ -696,6 +753,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Optionally install dependencies of each cloned repo (best-effort, slower).")
     s_run.add_argument("--deps-editable", action="store_true", default=False,
                        help="If set, attempt `pip install -e .` when requirements.txt is missing (can fail on older repos).")
+    s_run.add_argument("--deps-safe-mode", action="store_true", default=True,
+                       help="Patch known-incompatible pins (e.g. sympy 0.7.x) and retry installs (recommended).")
+    s_run.add_argument("--no-deps-safe-mode", dest="deps_safe_mode", action="store_false",
+                       help="Disable safe-mode patching and fail fast on bad requirements pins.")
 
     s_run.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
     s_run.add_argument("--output-dir", default="outputs/sft-qwen2.5-coder-7b")
@@ -748,6 +809,8 @@ def main() -> None:
             forwarded += ["--install-repo-deps"]
         if args.deps_editable:
             forwarded += ["--deps-editable"]
+        if not args.deps_safe_mode:
+            forwarded += ["--no-deps-safe-mode"]
 
         submit_hf_job(
             git_url=args.git_url,
@@ -789,6 +852,7 @@ def main() -> None:
                 cloned,
                 always=["pytest", "pytest-asyncio"],
                 editable=bool(args.deps_editable),
+                safe_mode=bool(args.deps_safe_mode),
             )
             print(f"[RUN] deps summary: {deps_summary}", flush=True)
 
