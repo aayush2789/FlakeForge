@@ -23,6 +23,12 @@ tags:
 
 **FlakeForge** is an [OpenEnv](https://pypi.org/project/openenv-core/)–style reinforcement learning **environment** for learning to **repair flaky Python tests**. The world is (mostly) deterministic: repeated `pytest` runs, AST scans, and static checks produce structured observations. The only learned piece is the policy (your code model); reward is **verifiable** from execution and static oracles, not an LLM judge.
 
+## Links
+
+- **HF Space**: [random70249/FlakeForge](https://huggingface.co/spaces/random70249/FlakeForge)
+- **Writeup**: [`FLAKEFORGE_WRITEUP.md`](https://huggingface.co/spaces/random70249/FlakeForge/blob/main/FLAKEFORGE_WRITEUP.md)
+- **Training script (Colab)**: [GRPO training notebook](https://colab.research.google.com/drive/1tmwY9LqzXFp-xF4NFOMIb8PNOOX-XvGH?usp=sharing)
+
 ---
 
 ## Table of contents
