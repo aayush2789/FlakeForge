@@ -1,6 +1,22 @@
 """
 Curate seed_repos/idoft to exactly 50 repos.
 
+## Quick install cells (Colab / local)
+
+If you're running this in **Colab** (recommended for quick bootstraps), run:
+
+```bash
+!python -m pip install -U pip setuptools wheel
+!python -m pip install -r training-requirements.txt
+```
+
+If you're running locally, first activate your venv, then:
+
+```bash
+python -m pip install -U pip setuptools wheel
+python -m pip install -r training-requirements.txt
+```
+
 Selection criteria:
 - 17 easy / 17 medium / 16 hard
 - Max category diversity across RESOURCE_LEAK, SHARED_STATE, ORDER_DEPENDENCY,
