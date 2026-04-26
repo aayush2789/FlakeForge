@@ -20,3 +20,6 @@ Provides-Extra: dev
 Requires-Dist: pytest>=8.0.0; extra == "dev"
 Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Provides-Extra: viz
+Requires-Dist: matplotlib>=3.8.0; extra == "viz"
+Requires-Dist: numpy>=1.26.0; extra == "viz"
