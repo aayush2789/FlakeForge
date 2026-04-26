@@ -670,18 +670,30 @@ footer {
 <div class="sec-inner reveal" style="max-width:800px">
   <div class="sec-header">
     <div class="sec-label">Try it yourself</div>
-    <h2 class="sec-title">Paste your flaky test.</h2>
-    <p class="sec-desc">Pick a preset or paste your own code. FlakeForge will trace the causal boundary and propose a verified fix.</p>
+    <h2 class="sec-title">Upload a codebase to test.</h2>
+    <p class="sec-desc">Upload a folder, multiple files, or a zip. FlakeForge will trace the causal boundary and propose a verified fix.</p>
   </div>
   <div class="chal-box">
-    <div class="chal-presets">
-      <button class="preset" onclick="loadPreset('race')">timing_race</button>
-      <button class="preset" onclick="loadPreset('async')">async_deadlock</button>
-      <button class="preset" onclick="loadPreset('db')">db_commit_scope</button>
-      <button class="preset" onclick="loadPreset('ext')">external_dep</button>
+    <div class="chal-presets" style="gap:.6rem;flex-wrap:wrap">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--muted)">Input:</span>
+      <label class="preset" style="cursor:pointer">
+        Upload folder
+        <input id="chalFolder" type="file" webkitdirectory directory multiple style="display:none"/>
+      </label>
+      <label class="preset" style="cursor:pointer">
+        Upload files
+        <input id="chalFiles" type="file" multiple style="display:none"/>
+      </label>
+      <label class="preset" style="cursor:pointer">
+        Upload zip
+        <input id="chalZip" type="file" accept=".zip,application/zip" style="display:none"/>
+      </label>
+      <button class="preset" onclick="clearChallengeFiles()">Clear</button>
     </div>
-    <textarea class="chal-ta" id="chalIn" placeholder="# paste your flaky test here..."></textarea>
-    <div style="margin-top:1rem"><button class="run-btn" onclick="runChallenge()">Forge a Fix</button></div>
+    <div class="chal-out" id="chalFilesMeta" style="display:block;margin-top:.8rem;background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:.8rem 1rem;color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:.7rem;line-height:1.7;">
+      No files selected.
+    </div>
+    <div style="margin-top:1rem"><button class="run-btn" id="chalRunBtn" onclick="runChallenge()">Forge a Fix</button></div>
     <div class="chal-out" id="chalOut"></div>
   </div>
 </div>
@@ -1092,12 +1104,6 @@ rwObs.observe(rwCanvas);
 window.addEventListener('resize', () => drawRwChart(rwDrawn));
 
 // CHALLENGE
-const presets = {
-  race: `import threading\ncounter = 0\n\ndef increment():\n    global counter\n    counter = counter + 1  # non-atomic!\n\nthreads = [threading.Thread(target=increment) for _ in range(100)]\nfor t in threads: t.start()\nfor t in threads: t.join()\n\ndef test_counter():\n    assert counter == 100  # flaky under CPU load`,
-  async: `import asyncio, aiohttp\n\nasync def fetch(session, url):\n    async with session.get(url) as r:\n        return await r.json()\n\nasync def test_concurrent():\n    async with aiohttp.ClientSession() as s:\n        a, b = await asyncio.gather(fetch(s,URL_A), fetch(s,URL_B))\n    assert a['id'] != b['id']  # flaky \u2014 asyncio.gather + shared session`,
-  db: `import sqlite3\n\ndef test_isolation():\n    conn = sqlite3.connect(':memory:')\n    conn.execute('CREATE TABLE t (v INT)')\n    conn.execute('INSERT INTO t VALUES (42)')\n    # missing conn.commit() !\n    val = conn.execute('SELECT v FROM t').fetchone()[0]\n    assert val == 42`,
-  ext: `import requests\n\ndef test_payment():\n    # external sandbox is sometimes slow / down\n    r = requests.post('https://sandbox.pay.io/charge',\n                      json={'amount':100})\n    assert r.status_code == 200\n    assert r.json()['status'] == 'approved'`,
-};
 const chalResps = {
   race: `FlakeForge Analysis \u2014 cpu_timing_race\n\n[CHAOS_PROBE]  CPU stress: failure rate 30% \u2192 100%\n               is_infrastructure_sensitive: TRUE\n\n[CAUSAL GRAPH] test \u2192 run_threads \u2192 Thread\u00d7N \u2192 increment() \u2192 counter (global)\n               RACE NODE: counter \u2014 non-atomic read-modify-write\n\n[DIAGNOSE]     root_cause_file:     counter.py\n               root_cause_function: increment\n               category:            TIMING_RACE\n               confidence:          0.97\n\n[PATCH APPLIED]\n  - global counter\n  - counter = counter + 1\n  + _lock = threading.Lock()\n  + with _lock:\n  +     counter += 1\n\n[VERIFICATION] pytest --count=20: 20/20 pass\n               regression_detected: False\n               diff_similarity: 0.94\n\nReward: +7.4  |  Category Match  |  Primitive Match`,
   async: `FlakeForge Analysis \u2014 async_deadlock\n\n[CHAOS_PROBE]  Network delay: failure rate 25% \u2192 88%\n               is_infrastructure_sensitive: TRUE\n\n[CAUSAL GRAPH] test \u2192 asyncio.gather \u2192 session (shared) \u2192 CONTENTION NODE\n               asyncio event loop + blocking call detected\n\n[DIAGNOSE]     root_cause_file:     client.py\n               root_cause_function: fetch\n               category:            ASYNC_DEADLOCK\n               confidence:          0.91\n\n[PATCH APPLIED]\n  - lock = threading.Lock()      # wrong primitive for async\n  + lock = asyncio.Lock()        # correct async primitive\n  + async with lock:\n\n[VERIFICATION] 20/20 pass  |  Reward: +6.8`,
@@ -1105,19 +1111,69 @@ const chalResps = {
   ext: `FlakeForge Analysis \u2014 external_dependency\n\n[CHAOS_PROBE]  Network delay 500ms: failure rate 20% \u2192 95%\n               is_infrastructure_sensitive: TRUE \u2014 external endpoint\n\n[CAUSAL GRAPH] test \u2192 requests.post(sandbox.pay.io) \u2192 EXTERNAL NODE\n               Non-determinism source: network / sandbox availability\n\n[DIAGNOSE]     root_cause_file:     test_payment.py\n               root_cause_function: test_payment\n               category:            EXTERNAL_DEPENDENCY\n               confidence:          0.95\n\n[PATCH APPLIED]\n  from unittest.mock import patch\n  + @patch('requests.post', return_value=MockResponse(200,{'status':'approved'}))\n  def test_payment(mock_post):\n      r = requests.post(...)\n\n[VERIFICATION] 20/20 pass  |  Reward: +6.2`,
 };
 
-function loadPreset(k) { document.getElementById('chalIn').value = presets[k]; }
+const chalFolder = document.getElementById('chalFolder');
+const chalFiles = document.getElementById('chalFiles');
+const chalZip = document.getElementById('chalZip');
+const chalFilesMeta = document.getElementById('chalFilesMeta');
+const chalRunBtn = document.getElementById('chalRunBtn');
+let selectedFiles = [];
+
+function _setSelectedFiles(files) {
+  selectedFiles = [...files];
+  const n = selectedFiles.length;
+  if (!n) {
+    chalFilesMeta.textContent = 'No files selected.';
+    chalRunBtn.disabled = true;
+    return;
+  }
+  const sample = selectedFiles.slice(0, 8).map(f => f.webkitRelativePath || f.name);
+  chalFilesMeta.textContent =
+    `Selected: ${n} file(s)\n` +
+    sample.map(s => `- ${s}`).join('\n') +
+    (n > sample.length ? `\n... +${n - sample.length} more` : '');
+  chalRunBtn.disabled = false;
+}
+
+function clearChallengeFiles() {
+  chalFolder.value = '';
+  chalFiles.value = '';
+  chalZip.value = '';
+  _setSelectedFiles([]);
+  const out = document.getElementById('chalOut');
+  out.style.display = 'none';
+  out.textContent = '';
+}
+
+chalFolder?.addEventListener('change', (e) => _setSelectedFiles(e.target.files || []));
+chalFiles?.addEventListener('change', (e) => _setSelectedFiles(e.target.files || []));
+chalZip?.addEventListener('change', (e) => _setSelectedFiles(e.target.files || []));
+clearChallengeFiles();
+
+async function _readSomeText(files, maxFiles = 3, maxChars = 8000) {
+  const texts = [];
+  for (const f of files.slice(0, maxFiles)) {
+    try {
+      if (f.size > 2_000_000) continue;
+      const t = await f.text();
+      texts.push(t.slice(0, maxChars));
+    } catch (_) {}
+  }
+  return texts.join('\n\n');
+}
 
 async function runChallenge() {
-  const input = document.getElementById('chalIn').value.trim();
-  if (!input) return;
+  if (!selectedFiles.length) return;
   const out = document.getElementById('chalOut');
   out.style.display = 'block'; out.style.color = 'var(--amber)';
   const steps = ['[CHAOS_PROBE] amplifying race window...', '[CAUSAL GRAPH] tracing boundary...', '[DIAGNOSE] classifying root cause...', '[PATCH] applying minimal fix...', '[VERIFY] running 20 pytest iterations...'];
   for (const s of steps) { out.textContent = s; await sleep(650); }
   let resp = chalResps.race;
-  if (input.includes('asyncio') || input.includes('aiohttp')) resp = chalResps.async;
-  else if (input.includes('sqlite') || input.includes('commit')) resp = chalResps.db;
-  else if (input.includes('requests') || input.includes('sandbox') || input.includes('gateway')) resp = chalResps.ext;
+  const names = selectedFiles.map(f => (f.webkitRelativePath || f.name).toLowerCase()).join(' ');
+  const text = await _readSomeText(selectedFiles);
+  const hay = (names + '\n' + text).toLowerCase();
+  if (hay.includes('asyncio') || hay.includes('aiohttp') || hay.includes('async def')) resp = chalResps.async;
+  else if (hay.includes('sqlite') || hay.includes('commit') || hay.includes('transaction')) resp = chalResps.db;
+  else if (hay.includes('requests') || hay.includes('sandbox') || hay.includes('gateway') || hay.includes('http')) resp = chalResps.ext;
   out.style.color = 'var(--dim)'; out.textContent = '';
   for (const ch of resp) { out.textContent += ch; await sleep(6); }
 }
