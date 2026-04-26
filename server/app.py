@@ -7,7 +7,6 @@
 """FastAPI application for the FlakeForge environment server."""
 
 import sys
-import os
 from pathlib import Path
 
 # Add project root to sys.path to resolve 'agent' and 'models' as top-level modules
@@ -34,15 +33,37 @@ except ImportError:
         from server.FlakeForge_environment import FlakeForgeEnvironment  # type: ignore
 
 
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+
+try:
+    from server.ext_api.api_showcase import router as showcase_router
+except ImportError:  # pragma: no cover
+    from .ext_api.api_showcase import router as showcase_router
 
 app = create_app(FlakeForgeEnvironment, FlakeForgeAction, FlakeForgeObservation)
+app.include_router(showcase_router)
 
 
-@app.get("/", response_class=HTMLResponse)
+def _index_html_path() -> Path:
+    return Path(__file__).parents[1] / "templates" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
 def homepage():
-    html_path = Path(__file__).parents[1] / "templates" / "index.html"
-    return html_path.read_text(encoding="utf-8")
+    return FileResponse(_index_html_path())
+
+
+def _prioritize_home_routes() -> None:
+    """Serve templates/index.html at / even if other routes are registered later."""
+    routes = list(app.router.routes)
+    home_paths = frozenset({"/", "/index.html"})
+    first = [r for r in routes if getattr(r, "path", None) in home_paths]
+    rest = [r for r in routes if getattr(r, "path", None) not in home_paths]
+    app.router.routes = first + rest
+
+
+_prioritize_home_routes()
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):

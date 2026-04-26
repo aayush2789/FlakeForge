@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>FlakeForge — RL Agent for Flaky Test Repair</title>
+<title>FlakeForge · OpenEnv</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet"/>
 <style>
 :root{
@@ -31,33 +31,59 @@ nav{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:cen
 .nav-links a:hover{color:var(--amber);}
 .nav-badge{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);color:var(--amber);padding:.3rem .8rem;border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:.65rem;letter-spacing:.08em;}
 
-/* HERO */
-.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:7rem 2rem 4rem;position:relative;overflow:hidden;}
-.hero-grid{position:absolute;inset:0;background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:60px 60px;opacity:.4;mask-image:radial-gradient(ellipse at center,black 30%,transparent 75%);}
-.hero-glow{position:absolute;top:30%;left:50%;transform:translate(-50%,-50%);width:600px;height:300px;background:radial-gradient(ellipse,rgba(245,158,11,.1) 0%,transparent 70%);pointer-events:none;}
-.hero-eyebrow{font-family:'JetBrains Mono',monospace;font-size:.72rem;letter-spacing:.2em;color:var(--amber);text-transform:uppercase;margin-bottom:1.2rem;opacity:0;animation:riseUp .6s .1s ease forwards;}
-h1.hero-title{font-size:clamp(2.8rem,6vw,5.5rem);font-weight:800;text-align:center;line-height:1.0;letter-spacing:-.04em;opacity:0;animation:riseUp .6s .2s ease forwards;}
-h1.hero-title em{color:var(--amber);font-style:normal;}
-.hero-sub{max-width:560px;text-align:center;color:var(--dim);font-size:1rem;line-height:1.7;margin-top:1.2rem;font-weight:400;opacity:0;animation:riseUp .6s .3s ease forwards;}
-.hero-btns{display:flex;gap:1rem;margin-top:2rem;opacity:0;animation:riseUp .6s .4s ease forwards;}
-.btn-a{background:var(--amber);color:#000;border:none;padding:.75rem 1.8rem;border-radius:6px;font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;cursor:pointer;transition:all .2s;}
-.btn-a:hover{background:var(--amber2);transform:translateY(-2px);box-shadow:0 8px 30px var(--amber-glow);}
-.btn-b{background:transparent;color:var(--text);border:1px solid var(--border2);padding:.75rem 1.8rem;border-radius:6px;font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;cursor:pointer;transition:all .2s;}
-.btn-b:hover{border-color:var(--amber);color:var(--amber);}
+/* ENV DASH */
+.env-dash{position:relative;padding:6.5rem 1.5rem 3.5rem;border-bottom:1px solid var(--border);background:radial-gradient(1200px 500px at 50% 0%,rgba(245,158,11,.06),transparent 60%),var(--bg);}
+.env-dash::before{content:'';position:absolute;inset:0;pointer-events:none;opacity:.35;background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:48px 48px;mask-image:linear-gradient(to bottom,black 0%,transparent 90%);}
+.dash-inner{max-width:1200px;margin:0 auto;position:relative;z-index:1;}
+.dash-top{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:1.5rem;margin-bottom:2rem;}
+.dash-kicker{font-family:'JetBrains Mono',monospace;font-size:.65rem;letter-spacing:.2em;text-transform:uppercase;color:var(--amber);display:block;margin-bottom:.5rem;}
+.dash-title{font-size:clamp(1.35rem,2.2vw,1.75rem);font-weight:800;letter-spacing:-.02em;}
+.dash-lead{max-width:min(640px,100%);color:var(--dim);font-size:.88rem;line-height:1.75;margin-top:.65rem;}
+.dash-metrics{display:flex;flex-wrap:wrap;gap:1rem;}
+.dash-metric{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:.55rem .9rem;min-width:120px;}
+.dash-mv{font-family:'JetBrains Mono',monospace;font-size:1.05rem;font-weight:700;color:var(--amber);}
+.dash-ml{font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-top:.2rem;}
+.dash-actions{display:flex;gap:.6rem;flex-wrap:wrap;}
+.btn-a{background:var(--amber);color:#000;border:none;padding:.6rem 1.3rem;border-radius:6px;font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;cursor:pointer;transition:all .2s;}
+.btn-a:hover:not(:disabled){background:var(--amber2);transform:translateY(-1px);box-shadow:0 6px 24px var(--amber-glow);}
+.btn-b{background:transparent;color:var(--text);border:1px solid var(--border2);padding:.6rem 1.3rem;border-radius:6px;font-family:'Syne',sans-serif;font-weight:600;font-size:.8rem;cursor:pointer;transition:all .2s;}
+.btn-b:hover:not(:disabled){border-color:var(--amber);color:var(--amber);}
+.btn-ghost{background:var(--bg3);color:var(--dim);border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:.65rem;padding:.4rem .75rem;border-radius:6px;cursor:pointer;transition:all .2s;}
+.btn-ghost:hover{color:var(--amber);border-color:var(--amber);}
 
-/* HERO TERMINAL */
-.hero-terminal{width:100%;max-width:820px;margin-top:3rem;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;overflow:hidden;opacity:0;animation:riseUp .7s .5s ease forwards;box-shadow:0 40px 80px rgba(0,0,0,.5);}
-.term-bar{display:flex;align-items:center;gap:.5rem;padding:.7rem 1rem;background:var(--bg3);border-bottom:1px solid var(--border);}
-.tdot{width:11px;height:11px;border-radius:50%;}
-.tdot.r{background:#ef4444;}.tdot.y{background:#f59e0b;}.tdot.g{background:#22c55e;}
-.term-title{margin-left:.5rem;font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--muted);}
-.term-body{display:grid;grid-template-columns:1fr 1fr;min-height:180px;}
-.term-col{padding:1.2rem;font-family:'JetBrains Mono',monospace;font-size:.75rem;line-height:1.8;border-right:1px solid var(--border);}
-.term-col:last-child{border-right:none;}
-.term-col-label{font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-bottom:.6rem;padding-bottom:.4rem;border-bottom:1px solid var(--border);}
+.dash-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-top:1.2rem;}
+@media(max-width:1000px){.dash-grid{grid-template-columns:1fr;}}
+
+.dash-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:1rem 1.1rem;min-height:120px;display:flex;flex-direction:column;gap:.45rem;transition:border-color .2s,box-shadow .2s;}
+.dash-card:hover{border-color:var(--border2);box-shadow:0 8px 32px rgba(0,0,0,.25);}
+.dash-ic{font-size:1.15rem;line-height:1;}
+.dash-ct{font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);}
+.dash-cx{font-size:.78rem;color:var(--dim);line-height:1.55;flex:1;}
+.dash-cl{font-family:'JetBrains Mono',monospace;font-size:.6rem;margin-top:auto;}
+.dash-cl a,.dash-api-row a{color:var(--teal);text-decoration:none;}
+.dash-cl a:hover,.dash-api-row a:hover{text-decoration:underline;}
+.dash-cl code{font-size:.58rem;background:var(--bg3);padding:.15rem .35rem;border-radius:4px;color:var(--amber);}
+
+.dash-streams{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:1.5rem;}
+@media(max-width:900px){.dash-streams{grid-template-columns:1fr;}}
+.dash-stream{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.dash-sh{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.65rem 1rem;background:var(--bg3);border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--muted);}
+.dash-sb{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;}
+canvas#dashCgCanvas{display:block;width:100%;height:200px;background:var(--bg);}
+.dash-log{font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--dim);line-height:1.65;min-height:200px;max-height:200px;overflow-y:auto;padding:.85rem 1rem;margin:0;white-space:pre-wrap;word-break:break-word;}
+.dash-legend{font-size:.55rem;color:var(--muted);padding:0 1rem .7rem;}
 .c-red{color:var(--red);} .c-green{color:var(--green);} .c-amber{color:var(--amber);} .c-teal{color:var(--teal);} .c-purple{color:var(--purple);} .c-dim{color:var(--muted);}
-.flicker{animation:flk 2.2s infinite;}
-@keyframes flk{0%,48%{color:var(--red);}50%,98%{color:var(--green);}100%{color:var(--red);}}
+.tdot{width:8px;height:8px;border-radius:50%;}
+.tdot.r{background:#ef4444;}.tdot.y{background:#f59e0b;}.tdot.g{background:#22c55e;}
+
+.dash-api{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:1rem 1.1rem;margin-top:1.25rem;}
+.dash-api h3{font-size:.72rem;font-weight:800;margin-bottom:.6rem;letter-spacing:.04em;}
+.dash-api-row{display:grid;grid-template-columns:160px 1fr;gap:.6rem;align-items:baseline;padding:.35rem 0;border-top:1px solid var(--border);font-size:.68rem;}
+.dash-api-row:first-of-type{border-top:none;padding-top:0;}
+.dash-api-k{font-family:'JetBrains Mono',monospace;color:var(--teal);}
+
+.term-bar{display:flex;align-items:center;gap:.5rem;}
+.term-title{margin-left:.4rem;font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--muted);}
 
 /* SECTION BASE */
 section{padding:5rem 2.5rem;}
@@ -216,7 +242,7 @@ footer{padding:2rem 2.5rem;display:flex;align-items:center;justify-content:space
 ::-webkit-scrollbar{width:5px;height:5px;}
 ::-webkit-scrollbar-track{background:var(--bg2);}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
-@media(max-width:900px){.ep-master{grid-template-columns:1fr;}.cmp-grid{grid-template-columns:1fr;}.stats-bar{gap:2rem;flex-wrap:wrap;}}
+@media(max-width:900px){.ep-master{grid-template-columns:1fr;}.cmp-grid{grid-template-columns:1fr;}}
 </style>
 </head>
 <body>
@@ -225,59 +251,114 @@ footer{padding:2rem 2.5rem;display:flex;align-items:center;justify-content:space
 <nav>
   <div class="logo"><span class="logo-flame">🔥</span><span>Flake<em>Forge</em></span></div>
   <div class="nav-links">
+    <a href="#env">Environment</a>
     <a href="#episode">Episode</a>
     <a href="#causal">Causal Graph</a>
-    <a href="#results">Results</a>
+    <a href="#apis">APIs</a>
     <a href="#challenge">Challenge</a>
   </div>
-  <div class="nav-badge">TEAM PRISM</div>
+  <div class="nav-badge">OpenEnv</div>
 </nav>
 
-<!-- HERO -->
-<section class="hero">
-  <div class="hero-grid"></div>
-  <div class="hero-glow"></div>
-  <div class="hero-eyebrow">⚡ RLVR · GRPO · Causal Reasoning · 3.5B Agent</div>
-  <h1 class="hero-title">The agent that knows<br/><em>why</em> tests break.</h1>
-  <p class="hero-sub">FlakeForge doesn't suppress flaky tests — it reasons about root cause using a causal graph, runs targeted chaos probes, and applies verified structural fixes. Trained end-to-end with GRPO + verifiable environment rewards.</p>
-  <div class="hero-btns">
-    <button class="btn-a" onclick="scrollTo('#episode')">▶ Watch it reason</button>
-    <button class="btn-b" onclick="scrollTo('#challenge')">Challenge FlakeForge</button>
-  </div>
-  <div class="hero-terminal">
-    <div class="term-bar"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><div class="term-title">cpu_timing_race — before / after</div></div>
-    <div class="term-body">
-      <div class="term-col">
-        <div class="term-col-label">Before — Flaky</div>
-        <span class="c-dim">$ pytest test_counter.py --count=5</span><br/>
-        Run 1: <span class="c-red">FAILED</span> <span class="c-dim">[assert 97 == 100]</span><br/>
-        Run 2: <span class="c-green">passed</span> <span class="c-dim">[32ms]</span><br/>
-        Run 3: <span class="flicker">FAILED</span> <span class="c-dim">[assert 98 == 100]</span><br/>
-        Run 4: <span class="c-green">passed</span><br/>
-        Run 5: <span class="c-red">FAILED</span><br/><br/>
-        <span class="c-red">✗ flakiness: 60% — root cause unknown</span>
+<!-- ENV DASH -->
+<section class="env-dash" id="env">
+  <div class="dash-inner">
+    <div class="dash-top">
+      <div>
+        <span class="dash-kicker">POMDP · reset / step / verify</span>
+        <h2 class="dash-title">FlakeForge environment</h2>
+        <p class="dash-lead">The HTTP server runs a <strong class="c-amber">FlakeForgeEnvironment</strong>: each <code style="font-family:'JetBrains Mono',monospace;font-size:.7rem;background:var(--bg3);padding:0 4px;border-radius:3px">reset</code> baselines a repo+test, each <code style="font-family:'JetBrains Mono',monospace;font-size:.7rem;background:var(--bg3);padding:0 4px;border-radius:3px">step</code> applies a candidate patch and re-validates. Observations carry structured state, tooling hints, a causal view of the failure, and <span class="c-teal">deep flakiness</span> signals from fast AST passes.</p>
+        <div class="dash-metrics" style="margin-top:1.1rem">
+          <div class="dash-metric"><div class="dash-mv">7</div><div class="dash-ml">action types</div></div>
+          <div class="dash-metric"><div class="dash-mv">→</div><div class="dash-ml">verifiable reward</div></div>
+          <div class="dash-metric"><div class="dash-mv">AST</div><div class="dash-ml">deep signals</div></div>
+        </div>
       </div>
-      <div class="term-col">
-        <div class="term-col-label">After — FlakeForge</div>
-        <span class="c-amber">root_cause: TIMING_RACE</span><br/>
-        <span class="c-dim">boundary: counter.py:increment()</span><br/>
-        <span class="c-teal">fix: threading.Lock (+2 lines)</span><br/><br/>
-        <span class="c-dim">$ pytest test_counter.py --count=20</span><br/>
-        <span class="c-green">✓ 20/20 passed</span><br/>
-        <span class="c-green">✓ no regressions</span><br/>
-        <span class="c-amber">reward: +7.4</span>
+      <div class="dash-actions">
+        <button type="button" class="btn-a" onclick="scrollTo('#episode')">Open episode view</button>
+        <button type="button" class="btn-b" onclick="scrollTo('#apis')">API reference</button>
       </div>
+    </div>
+
+    <div class="dash-grid">
+      <article class="dash-card">
+        <div class="dash-ic">🧩</div>
+        <div class="dash-ct">Environment loop</div>
+        <p class="dash-cx">Single episode: preflight (sanity, determinism, flakiness), then repeated step → apply patch → pytest → reward. State rolls forward deterministically for the same action sequence.</p>
+        <div class="dash-cl"><a href="#episode">Episode UI</a> · <code>POST /reset</code> <code>POST /step</code></div>
+      </article>
+      <article class="dash-card">
+        <div class="dash-ic">📡</div>
+        <div class="dash-ct">Observation</div>
+        <p class="dash-cx">Each response includes file trees, test output excerpts, pass rates, reward breakdown, targeting hints, and the deep signal bundle the agent can condition on.</p>
+        <div class="dash-cl">Returned as JSON from <code>POST /step</code></div>
+      </article>
+      <article class="dash-card">
+        <div class="dash-ic">🛠️</div>
+        <div class="dash-ct">Tools</div>
+        <p class="dash-cx">The env wires validation (Docker-based runner), search/replace patch application, and optional chaos-style stress to measure infra sensitivity. Tools are invoked server-side, not in the browser.</p>
+        <div class="dash-cl">Server: <code>FlakeForge_environment.py</code></div>
+      </article>
+      <article class="dash-card">
+        <div class="dash-ic">🔗</div>
+        <div class="dash-ct">Causal graph</div>
+        <p class="dash-cx">Cross-repo graph builder places tests, call chain, and failure frontier on a graph for boundary tracing. The episode panel animates a demo chain; the API streams the same structure for live demos.</p>
+        <div class="dash-cl"><a href="javascript:streamCausalApi()">Stream demo</a> · <code>GET /api/causal_graph/demo</code></div>
+      </article>
+      <article class="dash-card">
+        <div class="dash-ic">🧪</div>
+        <div class="dash-ct">Deep flakiness</div>
+        <p class="dash-cx">AST-only detectors flag cache pollution, bad fixture scoping, patch residue, import side effects, and async/thread stragglers—surfaced in observations and in the stream below.</p>
+        <div class="dash-cl"><a href="javascript:streamDeepApi()">Stream scan</a> · <code>GET /api/deep_flakiness/signals</code></div>
+      </article>
+      <article class="dash-card">
+        <div class="dash-ic">🖧</div>
+        <div class="dash-ct">Service</div>
+        <p class="dash-cx">Core OpenEnv HTTP surface plus read-only showcase routes for this Space. Default repo is the bundled <code>test_repos/timing_race_minimal</code> unless <code>FF_REPO_PATH</code> is set.</p>
+        <div class="dash-cl"><code>GET /health</code> · <code>GET /api/showcase</code> · <a href="#apis">table below</a></div>
+      </article>
+    </div>
+
+    <div class="dash-streams">
+      <div class="dash-stream">
+        <div class="dash-sh">
+          <span class="c-amber"> causal_graph · SSE</span>
+          <div class="dash-sb">
+            <span class="term-bar"><span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span><span class="term-title">/api/stream/causal_graph</span></span>
+            <button type="button" class="btn-ghost" id="btnCausal" onclick="streamCausalApi()">Stream</button>
+            <button type="button" class="btn-ghost" onclick="stopCausalStream()">Stop</button>
+          </div>
+        </div>
+        <canvas id="dashCgCanvas" width="800" height="200"></canvas>
+        <p class="dash-legend c-dim">Builds the demo graph node-by-node, then edge-by-edge (same data as the episode canvas).</p>
+      </div>
+      <div class="dash-stream">
+        <div class="dash-sh">
+          <span class="c-teal"> deep_flakiness · SSE</span>
+          <div class="dash-sb">
+            <span class="term-bar"><span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span><span class="term-title">/api/stream/deep_flakiness</span></span>
+            <button type="button" class="btn-ghost" id="btnDeep" onclick="streamDeepApi()">Stream</button>
+            <button type="button" class="btn-ghost" onclick="stopDeepStream()">Stop</button>
+          </div>
+        </div>
+        <pre class="dash-log" id="dashDeepOut">// click Stream to run AST pass on the default repo (or set FF_REPO_PATH on the server)</pre>
+      </div>
+    </div>
+
+    <div class="dash-api" id="apis">
+      <h3>HTTP · core</h3>
+      <div class="dash-api-row"><div class="dash-api-k">GET /health</div><div>Liveness for Docker and Space health checks.</div></div>
+      <div class="dash-api-row"><div class="dash-api-k">POST /reset</div><div>Start an episode. JSON body may include <code>test_identifier</code>, <code>repo_path</code>, <code>max_steps</code>, <code>num_runs</code>. Returns an initial observation.</div></div>
+      <div class="dash-api-row"><div class="dash-api-k">POST /step</div><div>One environment step: agent fields such as <code>think_text</code>, <code>patch_text</code>, and predictions. Returns observation, reward, done.</div></div>
+      <h3 style="margin-top:1rem">HTTP · Space showcase (read-only)</h3>
+      <div class="dash-api-row"><div class="dash-api-k">GET /api/showcase</div><div>Index of available showcase routes and descriptions.</div></div>
+      <div class="dash-api-row"><div class="dash-api-k">GET /api/causal_graph/demo</div><div>JSON nodes/edges for the demo causal graph (used by the stream and documentation).</div></div>
+      <div class="dash-api-row"><div class="dash-api-k">GET /api/deep_flakiness/signals</div><div>Full deep signal object for a repo (optional <code>?repo=…</code> under project root).</div></div>
+      <div class="dash-api-row"><div class="dash-api-k">GET /api/stream/causal_graph</div><div>SSE: incremental <code>node</code> / <code>edge</code> events, then <code>done</code>.</div></div>
+      <div class="dash-api-row"><div class="dash-api-k">GET /api/stream/deep_flakiness</div><div>SSE: one event per signal group (preview of findings), then <code>done</code>.</div></div>
     </div>
   </div>
 </section>
-
-<!-- STATS -->
-<div class="stats-bar">
-  <div class="stat-item"><div class="stat-val" data-to="8">0</div><div class="stat-lbl">Flake Categories</div></div>
-  <div class="stat-item"><div class="stat-val" data-to="94" data-sfx="%">0%</div><div class="stat-lbl">Fix Accuracy</div></div>
-  <div class="stat-item"><div class="stat-val" data-to="14">0</div><div class="stat-lbl">Max Steps / Episode</div></div>
-  <div class="stat-item"><div class="stat-val" data-to="3" data-sfx=".5B">0</div><div class="stat-lbl">Agent Params</div></div>
-</div>
 
 <!-- ══════════════ EPISODE VISUALIZER ══════════════ -->
 <section class="ep-section" id="episode">
@@ -507,6 +588,140 @@ footer{padding:2rem 2.5rem;display:flex;align-items:center;justify-content:space
 // ─── UTILS ────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 function scrollTo(sel){ document.querySelector(sel)?.scrollIntoView({behavior:'smooth'}); }
+
+// ─── DASHBOARD · API STREAMS (SSE) ─────────────────────────
+const dashCanvas = document.getElementById('dashCgCanvas');
+const dashCtx = dashCanvas ? dashCanvas.getContext('2d') : null;
+let dashNodes = [];
+let dashEdges = [];
+let _causalEs = null;
+let _deepEs = null;
+
+function resizeDashCg(){
+  if (!dashCanvas || !dashCtx) return;
+  const w = Math.max(320, dashCanvas.parentElement?.clientWidth || 800);
+  dashCanvas.width = w;
+  dashCanvas.height = 200;
+  drawDashCg();
+}
+function drawDashCg(){
+  if (!dashCtx) return;
+  const W = dashCanvas.width, H = dashCanvas.height;
+  dashCtx.clearRect(0,0,W,H);
+  dashCtx.fillStyle = '#07080d';
+  dashCtx.fillRect(0,0,W,H);
+
+  dashEdges.forEach((e, i) => {
+    const fn = dashNodes.find(n => n.id === e.from);
+    const tn = dashNodes.find(n => n.id === e.to);
+    if (!fn || !tn) return;
+    const fx = fn.x * W, fy = fn.y * H, tx = tn.x * W, ty = tn.y * H;
+    dashCtx.save();
+    dashCtx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
+    dashCtx.lineWidth = 1.5;
+    dashCtx.shadowColor = 'rgba(245, 158, 11, 0.35)'; dashCtx.shadowBlur = 6;
+    const mx = (fx + tx) / 2, my = (fy + ty) / 2 - 16;
+    dashCtx.beginPath();
+    dashCtx.moveTo(fx, fy);
+    dashCtx.quadraticCurveTo(mx, my, tx, ty);
+    dashCtx.stroke();
+    dashCtx.restore();
+  });
+
+  dashNodes.forEach(n => {
+    const x = n.x * W, y = n.y * H, r = 12;
+    dashCtx.save();
+    dashCtx.fillStyle = 'rgba(18, 20, 31, 0.95)';
+    dashCtx.strokeStyle = n.id === 'race' ? 'rgba(239, 68, 68, 0.8)' : 'rgba(37, 40, 64, 0.9)';
+    dashCtx.lineWidth = n.id === 'race' ? 2 : 1;
+    dashCtx.beginPath();
+    dashCtx.ellipse(x, y, 38, 16, 0, 0, Math.PI * 2);
+    dashCtx.fill();
+    dashCtx.stroke();
+    dashCtx.fillStyle = n.id === 'race' ? '#f87171' : '#94a3b8';
+    dashCtx.font = '8px JetBrains Mono';
+    dashCtx.textAlign = 'center';
+    dashCtx.textBaseline = 'middle';
+    const lbl = (n.label || n.id).slice(0, 18);
+    dashCtx.fillText(lbl, x, y);
+    dashCtx.restore();
+  });
+}
+
+function stopCausalStream(){
+  if (_causalEs) { try { _causalEs.close(); } catch (e) {} _causalEs = null; }
+  const b = document.getElementById('btnCausal');
+  if (b) b.disabled = false;
+}
+function streamCausalApi(){
+  if (!dashCtx) return;
+  stopCausalStream();
+  dashNodes = [];
+  dashEdges = [];
+  resizeDashCg();
+  const b = document.getElementById('btnCausal');
+  if (b) b.disabled = true;
+  _causalEs = new EventSource('/api/stream/causal_graph');
+  _causalEs.onmessage = (ev) => {
+    try {
+      const p = JSON.parse(ev.data);
+      if (p.type === 'node' && p.node) dashNodes.push(p.node);
+      if (p.type === 'edge' && p.edge) dashEdges.push(p.edge);
+      if (p.type === 'done') stopCausalStream();
+      drawDashCg();
+    } catch (e) { /* ignore */ }
+  };
+  _causalEs.onerror = () => { stopCausalStream(); };
+}
+
+function stopDeepStream(){
+  if (_deepEs) { try { _deepEs.close(); } catch (e) {} _deepEs = null; }
+  const b = document.getElementById('btnDeep');
+  if (b) b.disabled = false;
+}
+function streamDeepApi(){
+  const out = document.getElementById('dashDeepOut');
+  if (!out) return;
+  stopDeepStream();
+  out.textContent = '';
+  const b = document.getElementById('btnDeep');
+  if (b) b.disabled = true;
+  _deepEs = new EventSource('/api/stream/deep_flakiness');
+  _deepEs.onmessage = (ev) => {
+    let p;
+    try { p = JSON.parse(ev.data); } catch (e) { return; }
+    if (p.type === 'error') {
+      out.textContent += 'ERR: ' + p.detail + '\n';
+      stopDeepStream();
+      return;
+    }
+    if (p.type === 'start') {
+      out.textContent = 'scan repo:\n' + p.repo_path + '\n\n';
+      return;
+    }
+    if (p.type === 'signal') {
+      out.textContent += p.label;
+      if (p.count !== undefined) { out.textContent += ' · ' + p.count + ' hit(s)'; }
+      out.textContent += '\n';
+      if (p.value !== undefined) { out.textContent += '  value: ' + p.value + '\n'; }
+      (p.preview || []).forEach(line => { out.textContent += '  · ' + line + '\n'; });
+      out.textContent += '\n';
+      return;
+    }
+    if (p.type === 'done') {
+      (async function(){
+        for (const ch of '\n— done —\n') { out.textContent += ch; await sleep(4); }
+      })();
+      stopDeepStream();
+    }
+  };
+  _deepEs.onerror = () => { stopDeepStream(); };
+}
+
+if (dashCanvas) {
+  resizeDashCg();
+  window.addEventListener('resize', () => { resizeDashCg(); });
+}
 
 // ─── REVEAL ───────────────────────────────────────────────
 const revObs = new IntersectionObserver(es => es.forEach(e => { if(e.isIntersecting) e.target.classList.add('on'); }), {threshold:.08});
