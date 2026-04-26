@@ -22,15 +22,26 @@ Tinker's GRPO loop (importance-sampling policy gradient):
 After training, weights are downloaded locally via Tinker's checkpoint API
 and optionally exported as a merged HuggingFace model or PEFT adapter.
 
+Default hyperparameters (``--help`` overrides)
+----------------------------------------------
+Tuned for a **~3–3.5 hour wall-clock** Tinker run (time budget, not local GPU).
+
+  - **G=8** GRPO groups and **LoRA rank 128** are kept for quality.
+  - **Batch size 12** (not 16) and **shorter max completion tokens** make each
+    step a bit faster so more **optimizer steps** fit in 3–3.5h.
+  - Default **100 steps** targets ~2.0 min/step on average; after step 0, read
+    the printed ETA and use ``--max-steps`` to land near 3h or 3.5h.
+
+  If steps are *faster* than ~1.5 min, raise ``--max-steps`` (e.g. 115–130).
+  If *slower* than ~2.5 min, lower ``--max-steps`` (e.g. 70–85) or reduce
+  ``--batch-size`` to 10.
+
 Prompt design
 -------------
-The system prompt and observation format are trimmed for an 8B model:
-  - Shorter system prompt (~350 tokens vs ~600 for the full agent)
-  - Fewer observation sections (no DEEP SIGNALS, no CATEGORY CHEATSHEET)
-  - Capped source lengths (1200 chars source, 800 chars test, 600 chars trace)
-  - Single-claim encouraged (reduces JSON nesting errors)
-This keeps the prompt+completion within ~2048 tokens, leaving headroom for
-the model to reason without running into context limits.
+Compact but **rich enough** for 8B when budget allows:
+  - Shorter system prompt than the full unified agent
+  - Source / test excerpts capped (see module constants) — no DEEP SIGNALS block
+  - Single-claim JSON shape (reduces nesting errors)
 
 Requirements
 ------------
@@ -105,13 +116,24 @@ except ImportError:
     from FlakeForge.models import FlakeForgeAction
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Constants — high-budget defaults (override via CLI) ─────────────────────
 
 TINKER_MODEL_ID = "Qwen/Qwen3-8B"
-LORA_RANK = 64
-GROUP_SIZE = 6
-MAX_COMPLETION_TOKENS = 1024
-MAX_PROMPT_TOKENS = 1024
+# LoRA: 128 = more adapter capacity than 64; costs more train tokens per step.
+LORA_RANK = 128
+# GRPO group size G: 8 matches Tinker RL tutorials + local FlakeForge default.
+GROUP_SIZE = 8
+# Cap generation length — lower = faster sampling per rollout (3–3.5h budget).
+MAX_COMPLETION_TOKENS = 1200
+# User / source / test caps (chars). Slightly below “unlimited” to cut prefill time.
+COMPACT_USER_MAX_CHARS = 4000
+COMPACT_SOURCE_CHARS = 2000
+COMPACT_TEST_CHARS = 1200
+# Sampling: slightly higher diversity helps GRPO find better-than-mean rollouts.
+SAMPLE_TEMPERATURE = 0.85
+SAMPLE_TOP_P = 0.98
+# Optimizer: mild weight decay often helps LoRA generalization.
+ADAM_WEIGHT_DECAY = 0.01
 
 # Lighter system prompt for 8B — fewer rules, less nesting, single claim
 SYSTEM_PROMPT_8B = """\
@@ -173,7 +195,7 @@ def build_compact_prompt(prompt_text: str) -> List[Dict[str, str]]:
     Keeps the system prompt short and caps the user message to avoid blowing
     through the 8B model's effective attention window.
     """
-    user_content = prompt_text[:3000]
+    user_content = prompt_text[:COMPACT_USER_MAX_CHARS]
     return [
         {"role": "system", "content": SYSTEM_PROMPT_8B},
         {"role": "user", "content": user_content},
@@ -202,8 +224,8 @@ def build_compact_observation(case: Dict[str, Any]) -> str:
     difficulty = str(manifest.get("difficulty") or "medium").lower()
 
     repo_dir = Path(case.get("repo_path", ""))
-    source_text = _try_read_file(repo_dir, manifest, max_chars=1200)
-    test_text = _try_read_test(repo_dir, test_id, max_chars=800)
+    source_text = _try_read_file(repo_dir, manifest, max_chars=COMPACT_SOURCE_CHARS)
+    test_text = _try_read_test(repo_dir, test_id, max_chars=COMPACT_TEST_CHARS)
 
     parts = [
         "=== TASK ===",
@@ -265,15 +287,20 @@ def _try_read_test(repo_dir: Path, test_id: str, max_chars: int = 800) -> str:
 
 async def run_grpo_training(
     *,
-    max_steps: int = 50,
-    batch_size: int = 8,
+    max_steps: int = 100,
+    batch_size: int = 12,
     group_size: int = GROUP_SIZE,
-    learning_rate: float = 4e-5,
+    learning_rate: float = 5e-5,
     lora_rank: int = LORA_RANK,
     curriculum_root: str = "seed_repos/idoft",
     output_dir: str = "outputs/flakeforge-tinker-qwen3-8b",
     use_curriculum: bool = True,
     wandb_project: Optional[str] = None,
+    temperature: float = SAMPLE_TEMPERATURE,
+    top_p: float = SAMPLE_TOP_P,
+    max_completion_tokens: int = MAX_COMPLETION_TOKENS,
+    weight_decay: float = ADAM_WEIGHT_DECAY,
+    checkpoint_every: int = 15,
 ) -> Dict[str, Any]:
     """Run the full GRPO training loop on Tinker.
 
@@ -289,6 +316,10 @@ async def run_grpo_training(
     print(f"  batch_size      : {batch_size}")
     print(f"  max_steps       : {max_steps}")
     print(f"  learning_rate   : {learning_rate}")
+    print(f"  weight_decay    : {weight_decay}")
+    print(f"  temperature     : {temperature}  top_p={top_p}")
+    print(f"  max_new_tokens  : {max_completion_tokens}")
+    print(f"  checkpoint_every: {checkpoint_every}")
     print(f"  output_dir      : {output_dir}")
     print()
 
@@ -307,16 +338,17 @@ async def run_grpo_training(
     renderer = get_renderer("qwen3_disable_thinking", tokenizer)
 
     sampling_params = tinker.SamplingParams(
-        max_tokens=MAX_COMPLETION_TOKENS,
+        max_tokens=max_completion_tokens,
         stop=renderer.get_stop_sequences(),
-        temperature=0.8,
-        top_p=0.95,
+        temperature=temperature,
+        top_p=top_p,
     )
     adam_params = tinker.AdamParams(
         learning_rate=learning_rate,
         beta1=0.9,
         beta2=0.95,
         eps=1e-8,
+        weight_decay=weight_decay,
     )
     print(f"[TINKER] Training client ready (model={TINKER_MODEL_ID}, rank={lora_rank})", flush=True)
 
@@ -372,6 +404,8 @@ async def run_grpo_training(
                     "model": TINKER_MODEL_ID, "lora_rank": lora_rank,
                     "group_size": group_size, "batch_size": batch_size,
                     "max_steps": max_steps, "learning_rate": learning_rate,
+                    "weight_decay": weight_decay, "temperature": temperature,
+                    "top_p": top_p, "max_completion_tokens": max_completion_tokens,
                 },
             )
         except Exception as exc:
@@ -490,6 +524,13 @@ async def run_grpo_training(
             f"{elapsed:.1f}s",
             flush=True,
         )
+        if step == 0 and elapsed > 1.0:
+            est_min = elapsed * max_steps / 60.0
+            print(
+                f"  [TIME] If ~{elapsed:.0f}s/step continues → ~{est_min:.0f} min for "
+                f"all {max_steps} steps (tune --max-steps for a 3–3.5h target).",
+                flush=True,
+            )
 
         if wandb_run:
             try:
@@ -497,8 +538,8 @@ async def run_grpo_training(
             except Exception:
                 pass
 
-        # Periodic checkpoint
-        if (step + 1) % 10 == 0:
+        # Periodic checkpoint (Tinker cloud — resume via save_state path in console)
+        if checkpoint_every > 0 and (step + 1) % checkpoint_every == 0:
             ckpt_name = f"step_{step+1:04d}"
             try:
                 ckpt = await training_client.save_state_async(ckpt_name)
@@ -575,6 +616,11 @@ async def run_grpo_training(
         "batch_size": batch_size,
         "max_steps": max_steps,
         "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_completion_tokens": max_completion_tokens,
+        "checkpoint_every": checkpoint_every,
         "metrics": metrics_history,
         "sampler_path": sampler_path,
     }
@@ -600,11 +646,40 @@ def main() -> None:
         description="FlakeForge GRPO training on Tinker (Thinking Machines GPU cloud)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--max-steps", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--group-size", type=int, default=GROUP_SIZE)
-    p.add_argument("--learning-rate", type=float, default=4e-5)
+    p.add_argument(
+        "--max-steps", type=int, default=100,
+        help="Optimizer steps. Default 100 targets ~3–3.5h wall-clock; use step-0 [TIME] line to adjust.",
+    )
+    p.add_argument(
+        "--batch-size", type=int, default=12,
+        help="Prompts per step. 12 is a 3h-budget default (smaller = faster step, more steps fit in 3.5h).",
+    )
+    p.add_argument(
+        "--group-size", type=int, default=GROUP_SIZE,
+        help="GRPO group size G — completions per prompt; 8 is standard for GRPO here.",
+    )
+    p.add_argument(
+        "--learning-rate", type=float, default=5e-5,
+        help="AdamW learning rate. Slightly above 4e-5 for faster signal with large batches.",
+    )
+    p.add_argument(
+        "--weight-decay", type=float, default=ADAM_WEIGHT_DECAY,
+        help="AdamW weight decay on LoRA params.",
+    )
     p.add_argument("--lora-rank", type=int, default=LORA_RANK)
+    p.add_argument(
+        "--temperature", type=float, default=SAMPLE_TEMPERATURE,
+        help="Rollout temperature (GRPO exploration).",
+    )
+    p.add_argument("--top-p", type=float, default=SAMPLE_TOP_P, help="Nucleus sampling.")
+    p.add_argument(
+        "--max-completion-tokens", type=int, default=MAX_COMPLETION_TOKENS,
+        help="Max new tokens per completion. Lower = faster steps (default 1200 for ~3h runs).",
+    )
+    p.add_argument(
+        "--checkpoint-every", type=int, default=15,
+        help="Save Tinker training state every N steps (0 = disable; 15 saves a bit of API time).",
+    )
     p.add_argument("--curriculum-root", default="seed_repos/idoft")
     p.add_argument("--output-dir", default="outputs/flakeforge-tinker-qwen3-8b")
     p.add_argument("--no-curriculum", action="store_true",
@@ -626,6 +701,11 @@ def main() -> None:
         output_dir=args.output_dir,
         use_curriculum=not args.no_curriculum,
         wandb_project=args.wandb_project,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_completion_tokens=args.max_completion_tokens,
+        weight_decay=args.weight_decay,
+        checkpoint_every=args.checkpoint_every,
     ))
 
 
