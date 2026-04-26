@@ -1,0 +1,9 @@
+{
+  "repo_name": "resource_leak_thread",
+  "flaky_test_path": "tests/test_flaky.py::test_worker_count",
+  "flake_category": "resource_leak",
+  "difficulty": "medium",
+  "root_cause_file": "source.py",
+  "root_cause_function": "start",
+  "description": "Background thread timing makes exact result count unpredictable; also threads are not stopped, leaking across tests."
+}

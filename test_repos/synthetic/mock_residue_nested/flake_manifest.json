@@ -1,0 +1,9 @@
+{
+  "repo_name": "mock_residue_nested",
+  "flaky_test_path": "tests/test_flaky.py::test_real_version",
+  "flake_category": "mock_residue",
+  "difficulty": "hard",
+  "root_cause_file": "tests/test_flaky.py",
+  "root_cause_function": "test_mock_config",
+  "description": "test_mock_config starts two patchers but only stops one; load_config mock leaks to subsequent tests."
+}

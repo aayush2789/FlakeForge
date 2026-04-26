@@ -1,0 +1,1027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>FlakeForge — RL Agent for Flaky Test Repair</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#07080d;--bg2:#0d0f1a;--bg3:#12141f;--bg4:#181a28;
+  --amber:#f59e0b;--amber2:#fbbf24;--amber-glow:rgba(245,158,11,.25);
+  --teal:#06b6d4;--teal-glow:rgba(6,182,212,.2);
+  --red:#ef4444;--green:#22c55e;--purple:#a78bfa;
+  --text:#f1f5f9;--dim:#94a3b8;--muted:#475569;
+  --border:#1a1d2e;--border2:#252840;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;overflow-x:hidden;}
+
+/* NOISE */
+body::after{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;}
+
+/* NAV */
+nav{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:center;justify-content:space-between;padding:1.1rem 2.5rem;background:rgba(7,8,13,.92);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);}
+.logo{display:flex;align-items:center;gap:.5rem;font-weight:800;font-size:1.2rem;letter-spacing:-.03em;}
+.logo-flame{font-size:1.4rem;}
+.logo em{color:var(--amber);font-style:normal;}
+.nav-links{display:flex;gap:2rem;font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--muted);}
+.nav-links a{color:var(--muted);text-decoration:none;transition:color .2s;}
+.nav-links a:hover{color:var(--amber);}
+.nav-badge{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);color:var(--amber);padding:.3rem .8rem;border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:.65rem;letter-spacing:.08em;}
+
+/* HERO */
+.hero{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:7rem 2rem 4rem;position:relative;overflow:hidden;}
+.hero-grid{position:absolute;inset:0;background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:60px 60px;opacity:.4;mask-image:radial-gradient(ellipse at center,black 30%,transparent 75%);}
+.hero-glow{position:absolute;top:30%;left:50%;transform:translate(-50%,-50%);width:600px;height:300px;background:radial-gradient(ellipse,rgba(245,158,11,.1) 0%,transparent 70%);pointer-events:none;}
+.hero-eyebrow{font-family:'JetBrains Mono',monospace;font-size:.72rem;letter-spacing:.2em;color:var(--amber);text-transform:uppercase;margin-bottom:1.2rem;opacity:0;animation:riseUp .6s .1s ease forwards;}
+h1.hero-title{font-size:clamp(2.8rem,6vw,5.5rem);font-weight:800;text-align:center;line-height:1.0;letter-spacing:-.04em;opacity:0;animation:riseUp .6s .2s ease forwards;}
+h1.hero-title em{color:var(--amber);font-style:normal;}
+.hero-sub{max-width:560px;text-align:center;color:var(--dim);font-size:1rem;line-height:1.7;margin-top:1.2rem;font-weight:400;opacity:0;animation:riseUp .6s .3s ease forwards;}
+.hero-btns{display:flex;gap:1rem;margin-top:2rem;opacity:0;animation:riseUp .6s .4s ease forwards;}
+.btn-a{background:var(--amber);color:#000;border:none;padding:.75rem 1.8rem;border-radius:6px;font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;cursor:pointer;transition:all .2s;}
+.btn-a:hover{background:var(--amber2);transform:translateY(-2px);box-shadow:0 8px 30px var(--amber-glow);}
+.btn-b{background:transparent;color:var(--text);border:1px solid var(--border2);padding:.75rem 1.8rem;border-radius:6px;font-family:'Syne',sans-serif;font-weight:600;font-size:.88rem;cursor:pointer;transition:all .2s;}
+.btn-b:hover{border-color:var(--amber);color:var(--amber);}
+
+/* HERO TERMINAL */
+.hero-terminal{width:100%;max-width:820px;margin-top:3rem;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;overflow:hidden;opacity:0;animation:riseUp .7s .5s ease forwards;box-shadow:0 40px 80px rgba(0,0,0,.5);}
+.term-bar{display:flex;align-items:center;gap:.5rem;padding:.7rem 1rem;background:var(--bg3);border-bottom:1px solid var(--border);}
+.tdot{width:11px;height:11px;border-radius:50%;}
+.tdot.r{background:#ef4444;}.tdot.y{background:#f59e0b;}.tdot.g{background:#22c55e;}
+.term-title{margin-left:.5rem;font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--muted);}
+.term-body{display:grid;grid-template-columns:1fr 1fr;min-height:180px;}
+.term-col{padding:1.2rem;font-family:'JetBrains Mono',monospace;font-size:.75rem;line-height:1.8;border-right:1px solid var(--border);}
+.term-col:last-child{border-right:none;}
+.term-col-label{font-size:.6rem;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-bottom:.6rem;padding-bottom:.4rem;border-bottom:1px solid var(--border);}
+.c-red{color:var(--red);} .c-green{color:var(--green);} .c-amber{color:var(--amber);} .c-teal{color:var(--teal);} .c-purple{color:var(--purple);} .c-dim{color:var(--muted);}
+.flicker{animation:flk 2.2s infinite;}
+@keyframes flk{0%,48%{color:var(--red);}50%,98%{color:var(--green);}100%{color:var(--red);}}
+
+/* SECTION BASE */
+section{padding:5rem 2.5rem;}
+.sec-inner{max-width:1200px;margin:0 auto;}
+.sec-label{font-family:'JetBrains Mono',monospace;font-size:.68rem;letter-spacing:.2em;color:var(--amber);text-transform:uppercase;margin-bottom:.8rem;}
+.sec-title{font-size:clamp(1.8rem,3vw,2.6rem);font-weight:800;letter-spacing:-.03em;line-height:1.1;}
+.sec-sub{color:var(--dim);font-size:.95rem;line-height:1.7;margin-top:.8rem;max-width:580px;}
+
+/* REVEAL */
+.reveal{opacity:0;transform:translateY(24px);transition:opacity .65s ease,transform .65s ease;}
+.reveal.on{opacity:1;transform:translateY(0);}
+
+/* ─────────────────────────────────────────
+   EPISODE VISUALIZER SECTION
+───────────────────────────────────────── */
+.ep-section{background:var(--bg);border-top:1px solid var(--border);}
+
+/* master layout: left panel + right panels stacked */
+.ep-master{display:grid;grid-template-columns:340px 1fr;gap:1.5rem;margin-top:2.5rem;align-items:start;}
+
+/* RUN CONTROLS */
+.run-controls{display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem;}
+.run-btn{background:linear-gradient(135deg,var(--amber),#f97316);color:#000;border:none;padding:.7rem 1.6rem;border-radius:8px;font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;cursor:pointer;transition:all .2s;box-shadow:0 4px 20px var(--amber-glow);}
+.run-btn:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 30px rgba(245,158,11,.4);}
+.run-btn:disabled{opacity:.45;cursor:not-allowed;transform:none;}
+.ep-status{font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--muted);}
+.ep-status em{color:var(--amber);font-style:normal;}
+
+/* LEFT: CODE PANELS */
+.code-col{display:flex;flex-direction:column;gap:1.2rem;}
+.cp{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.cp-head{display:flex;align-items:center;gap:.4rem;padding:.55rem .9rem;background:var(--bg3);border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--muted);}
+.cp-body{padding:.9rem;font-family:'JetBrains Mono',monospace;font-size:.73rem;line-height:1.8;max-height:200px;overflow-y:auto;}
+.cp-body::-webkit-scrollbar{width:3px;}.cp-body::-webkit-scrollbar-thumb{background:var(--border2);}
+.hi-line{display:block;background:rgba(239,68,68,.1);border-left:2px solid var(--red);padding-left:.5rem;animation:pulse-r 2s infinite;}
+@keyframes pulse-r{0%,100%{background:rgba(239,68,68,.08);}50%{background:rgba(239,68,68,.2);}}
+.patch-line{display:block;opacity:0;transform:translateX(-6px);transition:opacity .25s,transform .25s;}
+.patch-line.show{opacity:1;transform:translateX(0);}
+.p-add{border-left:2px solid var(--green);padding-left:.5rem;color:var(--green);}
+.p-rem{border-left:2px solid var(--red);padding-left:.5rem;color:var(--red);text-decoration:line-through;opacity:.6;}
+.p-neu{color:var(--dim);}
+
+/* RIGHT: STACKED PANELS */
+.right-col{display:flex;flex-direction:column;gap:1.2rem;}
+
+/* CAUSAL GRAPH */
+.cg-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.panel-head{display:flex;align-items:center;justify-content:space-between;padding:.6rem 1rem;background:var(--bg3);border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--muted);}
+.panel-head-label{font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;}
+canvas#cgCanvas{display:block;width:100%;height:240px;cursor:default;}
+
+/* ACTION SPACE */
+.action-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;padding:1rem;}
+.action-card{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:.6rem .7rem;font-family:'JetBrains Mono',monospace;font-size:.62rem;color:var(--muted);transition:all .3s;text-align:center;cursor:default;}
+.action-card .ac-icon{font-size:1.1rem;margin-bottom:.3rem;}
+.action-card .ac-name{font-size:.58rem;letter-spacing:.05em;text-transform:uppercase;display:block;}
+.action-card.considering{border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.06);color:var(--dim);animation:consider-pulse .6s ease infinite alternate;}
+@keyframes consider-pulse{0%{border-color:rgba(245,158,11,.3);}100%{border-color:rgba(245,158,11,.7);}}
+.action-card.selected{border-color:var(--amber);background:rgba(245,158,11,.12);color:var(--amber);box-shadow:0 0 20px var(--amber-glow);}
+.action-card.rejected{opacity:.25;}
+
+/* REWARD BREAKDOWN */
+.reward-bars{padding:1rem;display:flex;flex-direction:column;gap:.5rem;}
+.rbar-row{display:flex;align-items:center;gap:.7rem;}
+.rbar-label{font-family:'JetBrains Mono',monospace;font-size:.63rem;color:var(--muted);width:140px;flex-shrink:0;text-align:right;}
+.rbar-track{flex:1;height:16px;background:var(--bg3);border-radius:4px;overflow:hidden;position:relative;}
+.rbar-fill{height:100%;width:0%;border-radius:4px;transition:width .6s cubic-bezier(.22,1,.36,1);position:relative;}
+.rbar-fill.pos{background:linear-gradient(90deg,rgba(34,197,94,.4),var(--green));}
+.rbar-fill.neg{background:linear-gradient(90deg,rgba(239,68,68,.4),var(--red));float:right;}
+.rbar-val{font-family:'JetBrains Mono',monospace;font-size:.62rem;width:50px;flex-shrink:0;color:var(--dim);}
+.rbar-val.pos{color:var(--green);}.rbar-val.neg{color:var(--red);}
+.reward-total{display:flex;justify-content:space-between;padding:.7rem 1rem;margin-top:.5rem;border-top:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:.78rem;font-weight:700;}
+.reward-total-val{color:var(--amber);font-size:1rem;}
+
+/* THINK STREAM */
+.think-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.think-body{padding:1rem 1.1rem;font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--dim);line-height:1.85;min-height:90px;}
+.th{color:var(--amber);background:rgba(245,158,11,.1);padding:0 4px;border-radius:3px;font-weight:700;}
+.think-cursor{display:inline-block;width:2px;height:.9em;background:var(--amber);vertical-align:middle;margin-left:1px;animation:blink .8s step-end infinite;}
+@keyframes blink{0%,100%{opacity:1;}50%{opacity:0;}}
+
+/* EPISODE TIMELINE */
+.timeline-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
+.timeline-body{padding:1rem;display:flex;gap:.5rem;align-items:flex-end;min-height:70px;overflow-x:auto;}
+.timeline-body::-webkit-scrollbar{height:3px;}.timeline-body::-webkit-scrollbar-thumb{background:var(--border2);}
+.tl-step{display:flex;flex-direction:column;align-items:center;gap:.3rem;flex-shrink:0;opacity:0;transform:translateY(8px);transition:all .3s;}
+.tl-step.show{opacity:1;transform:translateY(0);}
+.tl-bar{width:28px;border-radius:3px 3px 0 0;transition:height .4s ease;background:var(--border2);}
+.tl-bar.done{background:linear-gradient(180deg,var(--amber),var(--amber2));}
+.tl-bar.pass{background:linear-gradient(180deg,var(--green),#16a34a);}
+.tl-label{font-family:'JetBrains Mono',monospace;font-size:.55rem;color:var(--muted);text-align:center;max-width:32px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* INSIGHT BUBBLES */
+.bubbles-section{padding:3rem 2.5rem;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:var(--bg2);}
+.bubbles-inner{max-width:1200px;margin:0 auto;}
+.bubble-constellation{position:relative;height:300px;margin-top:2rem;}
+.ins-bubble{position:absolute;opacity:0;transform:scale(.4);transition:all .5s cubic-bezier(.34,1.56,.64,1);background:var(--bg3);border-radius:20px;padding:.5rem 1.1rem;font-family:'JetBrains Mono',monospace;font-size:.72rem;cursor:default;white-space:nowrap;}
+.ins-bubble.show{opacity:1;transform:scale(1);}
+.ins-bubble.type-root{border:1px solid var(--amber);color:var(--amber);box-shadow:0 4px 20px var(--amber-glow);}
+.ins-bubble.type-fix{border:1px solid var(--green);color:var(--green);box-shadow:0 4px 20px rgba(34,197,94,.2);}
+.ins-bubble.type-reward{border:1px solid var(--teal);color:var(--teal);box-shadow:0 4px 20px var(--teal-glow);}
+.ins-bubble.type-probe{border:1px solid var(--purple);color:var(--purple);box-shadow:0 4px 20px rgba(167,139,250,.2);}
+svg.constellation-lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
+
+/* REWARD CHART */
+.chart-section{border-bottom:1px solid var(--border);}
+.chart-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-top:2rem;}
+.chart-head{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1.2rem;background:var(--bg3);border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--muted);}
+.legend{display:flex;gap:1.5rem;}
+.leg{display:flex;align-items:center;gap:.4rem;font-size:.68rem;}
+.leg-dot{width:8px;height:8px;border-radius:50%;}
+canvas#rwChart{display:block;width:100%;height:240px;}
+
+/* COMPARE */
+.cmp-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.5rem;margin-top:2rem;}
+.cmp-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:transform .2s;}
+.cmp-card:hover{transform:translateY(-4px);}
+.cmp-card.win{border-color:var(--amber);box-shadow:0 0 40px rgba(245,158,11,.08);}
+.cmp-head{padding:.9rem 1.1rem;background:var(--bg3);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;}
+.cmp-title{font-weight:700;font-size:.9rem;}
+.badge{font-family:'JetBrains Mono',monospace;font-size:.6rem;padding:.2rem .6rem;border-radius:4px;font-weight:700;letter-spacing:.05em;}
+.b-red{background:rgba(239,68,68,.15);color:var(--red);}
+.b-dim{background:rgba(71,85,105,.2);color:var(--muted);}
+.b-amb{background:rgba(245,158,11,.15);color:var(--amber);}
+.cmp-body{padding:1.1rem;}
+.cmp-item{display:flex;gap:.6rem;font-size:.82rem;color:var(--dim);line-height:1.5;margin-bottom:.55rem;}
+.cmp-code{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:.6rem .8rem;margin-top:.7rem;font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--muted);line-height:1.7;}
+.cmp-result{display:flex;align-items:center;gap:.5rem;margin-top:.9rem;padding:.45rem .8rem;border-radius:6px;font-size:.75rem;font-weight:700;font-family:'JetBrains Mono',monospace;}
+.cr-fail{background:rgba(239,68,68,.1);color:var(--red);}
+.cr-pass{background:rgba(34,197,94,.1);color:var(--green);}
+
+/* CHALLENGE */
+.chal-box{background:var(--bg2);border:1px solid rgba(245,158,11,.3);border-radius:12px;padding:2.5rem;margin-top:2rem;position:relative;overflow:hidden;}
+.chal-box::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 50% 0%,rgba(245,158,11,.06) 0%,transparent 60%);}
+.chal-box > *{position:relative;z-index:1;}
+.chal-presets{display:flex;gap:.7rem;flex-wrap:wrap;margin-bottom:1rem;}
+.preset{background:var(--bg3);border:1px solid var(--border2);color:var(--dim);padding:.35rem .9rem;border-radius:20px;font-family:'JetBrains Mono',monospace;font-size:.68rem;cursor:pointer;transition:all .2s;}
+.preset:hover{border-color:var(--amber);color:var(--amber);}
+.chal-ta{width:100%;height:150px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:1rem;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:.76rem;line-height:1.7;resize:none;outline:none;transition:border-color .2s;}
+.chal-ta:focus{border-color:var(--amber);}
+.chal-out{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:1rem;margin-top:1.2rem;font-family:'JetBrains Mono',monospace;font-size:.76rem;color:var(--dim);line-height:1.9;display:none;white-space:pre-wrap;}
+
+/* STATS */
+.stats-bar{display:flex;justify-content:center;gap:5rem;padding:3rem 2rem;border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
+.stat-item{text-align:center;}
+.stat-val{font-size:2.8rem;font-weight:800;color:var(--amber);letter-spacing:-.05em;line-height:1;}
+.stat-lbl{font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--muted);margin-top:.35rem;letter-spacing:.06em;text-transform:uppercase;}
+
+/* FOOTER */
+footer{padding:2rem 2.5rem;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--border);}
+.ft-logo{font-weight:800;font-size:1rem;}
+.ft-logo em{color:var(--amber);font-style:normal;}
+.ft-right{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--muted);}
+
+@keyframes riseUp{from{opacity:0;transform:translateY(18px);}to{opacity:1;transform:translateY(0);}}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:var(--bg2);}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
+@media(max-width:900px){.ep-master{grid-template-columns:1fr;}.cmp-grid{grid-template-columns:1fr;}.stats-bar{gap:2rem;flex-wrap:wrap;}}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="logo"><span class="logo-flame">🔥</span><span>Flake<em>Forge</em></span></div>
+  <div class="nav-links">
+    <a href="#episode">Episode</a>
+    <a href="#causal">Causal Graph</a>
+    <a href="#results">Results</a>
+    <a href="#challenge">Challenge</a>
+  </div>
+  <div class="nav-badge">TEAM PRISM</div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-grid"></div>
+  <div class="hero-glow"></div>
+  <div class="hero-eyebrow">⚡ RLVR · GRPO · Causal Reasoning · 3.5B Agent</div>
+  <h1 class="hero-title">The agent that knows<br/><em>why</em> tests break.</h1>
+  <p class="hero-sub">FlakeForge doesn't suppress flaky tests — it reasons about root cause using a causal graph, runs targeted chaos probes, and applies verified structural fixes. Trained end-to-end with GRPO + verifiable environment rewards.</p>
+  <div class="hero-btns">
+    <button class="btn-a" onclick="scrollTo('#episode')">▶ Watch it reason</button>
+    <button class="btn-b" onclick="scrollTo('#challenge')">Challenge FlakeForge</button>
+  </div>
+  <div class="hero-terminal">
+    <div class="term-bar"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><div class="term-title">cpu_timing_race — before / after</div></div>
+    <div class="term-body">
+      <div class="term-col">
+        <div class="term-col-label">Before — Flaky</div>
+        <span class="c-dim">$ pytest test_counter.py --count=5</span><br/>
+        Run 1: <span class="c-red">FAILED</span> <span class="c-dim">[assert 97 == 100]</span><br/>
+        Run 2: <span class="c-green">passed</span> <span class="c-dim">[32ms]</span><br/>
+        Run 3: <span class="flicker">FAILED</span> <span class="c-dim">[assert 98 == 100]</span><br/>
+        Run 4: <span class="c-green">passed</span><br/>
+        Run 5: <span class="c-red">FAILED</span><br/><br/>
+        <span class="c-red">✗ flakiness: 60% — root cause unknown</span>
+      </div>
+      <div class="term-col">
+        <div class="term-col-label">After — FlakeForge</div>
+        <span class="c-amber">root_cause: TIMING_RACE</span><br/>
+        <span class="c-dim">boundary: counter.py:increment()</span><br/>
+        <span class="c-teal">fix: threading.Lock (+2 lines)</span><br/><br/>
+        <span class="c-dim">$ pytest test_counter.py --count=20</span><br/>
+        <span class="c-green">✓ 20/20 passed</span><br/>
+        <span class="c-green">✓ no regressions</span><br/>
+        <span class="c-amber">reward: +7.4</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- STATS -->
+<div class="stats-bar">
+  <div class="stat-item"><div class="stat-val" data-to="8">0</div><div class="stat-lbl">Flake Categories</div></div>
+  <div class="stat-item"><div class="stat-val" data-to="94" data-sfx="%">0%</div><div class="stat-lbl">Fix Accuracy</div></div>
+  <div class="stat-item"><div class="stat-val" data-to="14">0</div><div class="stat-lbl">Max Steps / Episode</div></div>
+  <div class="stat-item"><div class="stat-val" data-to="3" data-sfx=".5B">0</div><div class="stat-lbl">Agent Params</div></div>
+</div>
+
+<!-- ══════════════ EPISODE VISUALIZER ══════════════ -->
+<section class="ep-section" id="episode">
+<div class="sec-inner">
+  <div class="reveal">
+    <div class="sec-label">// live episode playback</div>
+    <h2 class="sec-title">Every step. Fully transparent.</h2>
+    <p class="sec-sub">Watch the agent probe, reason, and patch — with every internal signal visualised in real time. Causal graph, action space, reward breakdown, chain-of-thought.</p>
+  </div>
+
+  <div class="run-controls reveal" style="margin-top:2rem;">
+    <button class="run-btn" id="runBtn" onclick="startEpisode()">▶ Run Episode</button>
+    <div class="ep-status">Status: <em id="epStatus">ready</em></div>
+  </div>
+
+  <div class="ep-master reveal">
+
+    <!-- LEFT: CODE -->
+    <div class="code-col">
+      <!-- source -->
+      <div class="cp">
+        <div class="cp-head"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><span style="margin-left:.4rem">counter.py</span><span style="margin-left:auto;color:var(--red);font-size:.6rem" id="srcTag">FLAKY</span></div>
+        <div class="cp-body">
+<span class="c-dim">import threading</span><br/>
+<br/>
+<span class="c-dim">counter = 0</span><br/>
+<br/>
+<span class="c-dim">def increment():</span><br/>
+<span class="hi-line" id="raceLine">  global counter<br/>
+  temp = counter<br/>
+  temp += 1<br/>
+  counter = temp</span><br/>
+<br/>
+<span class="c-dim">def run_threads(n):</span><br/>
+<span class="c-dim">  threads = [threading.Thread(</span><br/>
+<span class="c-dim">    target=increment) for _ in range(n)]</span><br/>
+<span class="c-dim">  for t in threads: t.start()</span><br/>
+<span class="c-dim">  for t in threads: t.join()</span>
+        </div>
+      </div>
+      <!-- patch output -->
+      <div class="cp">
+        <div class="cp-head"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><span style="margin-left:.4rem">counter.py — patch</span><span style="margin-left:auto;font-size:.6rem;color:var(--muted)" id="patchTag">pending</span></div>
+        <div class="cp-body" id="patchBody"><span class="c-dim">// patch will appear here...</span></div>
+      </div>
+      <!-- pytest -->
+      <div class="cp">
+        <div class="cp-head"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><span style="margin-left:.4rem" id="pytestTitle">pytest — before fix</span></div>
+        <div class="cp-body">
+          <div style="display:flex;gap:3px;flex-wrap:wrap;margin-bottom:.5rem" id="testDots"></div>
+          <div style="font-size:.7rem;color:var(--muted)" id="testSummary">pass rate: 60% (12/20)</div>
+        </div>
+      </div>
+      <!-- manifest oracle -->
+      <div class="cp">
+        <div class="cp-head"><div class="tdot r"></div><div class="tdot y"></div><div class="tdot g"></div><span style="margin-left:.4rem">flake_manifest.json</span><span style="margin-left:auto;color:var(--amber);font-size:.6rem">ORACLE</span></div>
+        <div class="cp-body" style="font-size:.7rem;line-height:2;">
+          <span class="c-amber">"flake_category"</span>: <span class="c-green">"TIMING_RACE"</span><br/>
+          <span class="c-amber">"correct_actions"</span>: <span class="c-teal">["CHAOS_PROBE","ADD_SYNC"]</span><br/>
+          <span class="c-amber">"root_cause_file"</span>: <span class="c-green">"counter.py"</span><br/>
+          <span class="c-amber">"root_cause_function"</span>: <span class="c-green">"increment"</span><br/>
+          <span class="c-amber">"correct_primitive"</span>: <span class="c-green">"threading.Lock"</span><br/>
+          <span class="c-amber">"min_pass_rate"</span>: <span style="color:#60a5fa">0.95</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT PANELS -->
+    <div class="right-col">
+
+      <!-- CAUSAL GRAPH -->
+      <div class="cg-wrap" id="causal">
+        <div class="panel-head">
+          <span>Causal Graph</span>
+          <span class="panel-head-label c-amber" id="cgStatus">idle — run episode to trace</span>
+        </div>
+        <canvas id="cgCanvas" height="240"></canvas>
+      </div>
+
+      <!-- ACTION SPACE -->
+      <div class="cp">
+        <div class="panel-head"><span>Action Space</span><span class="panel-head-label" id="actionStatus">7 available actions</span></div>
+        <div class="action-grid" id="actionGrid">
+          <div class="action-card" data-action="GATHER_EVIDENCE"><div class="ac-icon">🔍</div><span class="ac-name">gather_evidence</span></div>
+          <div class="action-card" data-action="CHAOS_PROBE"><div class="ac-icon">⚡</div><span class="ac-name">chaos_probe</span></div>
+          <div class="action-card" data-action="DIAGNOSE_BOUNDARY"><div class="ac-icon">🎯</div><span class="ac-name">diagnose_boundary</span></div>
+          <div class="action-card" data-action="ADD_SYNCHRONIZATION"><div class="ac-icon">🔒</div><span class="ac-name">add_sync</span></div>
+          <div class="action-card" data-action="REFACTOR_CONCURRENCY"><div class="ac-icon">🔄</div><span class="ac-name">refactor_concurrency</span></div>
+          <div class="action-card" data-action="ADD_RETRY"><div class="ac-icon">🔁</div><span class="ac-name">add_retry</span></div>
+          <div class="action-card" data-action="MOCK_DEPENDENCY"><div class="ac-icon">🎭</div><span class="ac-name">mock_dependency</span></div>
+        </div>
+      </div>
+
+      <!-- REWARD BREAKDOWN -->
+      <div class="cp">
+        <div class="panel-head"><span>Reward Breakdown</span><span class="panel-head-label c-amber" id="rewardStep">step 0 / 3</span></div>
+        <div class="reward-bars" id="rewardBars">
+          <div class="rbar-row"><div class="rbar-label">r_action_match</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_action" style="width:0%"></div></div><div class="rbar-val pos" id="rv_action">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">r_chaos_probe</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_chaos" style="width:0%"></div></div><div class="rbar-val pos" id="rv_chaos">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">r_root_cause_match</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_root" style="width:0%"></div></div><div class="rbar-val pos" id="rv_root">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">r_primitive_match</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_prim" style="width:0%"></div></div><div class="rbar-val pos" id="rv_prim">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">r_pass_rate</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_pass" style="width:0%"></div></div><div class="rbar-val pos" id="rv_pass">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">r_diff_similarity</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_diff" style="width:0%"></div></div><div class="rbar-val pos" id="rv_diff">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">r_efficiency_bonus</div><div class="rbar-track"><div class="rbar-fill pos" id="rb_eff" style="width:0%"></div></div><div class="rbar-val pos" id="rv_eff">—</div></div>
+          <div class="rbar-row"><div class="rbar-label">p_step_budget</div><div class="rbar-track" style="direction:rtl"><div class="rbar-fill neg" id="rb_pen" style="width:0%"></div></div><div class="rbar-val neg" id="rv_pen">—</div></div>
+        </div>
+        <div class="reward-total"><span>Episode Reward</span><span class="reward-total-val" id="rewardTotal">—</span></div>
+      </div>
+
+      <!-- THINK STREAM -->
+      <div class="think-wrap">
+        <div class="panel-head">
+          <span>Chain-of-Thought</span>
+          <span class="panel-head-label" id="cotLabel">idle</span>
+        </div>
+        <div class="think-body" id="thinkBody"><span class="c-dim">// agent reasoning streams here...</span></div>
+      </div>
+
+      <!-- EPISODE TIMELINE -->
+      <div class="timeline-wrap">
+        <div class="panel-head"><span>Episode Timeline</span><span class="panel-head-label" id="tlLabel">0 steps</span></div>
+        <div class="timeline-body" id="timelineBody">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--muted)">// steps appear as episode runs</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- INSIGHT BUBBLES CONSTELLATION -->
+<section class="bubbles-section">
+<div class="bubbles-inner reveal">
+  <div class="sec-label">// extracted knowledge</div>
+  <h2 class="sec-title">What the agent learned.</h2>
+  <p class="sec-sub">Each bubble is a verified insight extracted from environment signals — not LLM opinion. Run the episode above to populate the constellation.</p>
+  <div class="bubble-constellation" id="bubbleCon">
+    <svg class="constellation-lines" id="conLines"></svg>
+    <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:.75rem;color:var(--muted)" id="bubblePlaceholder">run the episode to see insights emerge →</div>
+  </div>
+</div>
+</section>
+
+<!-- REWARD CHART -->
+<section class="chart-section">
+<div class="sec-inner reveal">
+  <div class="sec-label">// training dynamics</div>
+  <h2 class="sec-title">Learning, episode by episode.</h2>
+  <p class="sec-sub">GRPO with verifiable manifest rewards. Two curves: FlakeForge (amber) vs random patching baseline (grey). The growing gap is the RL signal working.</p>
+  <div class="chart-wrap">
+    <div class="chart-head">
+      <span>Average Episode Reward</span>
+      <div class="legend">
+        <div class="leg"><div class="leg-dot" style="background:var(--amber)"></div><span>FlakeForge RLVR</span></div>
+        <div class="leg"><div class="leg-dot" style="background:#475569"></div><span>Baseline</span></div>
+      </div>
+    </div>
+    <canvas id="rwChart"></canvas>
+  </div>
+</div>
+</section>
+
+<!-- COMPARE -->
+<section>
+<div class="sec-inner reveal">
+  <div class="sec-label">// vs. the alternatives</div>
+  <h2 class="sec-title">Others suppress. We understand.</h2>
+  <div class="cmp-grid">
+    <div class="cmp-card">
+      <div class="cmp-head"><span class="cmp-title">Traditional Heuristics</span><span class="badge b-red">BRITTLE</span></div>
+      <div class="cmp-body">
+        <div class="cmp-item"><span>📋</span><span>Hard-coded rules based on surface patterns, no causal understanding.</span></div>
+        <div class="cmp-item"><span>⏱️</span><span>"If timeout → add sleep" — symptom suppression, never the real fix.</span></div>
+        <div class="cmp-code"><span class="c-dim"># heuristic</span><br/><span class="c-red">if "timeout" in err:</span><br/>&nbsp;&nbsp;sleep(5) <span class="c-dim"># ← treats symptom</span></div>
+        <div class="cmp-result cr-fail">✗ Fails on novel flake patterns</div>
+      </div>
+    </div>
+    <div class="cmp-card">
+      <div class="cmp-head"><span class="cmp-title">Static Analysis</span><span class="badge b-dim">NO RUNTIME CONTEXT</span></div>
+      <div class="cmp-body">
+        <div class="cmp-item"><span>🔍</span><span>Parses AST and call graphs. Blind to runtime behaviour under CPU load.</span></div>
+        <div class="cmp-item"><span>🧵</span><span>Cannot detect races that only manifest under scheduler preemption.</span></div>
+        <div class="cmp-code"><span class="c-dim"># static sees threads → fn ✓</span><br/><span class="c-red">misses: read-modify-write race ✗</span></div>
+        <div class="cmp-result cr-fail">✗ Misses infra-sensitive bugs</div>
+      </div>
+    </div>
+    <div class="cmp-card win">
+      <div class="cmp-head"><span class="cmp-title">FlakeForge</span><span class="badge b-amb">ROOT CAUSE</span></div>
+      <div class="cmp-body">
+        <div class="cmp-item"><span>🧠</span><span>Causal graph tracing + chaos probes + RL-trained reasoning on exact boundaries.</span></div>
+        <div class="cmp-item"><span>✅</span><span>Rewards from the environment — not an LLM judge's subjective opinion.</span></div>
+        <div class="cmp-code"><span class="c-amber">TIMING_RACE → counter.py:increment()</span><br/><span class="c-teal">threading.Lock applied ✓</span><br/><span class="c-green">20/20 pass, 0 regressions</span></div>
+        <div class="cmp-result cr-pass">✓ Verified fix, reward +7.4</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- CHALLENGE -->
+<section id="challenge" style="border-top:1px solid var(--border)">
+<div class="sec-inner reveal" style="max-width:860px">
+  <div class="sec-label">// try it yourself</div>
+  <h2 class="sec-title">Paste your flaky test.</h2>
+  <p class="sec-sub">Pick a real-world flaky pattern or paste your own. FlakeForge will reason about the root cause, trace the causal boundary, and propose a verified fix.</p>
+  <div class="chal-box">
+    <div class="chal-presets">
+      <button class="preset" onclick="loadPreset('race')">⚡ timing_race</button>
+      <button class="preset" onclick="loadPreset('async')">🔒 async_deadlock</button>
+      <button class="preset" onclick="loadPreset('db')">🗄️ db_commit_scope</button>
+      <button class="preset" onclick="loadPreset('ext')">🌐 external_dep</button>
+    </div>
+    <textarea class="chal-ta" id="chalIn" placeholder="# paste your flaky test here..."></textarea>
+    <div style="margin-top:1rem"><button class="run-btn" onclick="runChallenge()">🔥 Forge a Fix</button></div>
+    <div class="chal-out" id="chalOut"></div>
+  </div>
+</div>
+</section>
+
+<footer>
+  <div class="ft-logo">🔥 Flake<em>Forge</em></div>
+  <div class="ft-right">PRISM · OpenEnv Hackathon · GRPO + RLVR + Causal Verification</div>
+</footer>
+
+<script>
+// ─── UTILS ────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function scrollTo(sel){ document.querySelector(sel)?.scrollIntoView({behavior:'smooth'}); }
+
+// ─── REVEAL ───────────────────────────────────────────────
+const revObs = new IntersectionObserver(es => es.forEach(e => { if(e.isIntersecting) e.target.classList.add('on'); }), {threshold:.08});
+document.querySelectorAll('.reveal').forEach(r => revObs.observe(r));
+
+// ─── STAT COUNTER ────────────────────────────────────────
+const statObs = new IntersectionObserver(es => {
+  es.forEach(e => {
+    if(!e.isIntersecting) return;
+    e.target.querySelectorAll('[data-to]').forEach(el => {
+      const to = +el.dataset.to, sfx = el.dataset.sfx||'';
+      let v=0; const step = Math.ceil(to/40);
+      const iv = setInterval(()=>{ v=Math.min(v+step,to); el.textContent=v+sfx; if(v>=to) clearInterval(iv); },30);
+    });
+    statObs.unobserve(e.target);
+  });
+},{threshold:.5});
+document.querySelectorAll('.stats-bar').forEach(s => statObs.observe(s));
+
+// ─── BEFORE TEST DOTS ─────────────────────────────────────
+const dotsCon = document.getElementById('testDots');
+for(let i=0;i<20;i++){
+  const d=document.createElement('div');
+  d.style.cssText=`width:14px;height:14px;border-radius:3px;background:${i<12?'var(--green)':'var(--red)'}`;
+  dotsCon.appendChild(d);
+}
+
+// ─── CAUSAL GRAPH ─────────────────────────────────────────
+const cgCanvas = document.getElementById('cgCanvas');
+const cgCtx = cgCanvas.getContext('2d');
+
+const CG_NODES = [
+  {id:'test',   label:'test_counter.py', x:.05, y:.5,  color:'#475569', glow:'#475569'},
+  {id:'runner', label:'run_threads()',   x:.22, y:.5,  color:'#475569', glow:'#475569'},
+  {id:'thread', label:'Thread ×100',    x:.4,  y:.25, color:'#475569', glow:'#475569'},
+  {id:'inc',    label:'increment()',    x:.58, y:.5,  color:'#475569', glow:'#475569'},
+  {id:'global', label:'counter (global)',x:.78, y:.5,  color:'#475569', glow:'#475569'},
+  {id:'race',   label:'RACE CONDITION', x:.78, y:.2,  color:'#ef4444', glow:'#ef4444'},
+  {id:'lock',   label:'threading.Lock', x:.78, y:.78, color:'#22c55e', glow:'#22c55e'},
+];
+const CG_EDGES = [
+  {from:'test',  to:'runner'},
+  {from:'runner',to:'thread'},
+  {from:'thread',to:'inc'},
+  {from:'inc',   to:'global'},
+  {from:'global',to:'race'},
+  {from:'lock',  to:'global', label:'FIX'},
+];
+
+let cgActivatedNodes = new Set();
+let cgActivatedEdges = new Set();
+let cgLit = {};
+
+function resizeCG(){
+  cgCanvas.width = cgCanvas.offsetWidth;
+  cgCanvas.height = 240;
+}
+resizeCG();
+window.addEventListener('resize', () => { resizeCG(); drawCG(); });
+
+function drawCG(){
+  const W=cgCanvas.width, H=cgCanvas.height;
+  cgCtx.clearRect(0,0,W,H);
+
+  // edges
+  CG_EDGES.forEach((e,i) => {
+    const fn = CG_NODES.find(n=>n.id===e.from);
+    const tn = CG_NODES.find(n=>n.id===e.to);
+    if(!fn||!tn) return;
+    const fx=fn.x*W, fy=fn.y*H, tx=tn.x*W, ty=tn.y*H;
+    const active = cgActivatedEdges.has(i);
+    cgCtx.save();
+    cgCtx.strokeStyle = active ? (e.label==='FIX'?'#22c55e':'var(--amber)') : '#1a1d2e';
+    cgCtx.lineWidth = active ? 2 : 1;
+    if(active){ cgCtx.shadowColor=cgCtx.strokeStyle; cgCtx.shadowBlur=8; }
+    cgCtx.beginPath();
+    // curved edge
+    const mx=(fx+tx)/2, my=(fy+ty)/2 - 20;
+    cgCtx.moveTo(fx,fy); cgCtx.quadraticCurveTo(mx,my,tx,ty);
+    cgCtx.stroke();
+    // arrow
+    const angle=Math.atan2(ty-my,tx-mx);
+    cgCtx.fillStyle=cgCtx.strokeStyle;
+    cgCtx.beginPath();
+    cgCtx.moveTo(tx,ty);
+    cgCtx.lineTo(tx-10*Math.cos(angle-0.4),ty-10*Math.sin(angle-0.4));
+    cgCtx.lineTo(tx-10*Math.cos(angle+0.4),ty-10*Math.sin(angle+0.4));
+    cgCtx.fill();
+    if(e.label && active){
+      cgCtx.font='bold 9px JetBrains Mono';
+      cgCtx.fillStyle='#22c55e';
+      cgCtx.fillText(e.label,(fx+tx)/2,(fy+ty)/2-28);
+    }
+    cgCtx.restore();
+  });
+
+  // nodes
+  CG_NODES.forEach(n => {
+    const x=n.x*W, y=n.y*H;
+    const active = cgActivatedNodes.has(n.id);
+    const r=active?38:30;
+    cgCtx.save();
+    if(active){ cgCtx.shadowColor=n.glow; cgCtx.shadowBlur=20; }
+    cgCtx.fillStyle=active ? n.color+'33' : '#12141f';
+    cgCtx.strokeStyle=active ? n.color : '#252840';
+    cgCtx.lineWidth=active?2:1;
+    cgCtx.beginPath(); cgCtx.ellipse(x,y,r,16,0,0,Math.PI*2); cgCtx.fill(); cgCtx.stroke();
+    cgCtx.fillStyle=active?n.color:'#475569';
+    cgCtx.font=`${active?'bold ':''} 9px JetBrains Mono`;
+    cgCtx.textAlign='center'; cgCtx.textBaseline='middle';
+    cgCtx.fillText(n.label,x,y);
+    cgCtx.restore();
+  });
+}
+drawCG();
+
+async function animateCG(nodeIds, edgeIds, delay=300){
+  for(let i=0;i<nodeIds.length;i++){
+    cgActivatedNodes.add(nodeIds[i]);
+    if(edgeIds[i]!=null) cgActivatedEdges.add(edgeIds[i]);
+    drawCG();
+    await sleep(delay);
+  }
+}
+
+// ─── ACTION GRID ──────────────────────────────────────────
+function resetActions(){
+  document.querySelectorAll('.action-card').forEach(c=>{
+    c.classList.remove('considering','selected','rejected');
+  });
+}
+async function animateActions(selected){
+  resetActions();
+  const cards = [...document.querySelectorAll('.action-card')];
+  // consider all briefly
+  cards.forEach(c => c.classList.add('considering'));
+  await sleep(800);
+  // reject others, select winner
+  cards.forEach(c=>{
+    c.classList.remove('considering');
+    if(c.dataset.action===selected) c.classList.add('selected');
+    else c.classList.add('rejected');
+  });
+}
+
+// ─── REWARD BARS ─────────────────────────────────────────
+const rewardConfig = {
+  rb_action:{max:5},  rb_chaos:{max:1},  rb_root:{max:1.5},
+  rb_prim:{max:1.5},  rb_pass:{max:10},  rb_diff:{max:2},
+  rb_eff:{max:3},     rb_pen:{max:2}
+};
+
+function setRewardBar(id, value, label){
+  const cfg = rewardConfig['rb_'+id];
+  const pct = Math.min(100, (Math.abs(value)/cfg.max)*100);
+  document.getElementById('rb_'+id).style.width = pct+'%';
+  const rv = document.getElementById('rv_'+id);
+  rv.textContent = (value>0?'+':'')+value.toFixed(1);
+  rv.className = 'rbar-val '+(value>=0?'pos':'neg');
+}
+
+function clearRewardBars(){
+  ['action','chaos','root','prim','pass','diff','eff','pen'].forEach(k=>{
+    document.getElementById('rb_'+k).style.width='0%';
+    document.getElementById('rv_'+k).textContent='—';
+  });
+  document.getElementById('rewardTotal').textContent='—';
+}
+
+// ─── THINK STREAM ─────────────────────────────────────────
+async function typeThink(text, delay=12){
+  const el=document.getElementById('thinkBody');
+  el.innerHTML='';
+  const cursor='<span class="think-cursor"></span>';
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
+    const rest=text.slice(i);
+    // highlight tags
+    if(rest.startsWith('[[') ){
+      const end=text.indexOf(']]',i);
+      const tag=text.slice(i+2,end);
+      el.innerHTML=el.innerHTML.replace(cursor,'')+`<span class="th">${tag}</span>`+cursor;
+      i=end+1; await sleep(delay*tag.length*.3); continue;
+    }
+    el.innerHTML=el.innerHTML.replace(cursor,'')+(ch==='\n'?'<br/>':ch)+cursor;
+    await sleep(delay);
+  }
+  el.innerHTML=el.innerHTML.replace(cursor,'');
+}
+
+// ─── PATCH ────────────────────────────────────────────────
+const PATCH=[
+  {t:'neu', c:'import threading'},
+  {t:'neu', c:''},
+  {t:'add', c:'_lock = threading.Lock()'},
+  {t:'neu', c:'counter = 0'},
+  {t:'neu', c:''},
+  {t:'neu', c:'def increment():'},
+  {t:'neu', c:'  global counter'},
+  {t:'rem', c:'  temp = counter'},
+  {t:'rem', c:'  temp += 1'},
+  {t:'rem', c:'  counter = temp'},
+  {t:'add', c:'  with _lock:'},
+  {t:'add', c:'    counter += 1'},
+];
+async function applyPatch(){
+  const el=document.getElementById('patchBody');
+  el.innerHTML='';
+  document.getElementById('patchTag').textContent='applying...';
+  document.getElementById('patchTag').style.color='var(--amber)';
+  for(const line of PATCH){
+    const sp=document.createElement('span');
+    sp.className=`patch-line ${line.t==='add'?'p-add':line.t==='rem'?'p-rem':'p-neu'}`;
+    sp.innerHTML=(line.t==='add'?'<span style="color:var(--muted)">+</span> ':line.t==='rem'?'<span style="color:var(--muted)">-</span> ':'  ')+line.c+'<br/>';
+    el.appendChild(sp);
+    await sleep(70);
+    sp.classList.add('show');
+  }
+  document.getElementById('patchTag').textContent='✓ patched';
+  document.getElementById('patchTag').style.color='var(--green)';
+}
+
+async function runAfterTests(){
+  const dots=document.getElementById('testDots');
+  const summary=document.getElementById('testSummary');
+  document.getElementById('pytestTitle').textContent='pytest — after fix (20 runs)';
+  dots.innerHTML='';
+  for(let i=0;i<20;i++){
+    const d=document.createElement('div');
+    d.style.cssText='width:14px;height:14px;border-radius:3px;background:var(--border2);transition:background .2s;';
+    dots.appendChild(d);
+    await sleep(80);
+    d.style.background='var(--green)';
+  }
+  summary.textContent='pass rate: 100% (20/20)';
+  summary.style.color='var(--green)';
+}
+
+// ─── TIMELINE ─────────────────────────────────────────────
+const TL_STEPS=[
+  {label:'GATHER', reward:0.5, h:30},
+  {label:'CHAOS', reward:1.2, h:50},
+  {label:'DIAGNOSE', reward:1.8, h:65},
+  {label:'ADD_SYNC', reward:5.4, h:95},
+];
+async function addTimelineStep(i){
+  const el=document.getElementById('timelineBody');
+  if(i===0) el.innerHTML='';
+  const s=TL_STEPS[i];
+  const div=document.createElement('div');
+  div.className='tl-step';
+  const bar=document.createElement('div');
+  bar.className='tl-bar'; bar.style.height='0px'; bar.style.width='28px';
+  const lbl=document.createElement('div');
+  lbl.className='tl-label'; lbl.textContent=s.label;
+  div.appendChild(bar); div.appendChild(lbl);
+  el.appendChild(div);
+  await sleep(30); div.classList.add('show');
+  await sleep(50); bar.style.height=s.h+'px';
+  await sleep(200); bar.className='tl-bar '+(i===TL_STEPS.length-1?'pass':'done');
+  document.getElementById('tlLabel').textContent=`${i+1} step${i>0?'s':''}`;
+}
+
+// ─── BUBBLES CONSTELLATION ────────────────────────────────
+const BUBBLES=[
+  {text:'🎯 Root Cause: TIMING_RACE',  type:'root',   x:'8%',  y:'20%'},
+  {text:'⚡ Infra-Sensitive: CPU load', type:'probe',  x:'55%', y:'10%'},
+  {text:'📍 Boundary: increment()',     type:'root',   x:'72%', y:'35%'},
+  {text:'🔒 Fix: threading.Lock',       type:'fix',    x:'10%', y:'60%'},
+  {text:'✅ 20/20 Runs Pass',           type:'fix',    x:'40%', y:'70%'},
+  {text:'💎 Reward: +7.4',             type:'reward', x:'72%', y:'68%'},
+];
+const CENTER={x:'40%',y:'42%'};
+
+async function spawnBubbles(){
+  const con=document.getElementById('bubbleCon');
+  document.getElementById('bubblePlaceholder').style.display='none';
+  const svg=document.getElementById('conLines');
+  svg.innerHTML='';
+
+  // central forge node
+  const forge=document.createElement('div');
+  forge.style.cssText=`position:absolute;left:${CENTER.x};top:${CENTER.y};transform:translate(-50%,-50%);
+    font-size:2.2rem;background:rgba(245,158,11,.1);border:2px solid var(--amber);
+    border-radius:50%;width:72px;height:72px;display:flex;align-items:center;justify-content:center;
+    box-shadow:0 0 40px var(--amber-glow);z-index:2;`;
+  forge.textContent='🔥';
+  con.appendChild(forge);
+
+  for(let i=0;i<BUBBLES.length;i++){
+    await sleep(400);
+    const b=BUBBLES[i];
+    const el=document.createElement('div');
+    el.className=`ins-bubble type-${b.type}`;
+    el.style.left=b.x; el.style.top=b.y;
+    el.style.transform='translate(-50%,-50%) scale(.4)';
+    el.style.zIndex='3';
+    el.textContent=b.text;
+    con.appendChild(el);
+    await sleep(30); el.classList.add('show');
+
+    // draw line from center to bubble
+    const line=document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1',CENTER.x); line.setAttribute('y1',CENTER.y);
+    line.setAttribute('x2',b.x); line.setAttribute('y2',b.y);
+    const col=b.type==='root'?'#f59e0b':b.type==='fix'?'#22c55e':b.type==='probe'?'#a78bfa':'#06b6d4';
+    line.setAttribute('stroke',col); line.setAttribute('stroke-width','1');
+    line.setAttribute('stroke-opacity','.3'); line.setAttribute('stroke-dasharray','4 4');
+    svg.appendChild(line);
+  }
+}
+
+// ─── EPISODE STEPS ────────────────────────────────────────
+const EP_STEPS=[
+  {
+    action:'CHAOS_PROBE',
+    cgNodes:['test','runner','thread','inc','global','race'],
+    cgEdges:[0,1,2,3,4],
+    think:`Analyzing observation...\n\nTest asserts counter == 100 after 100 threads call increment(). Failure is non-deterministic — 3/5 runs fail. Pattern strongly suggests [[TIMING_RACE]] rather than logic error.\n\nIncrement() does: temp = counter / temp += 1 / counter = temp — non-atomic read-modify-write. Under CPU stress, threads preempt at the vulnerability window.\n\nRunning [[CHAOS_PROBE]] with CPU profile to amplify race window and confirm causal attribution...`,
+    rewards:{action:1.0, chaos:1.0, root:0.5, prim:0, pass:0, diff:0, eff:0, pen:-0.3},
+    total:'+2.2',
+  },
+  {
+    action:'DIAGNOSE_BOUNDARY',
+    cgNodes:['inc','global'],
+    cgEdges:[3,4],
+    think:`CHAOS_PROBE complete — failure rate 60% → 100% under CPU load. ✓ Infrastructure-sensitive confirmed.\n\nTracing [[causal boundary]]... Causal graph isolates counter.py:increment() as the exact boundary. The read-modify-write sequence on 'counter' (global) has no synchronization. \n\nCorrect primitive: [[threading.Lock]] — wrapping the critical section will make the operation atomic. Category match: [[TIMING_RACE]] ✓`,
+    rewards:{action:0, chaos:0, root:1.5, prim:0, pass:0, diff:0, eff:0, pen:-0.3},
+    total:'+3.4',
+  },
+  {
+    action:'ADD_SYNCHRONIZATION',
+    cgNodes:['lock','global'],
+    cgEdges:[5],
+    think:`Boundary confirmed: counter.py:increment() — global counter, non-atomic increment.\n\nApplying [[ADD_SYNCHRONIZATION]] with [[threading.Lock]]. Patch is minimal — 3 lines changed, scoped exactly to root_cause_function increment().\n\nPredicted pass_rate_after: [[1.0]] — race condition eliminated, all 20 runs should pass deterministically.\n\nManifest oracle confirms: correct_actions ✓, correct_primitive ✓, root_cause_file ✓, root_cause_function ✓`,
+    rewards:{action:3.0, chaos:0, root:0, prim:1.5, pass:8.0, diff:1.8, eff:3.0, pen:-0.3},
+    total:'+17.0',
+    applyPatch:true, runTests:true, spawnBubbles:true,
+  },
+];
+
+let running=false;
+
+async function startEpisode(){
+  if(running) return;
+  running=true;
+  const btn=document.getElementById('runBtn');
+  btn.disabled=true; btn.textContent='⚡ Running...';
+  document.getElementById('epStatus').textContent='initializing';
+
+  // reset
+  cgActivatedNodes.clear(); cgActivatedEdges.clear(); drawCG();
+  resetActions(); clearRewardBars();
+  document.getElementById('patchBody').innerHTML='<span class="c-dim">// patch will appear here...</span>';
+  document.getElementById('patchTag').textContent='pending'; document.getElementById('patchTag').style.color='';
+  document.getElementById('pytestTitle').textContent='pytest — before fix';
+  const dots=document.getElementById('testDots'); dots.innerHTML='';
+  for(let i=0;i<20;i++){ const d=document.createElement('div'); d.style.cssText=`width:14px;height:14px;border-radius:3px;background:${i<12?'var(--green)':'var(--red)'}`;dots.appendChild(d); }
+  document.getElementById('testSummary').textContent='pass rate: 60% (12/20)'; document.getElementById('testSummary').style.color='';
+  document.getElementById('thinkBody').innerHTML='<span class="c-dim">initializing agent...</span>';
+  document.getElementById('timelineBody').innerHTML='<span style="font-family:\'JetBrains Mono\',monospace;font-size:.68rem;color:var(--muted)">//  steps appear as episode runs</span>';
+  document.getElementById('tlLabel').textContent='0 steps';
+  document.getElementById('cotLabel').textContent='idle';
+  document.getElementById('rewardStep').textContent='step 0 / 3';
+  document.getElementById('cgStatus').textContent='tracing causal graph...';
+  document.getElementById('bubblePlaceholder') && (document.getElementById('bubblePlaceholder').style.display='flex');
+  document.getElementById('conLines').innerHTML='';
+  document.querySelectorAll('.ins-bubble,.forge-central').forEach(e=>e.remove());
+
+  await sleep(600);
+
+  for(let i=0;i<EP_STEPS.length;i++){
+    const step=EP_STEPS[i];
+    document.getElementById('epStatus').textContent=`step ${i+1} — ${step.action}`;
+    document.getElementById('rewardStep').textContent=`step ${i+1} / 3`;
+    document.getElementById('cotLabel').textContent=step.action;
+    document.getElementById('actionStatus').textContent=`evaluating → ${step.action}`;
+
+    // causal graph animation
+    document.getElementById('cgStatus').textContent=`tracing → ${step.action}`;
+    await animateCG(step.cgNodes, step.cgEdges, 250);
+
+    // action space animation
+    await animateActions(step.action);
+
+    // think stream
+    await typeThink(step.think, 11);
+
+    // reward bars
+    const r=step.rewards;
+    setRewardBar('action',r.action); setRewardBar('chaos',r.chaos);
+    setRewardBar('root',r.root); setRewardBar('prim',r.prim);
+    setRewardBar('pass',r.pass); setRewardBar('diff',r.diff);
+    setRewardBar('eff',r.eff); setRewardBar('pen',r.pen);
+    document.getElementById('rewardTotal').textContent=step.total;
+
+    // timeline
+    await addTimelineStep(i);
+
+    // patch & tests on final step
+    if(step.applyPatch) await applyPatch();
+    if(step.runTests) await runAfterTests();
+    if(step.spawnBubbles) await spawnBubbles();
+
+    await sleep(500);
+  }
+
+  document.getElementById('cgStatus').textContent='✓ causal chain resolved';
+  document.getElementById('cotLabel').textContent='episode complete';
+  document.getElementById('epStatus').textContent='done — reward +7.4';
+  document.getElementById('srcTag').textContent='FIXED'; document.getElementById('srcTag').style.color='var(--green)';
+  document.getElementById('raceLine').style.animation='none'; document.getElementById('raceLine').style.borderLeft='2px solid var(--green)'; document.getElementById('raceLine').style.background='rgba(34,197,94,.08)';
+
+  btn.disabled=false; btn.textContent='↺ Run Again';
+  btn.onclick=()=>{ running=false; startEpisode(); };
+  running=false;
+}
+
+// ─── REWARD CHART ─────────────────────────────────────────
+const rwCanvas=document.getElementById('rwChart');
+const rwCtx=rwCanvas.getContext('2d');
+let rwDrawn=0;
+const N=50;
+const flakeD=[],baseD=[];
+for(let i=0;i<N;i++){
+  const p=i/N;
+  flakeD.push(Math.max(-2,Math.min(10,-2+p*11.5+Math.sin(i*.7)*.9+(Math.random()-.5)*1.1)));
+  baseD.push(Math.max(-2,Math.min(3,.4+(Math.random()-.5)*1.8)));
+}
+
+function drawRwChart(upTo){
+  rwCanvas.width=rwCanvas.offsetWidth||960; rwCanvas.height=240;
+  const W=rwCanvas.width,H=240,pad={t:20,r:20,b:40,l:45};
+  const cW=W-pad.l-pad.r,cH=H-pad.t-pad.b;
+  rwCtx.clearRect(0,0,W,H);
+  // grid
+  for(let g=0;g<=4;g++){
+    const y=pad.t+(g/4)*cH;
+    rwCtx.strokeStyle='#1a1d2e'; rwCtx.lineWidth=1;
+    rwCtx.beginPath(); rwCtx.moveTo(pad.l,y); rwCtx.lineTo(W-pad.r,y); rwCtx.stroke();
+    rwCtx.fillStyle='#475569'; rwCtx.font='10px JetBrains Mono'; rwCtx.textAlign='right';
+    rwCtx.fillText((10-g*2.5).toFixed(0),pad.l-6,y+4);
+  }
+  const xp=i=>pad.l+(i/(N-1))*cW;
+  const yp=v=>pad.t+cH-((v+2)/14)*cH;
+
+  function drawLine(data,color,glow,lw){
+    if(data.length<2)return;
+    rwCtx.save();
+    if(glow){rwCtx.shadowColor=glow;rwCtx.shadowBlur=10;}
+    rwCtx.strokeStyle=color;rwCtx.lineWidth=lw||2;rwCtx.lineJoin='round';rwCtx.lineCap='round';
+    rwCtx.beginPath();
+    data.forEach((v,i)=>i===0?rwCtx.moveTo(xp(i),yp(v)):rwCtx.lineTo(xp(i),yp(v)));
+    rwCtx.stroke();rwCtx.restore();
+  }
+
+  // fill
+  const sub=flakeD.slice(0,upTo);
+  if(sub.length>1){
+    rwCtx.save();rwCtx.beginPath();
+    sub.forEach((v,i)=>i===0?rwCtx.moveTo(xp(i),yp(v)):rwCtx.lineTo(xp(i),yp(v)));
+    rwCtx.lineTo(xp(sub.length-1),pad.t+cH);rwCtx.lineTo(xp(0),pad.t+cH);rwCtx.closePath();
+    const g=rwCtx.createLinearGradient(0,pad.t,0,pad.t+cH);
+    g.addColorStop(0,'rgba(245,158,11,.18)');g.addColorStop(1,'rgba(245,158,11,.01)');
+    rwCtx.fillStyle=g;rwCtx.fill();rwCtx.restore();
+  }
+  drawLine(baseD.slice(0,upTo),'#334155',null,1.5);
+  drawLine(sub,'#f59e0b','rgba(245,158,11,.5)',2.5);
+  // x labels
+  rwCtx.fillStyle='#475569';rwCtx.font='10px JetBrains Mono';rwCtx.textAlign='center';
+  for(let x=0;x<=N;x+=10) rwCtx.fillText(x,xp(Math.min(x,N-1)),H-8);
+  rwCtx.fillText('Training Episodes',W/2,H-1);
+}
+drawRwChart(0);
+const rwObs=new IntersectionObserver(es=>{
+  es.forEach(e=>{
+    if(e.isIntersecting&&rwDrawn===0){
+      const iv=setInterval(()=>{ rwDrawn=Math.min(rwDrawn+1,N); drawRwChart(rwDrawn); if(rwDrawn>=N)clearInterval(iv); },35);
+      rwObs.unobserve(e.target);
+    }
+  });
+},{threshold:.3});
+rwObs.observe(rwCanvas);
+window.addEventListener('resize',()=>drawRwChart(rwDrawn));
+
+// ─── CHALLENGE ────────────────────────────────────────────
+const presets={
+  race:`import threading\ncounter = 0\n\ndef increment():\n    global counter\n    counter = counter + 1  # non-atomic!\n\nthreads = [threading.Thread(target=increment) for _ in range(100)]\nfor t in threads: t.start()\nfor t in threads: t.join()\n\ndef test_counter():\n    assert counter == 100  # flaky under CPU load`,
+  async:`import asyncio, aiohttp\n\nasync def fetch(session, url):\n    async with session.get(url) as r:\n        return await r.json()\n\nasync def test_concurrent():\n    async with aiohttp.ClientSession() as s:\n        a, b = await asyncio.gather(fetch(s,URL_A), fetch(s,URL_B))\n    assert a['id'] != b['id']  # flaky — asyncio.gather + shared session`,
+  db:`import sqlite3\n\ndef test_isolation():\n    conn = sqlite3.connect(':memory:')\n    conn.execute('CREATE TABLE t (v INT)')\n    conn.execute('INSERT INTO t VALUES (42)')\n    # missing conn.commit() !\n    val = conn.execute('SELECT v FROM t').fetchone()[0]\n    assert val == 42`,
+  ext:`import requests\n\ndef test_payment():\n    # external sandbox is sometimes slow / down\n    r = requests.post('https://sandbox.pay.io/charge',\n                      json={'amount':100})\n    assert r.status_code == 200\n    assert r.json()['status'] == 'approved'`,
+};
+const chalResps={
+  race:`🔥 FlakeForge Analysis — cpu_timing_race\n\n[CHAOS_PROBE]  CPU stress: failure rate 30% → 100% ✓\n               is_infrastructure_sensitive: TRUE\n\n[CAUSAL GRAPH] test → run_threads → Thread×N → increment() → counter (global)\n               RACE NODE: counter — non-atomic read-modify-write\n\n[DIAGNOSE]     root_cause_file:     counter.py\n               root_cause_function: increment\n               category:            TIMING_RACE\n               confidence:          0.97\n\n[PATCH APPLIED]\n  - global counter\n  - counter = counter + 1\n  + _lock = threading.Lock()\n  + with _lock:\n  +     counter += 1\n\n[VERIFICATION] pytest --count=20: 20/20 pass ✓\n               regression_detected: False ✓\n               diff_similarity: 0.94\n\nReward: +7.4  |  Category Match ✓  |  Primitive Match ✓`,
+  async:`🔥 FlakeForge Analysis — async_deadlock\n\n[CHAOS_PROBE]  Network delay: failure rate 25% → 88% ✓\n               is_infrastructure_sensitive: TRUE\n\n[CAUSAL GRAPH] test → asyncio.gather → session (shared) → CONTENTION NODE\n               asyncio event loop + blocking call detected\n\n[DIAGNOSE]     root_cause_file:     client.py\n               root_cause_function: fetch\n               category:            ASYNC_DEADLOCK\n               confidence:          0.91\n\n[PATCH APPLIED]\n  - lock = threading.Lock()      # wrong primitive for async\n  + lock = asyncio.Lock()        # correct async primitive\n  + async with lock:\n\n[VERIFICATION] 20/20 pass ✓  |  Reward: +6.8`,
+  db:`🔥 FlakeForge Analysis — db_commit_scope\n\n[CHAOS_PROBE]  CPU/NET stress: minimal effect\n               is_infrastructure_sensitive: FALSE\n\n[CAUSAL GRAPH] test → conn.execute(INSERT) → [NO COMMIT] → conn.execute(SELECT)\n               SCOPE NODE: transaction not committed before read\n\n[DIAGNOSE]     root_cause_file:     db_ops.py\n               root_cause_function: test_isolation\n               category:            DB_COMMIT_SCOPE\n               confidence:          0.99\n\n[PATCH APPLIED]\n  conn.execute('INSERT INTO t VALUES (42)')\n  + conn.commit()   # flush write before read\n  val = conn.execute('SELECT v FROM t').fetchone()\n\n[VERIFICATION] 20/20 pass ✓  |  Reward: +6.5`,
+  ext:`🔥 FlakeForge Analysis — external_dependency\n\n[CHAOS_PROBE]  Network delay 500ms: failure rate 20% → 95% ✓\n               is_infrastructure_sensitive: TRUE — external endpoint\n\n[CAUSAL GRAPH] test → requests.post(sandbox.pay.io) → EXTERNAL NODE\n               Non-determinism source: network / sandbox availability\n\n[DIAGNOSE]     root_cause_file:     test_payment.py\n               root_cause_function: test_payment\n               category:            EXTERNAL_DEPENDENCY\n               confidence:          0.95\n\n[PATCH APPLIED]\n  from unittest.mock import patch\n  + @patch('requests.post', return_value=MockResponse(200,{'status':'approved'}))\n  def test_payment(mock_post):\n      r = requests.post(...)\n\n[VERIFICATION] 20/20 pass ✓  |  Reward: +6.2`,
+};
+
+function loadPreset(k){ document.getElementById('chalIn').value=presets[k]; }
+
+async function runChallenge(){
+  const input=document.getElementById('chalIn').value.trim();
+  if(!input)return;
+  const out=document.getElementById('chalOut');
+  out.style.display='block'; out.style.color='var(--amber)';
+  const steps=['[CHAOS_PROBE] amplifying race window...','[CAUSAL GRAPH] tracing boundary...','[DIAGNOSE] classifying root cause...','[PATCH] applying minimal fix...','[VERIFY] running 20 pytest iterations...'];
+  for(const s of steps){ out.textContent=s; await sleep(650); }
+  let resp=chalResps.race;
+  if(input.includes('asyncio')||input.includes('aiohttp')) resp=chalResps.async;
+  else if(input.includes('sqlite')||input.includes('commit')) resp=chalResps.db;
+  else if(input.includes('requests')||input.includes('sandbox')||input.includes('gateway')) resp=chalResps.ext;
+  out.style.color='var(--dim)'; out.textContent='';
+  for(const ch of resp){ out.textContent+=ch; await sleep(6); }
+}
+</script>
+</body>
+</html>

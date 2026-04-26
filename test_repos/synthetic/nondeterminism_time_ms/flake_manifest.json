@@ -1,0 +1,9 @@
+{
+  "repo_name": "nondeterminism_time_ms",
+  "flaky_test_path": "tests/test_flaky.py::test_pair_unique",
+  "flake_category": "nondeterminism",
+  "difficulty": "medium",
+  "root_cause_file": "source.py",
+  "root_cause_function": "generate_pair",
+  "description": "generate_pair calls generate_id twice in quick succession; both may resolve to the same millisecond timestamp."
+}

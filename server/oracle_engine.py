@@ -21,6 +21,8 @@ except ImportError:
     meta = None  # type: ignore[assignment]
     _LIBCST_AVAILABLE = False
 
+_CST_VISITOR_BASE = cst.CSTVisitor if cst is not None else object
+
 try:
     from models import PatchHunk, StructuredThink, ThinkClaim
 except ImportError:
@@ -243,7 +245,7 @@ def _verify_patch_addresses_claim(
     return True, "patch structurally addresses claim"
 
 
-class _FunctionAccessCollector(cst.CSTVisitor):
+class _FunctionAccessCollector(_CST_VISITOR_BASE):
     METADATA_DEPENDENCIES = (meta.ParentNodeProvider, meta.QualifiedNameProvider) if meta else ()
 
     def __init__(self, entity: str, class_name: str, func_name: str) -> None:
@@ -562,7 +564,7 @@ class MockLeakOracle(OraclePlugin):
         return not ("with mock.patch" in source or "with patch" in source or ".stop()" in source or "addCleanup" in source)
 
 
-class _MutationFinder(cst.CSTVisitor):
+class _MutationFinder(_CST_VISITOR_BASE):
     def __init__(self, entity: str) -> None:
         self.entity = entity
         self.mutations: List[cst.CSTNode] = []

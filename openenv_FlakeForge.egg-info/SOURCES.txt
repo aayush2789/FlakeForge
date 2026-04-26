@@ -1,12 +1,12 @@
-QUICKSTART.py
 README.md
 __init__.py
+build_idoft_dataset.py
 client.py
 inference.py
 models.py
 pyproject.toml
-./QUICKSTART.py
 ./__init__.py
+./build_idoft_dataset.py
 ./client.py
 ./inference.py
 ./models.py
@@ -23,8 +23,6 @@ server/causal_graph.py
 server/chaos_runner.py
 server/deep_flakiness.py
 server/docker_runner.py
-server/hypothesis_engine.py
-server/logger.py
 server/oracle_engine.py
 server/patch_applier.py
 server/patch_validator.py

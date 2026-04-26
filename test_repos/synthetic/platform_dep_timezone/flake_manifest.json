@@ -1,0 +1,9 @@
+{
+  "repo_name": "platform_dep_timezone",
+  "flaky_test_path": "tests/test_flaky.py::test_today_matches_utc",
+  "flake_category": "platform_dependency",
+  "difficulty": "medium",
+  "root_cause_file": "source.py",
+  "root_cause_function": "today_label",
+  "description": "today_label uses datetime.now() (local time) while utc_label uses UTC; they differ near midnight in non-UTC timezones."
+}

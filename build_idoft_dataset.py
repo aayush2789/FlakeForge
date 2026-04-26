@@ -26,7 +26,6 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from tqdm import tqdm
 
 @dataclass
 class RepoSpec:
@@ -646,23 +645,20 @@ def _fetch_diff(pr_url: Optional[str], dest: Path) -> bool:
 
 def _write_manifest(spec: RepoSpec, dest: Path) -> None:
     manifest = {
-        "repo_name":              dest.name,
-        "source_repo_url":        spec.repo_url,
-        "source_sha":             spec.sha,
-        "flake_category":         spec.flake_category,
-        "idoft_category":         spec.idoft_category,
-        "root_cause_file":        spec.root_cause_file,
-        "root_cause_function":    spec.root_cause_function,
-        "flaky_test_path":        spec.test_path,
-        "correct_actions":        DIFF_GUIDANCE.get(spec.flake_category, ["GATHER_EVIDENCE"]),
-        "expected_pass_rate_before_fix": 0.5,
-        "expected_pass_rate_after_fix":  1.0,
-        "solution_diff":          "solution/fix.diff" if spec.pr_url else None,
-        "difficulty":             spec.difficulty,
+        "repo_name": spec.repo_url.rstrip("/").split("/")[-1],
+        "repo_url": spec.repo_url,
+        "sha": spec.sha,
+        "test_identifier": spec.test_path,
+        "flaky_test_path": spec.test_path,
+        "flake_category": spec.flake_category,
+        "idoft_category": spec.idoft_category,
+        "difficulty": spec.difficulty,
+        "pr_url": spec.pr_url,
+        "root_cause_file": spec.root_cause_file,
+        "root_cause_function": spec.root_cause_function
     }
     (dest / "flake_manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"    Manifest written → {dest.name}/flake_manifest.json")
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -675,34 +671,33 @@ def main() -> None:
     seen: set[str] = set()
     success = 0
 
-    pbar = tqdm(REPOS, desc="Building IDoFT Dataset")
-    for i, spec in enumerate(pbar, 1):
+    for i, spec in enumerate(REPOS, 1):
         slug = _slug(spec.repo_url, spec.test_path)
         if slug in seen:
-            pbar.write(f"[{i:03d}] SKIP duplicate: {slug}")
+            print(f"[{i:03d}] SKIP duplicate: {slug}")
             continue
         seen.add(slug)
 
         dest = BASE_DIR / slug
         dest.mkdir(parents=True, exist_ok=True)
 
-        pbar.set_description(f"Processing {slug[:30]}...")
+        print(f"\n[{i:03d}/{len(REPOS)}] {slug}  [{spec.difficulty.upper()} | {spec.flake_category}]")
 
         if not _clone_and_checkout(spec.repo_url, spec.sha, dest):
-            pbar.write(f"    [{i:03d}] SKIP — clone failed: {slug}")
+            print("    SKIP — clone failed")
             continue
 
         _fetch_diff(spec.pr_url, dest)
         _write_manifest(spec, dest)
         curriculum[spec.difficulty].append(slug)
         success += 1
-        time.sleep(0.1)
+        time.sleep(0.3)
 
     # Write curriculum labels
     labels = BASE_DIR / "curriculum_labels.txt"
-    with labels.open("w") as f:
+    with labels.open("w", encoding="utf-8") as f:
         f.write("# FlakeForge IDoFT Curriculum Labels\n")
-        f.write("# Train in order: EASY → MEDIUM → HARD\n")
+        f.write("# Train in order: EASY -> MEDIUM -> HARD\n")
         f.write("# Format: <difficulty> <TAB> <repo_slug>\n\n")
         for level in ("easy", "medium", "hard"):
             f.write(f"# ── {level.upper()} ({len(curriculum[level])}) ─────────────────────\n")
