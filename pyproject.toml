@@ -35,6 +35,11 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.0.0",
 ]
+# Episode JSON → PNG figures for docs (`scripts/plot_inference_episode.py`)
+viz = [
+    "matplotlib>=3.8.0",
+    "numpy>=1.26.0",
+]
 
 [project.scripts]
 # Server entry point - enables running via: uv run --project . server
