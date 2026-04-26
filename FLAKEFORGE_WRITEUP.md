@@ -491,3 +491,6 @@ That makes the environment harder to build, but also more meaningful. Flaky test
 
 The long-term vision is an agent that does not merely silence flaky tests, but repairs the underlying instability with small, verifiable patches.
 
+---
+
+[GITHUB_LINK](https://github.com//aayush2789/FlakeForge/FLAKEFORGE_WRITEUP.md)
