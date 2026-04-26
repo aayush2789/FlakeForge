@@ -70,9 +70,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# Default SFT dataset is synthetic (local repos).
 SEED_ROOT_DEFAULT = REPO_ROOT / "test_repos" / "synthetic"
-
 
 def _run(cmd: List[str], *, cwd: Optional[Path] = None) -> None:
     subprocess.run(cmd, cwd=str(cwd) if cwd else None, check=True)
