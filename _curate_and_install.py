@@ -141,11 +141,10 @@ def install_deps(repo_dir: Path) -> dict:
     req = repo_dir / "requirements.txt"
     req_test = repo_dir / "requirements-test.txt"
     req_dev  = repo_dir / "requirements-dev.txt"
-    setup_py = repo_dir / "setup.py"
-    pyproject = repo_dir / "pyproject.toml"
-    setup_cfg = repo_dir / "setup.cfg"
 
-    # Use bare filenames — cwd is set to repo_dir so relative paths work.
+    # Install requirements files only.  NEVER `pip install -e .` on seed
+    # repos — editable installs pollute the venv with cross-repo packages,
+    # causing massive import contamination between unrelated projects.
     if req.exists():
         cmds.append([sys.executable, "-m", "pip", "install", "-q",
                      "--no-warn-script-location", "-r", "requirements.txt"])
@@ -155,9 +154,6 @@ def install_deps(repo_dir: Path) -> dict:
     if req_dev.exists():
         cmds.append([sys.executable, "-m", "pip", "install", "-q",
                      "--no-warn-script-location", "-r", "requirements-dev.txt"])
-    if (setup_py.exists() or pyproject.exists() or setup_cfg.exists()):
-        cmds.append([sys.executable, "-m", "pip", "install", "-q",
-                     "--no-warn-script-location", "-e", "."])
 
     errors = []
     for cmd in cmds:

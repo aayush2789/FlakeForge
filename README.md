@@ -1,6 +1,5 @@
 ---
 title: Flakeforge Environment Server
-emoji: 🔕
 colorFrom: pink
 colorTo: green
 sdk: docker
@@ -15,7 +14,7 @@ tags:
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-Environment-6366F1?style=for-the-badge&logo=python&logoColor=white)](https://huggingface.co/docs/hub/spaces)
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Hugging%20Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Hub-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000)](https://huggingface.co/)
+[![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Hub-FFD21E?style=for-the-badge&logo=huggingface&logoColor=000)](https://huggingface.co/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)

@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r /app/server/requirements.txt
 COPY . /app/
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
 EXPOSE 8000
 

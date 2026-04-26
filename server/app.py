@@ -35,14 +35,26 @@ except ImportError:
         from server.FlakeForge_environment import FlakeForgeEnvironment  # type: ignore
 
 
-from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.routing import APIRoute
 
 logger = logging.getLogger("flakeforge")
 
 # ── Create the base OpenEnv app ─────────────────────────────────────────────
 app = create_app(FlakeForgeEnvironment, FlakeForgeAction, FlakeForgeObservation)
+
+# Ensure our custom homepage wins over OpenEnv's default playground at "/".
+app.router.routes = [
+    route
+    for route in app.router.routes
+    if not (
+        isinstance(route, APIRoute)
+        and route.path == "/"
+        and "GET" in route.methods
+    )
+]
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
 app.add_middleware(
@@ -68,7 +80,13 @@ app.include_router(api_router)
 
 @app.get("/", response_class=HTMLResponse)
 def homepage():
-    html_path = Path(__file__).parents[1] / "templates" / "index.html"
+    """Serve the FlakeForge marketing / demo UI (Hugging Face App tab at `/`)."""
+    html_path = Path(__file__).resolve().parents[1] / "templates" / "index.html"
+    if not html_path.is_file():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing UI template: {html_path.as_posix()}",
+        )
     return html_path.read_text(encoding="utf-8")
 
 
