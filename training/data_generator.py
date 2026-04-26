@@ -30,20 +30,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from models import ROOT_CAUSE_TYPES
+    from models import ROOT_CAUSE_TYPES, FlakeForgeObservation
 except ImportError:
     try:
-        from ..models import ROOT_CAUSE_TYPES
+        from ..models import ROOT_CAUSE_TYPES, FlakeForgeObservation
     except (ImportError, ValueError):
-        try:
-            from FlakeForge.models import ROOT_CAUSE_TYPES
-        except ImportError:
-            ROOT_CAUSE_TYPES = [
-                "async_wait", "concurrency", "test_order_dependency", "resource_leak",
-                "shared_state", "network", "platform_dependency", "nondeterminism",
-                "import_side_effect", "module_cache_pollution", "fixture_scope_leak",
-                "mock_residue", "unknown",
-            ]
+        ROOT_CAUSE_TYPES = [
+            "async_wait", "concurrency", "test_order_dependency", "resource_leak",
+            "shared_state", "network", "platform_dependency", "nondeterminism",
+            "import_side_effect", "module_cache_pollution", "fixture_scope_leak",
+            "mock_residue", "unknown",
+        ]
+        class FlakeForgeObservation:
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+from agent.unified_agent import (
+    CATEGORY_CHEATSHEET,
+    scenario_hints,
+    UNIFIED_EXAMPLE_JSON,
+)
 
 
 # ── Reasoning Template Library ───────────────────────────────────────────────
@@ -466,13 +473,27 @@ def _render_prompt_from_manifest(manifest: Dict[str, Any], repo_dir: Path) -> st
         parts.append("=== TEST FUNCTION ===")
         parts.append(test_src[:1000])
         parts.append("")
-    parts.append("=== CATEGORY HINT ===")
-    parts.append(f"Likely root cause: {category}  (difficulty: {difficulty})")
-    parts.append("")
-    parts.append(
-        "Reply with ONE JSON object: {\"think\": {\"claims\": [...], \"confidence\": ...}, "
-        "\"patch\": {\"hunks\": [...]}}. No markdown, no XML."
+    parts.append("=== SCENARIO GUIDE (do this now) ===")
+    # Mock observation for scenario_hints
+    obs = FlakeForgeObservation(
+        test_identifier=test_id,
+        step=0,
+        steps_remaining=1,
+        baseline_pass_rate=0.0,
+        current_pass_rate=0.0,
+        think_history=[],
+        patches_applied=[],
     )
+    parts.extend(scenario_hints(obs))
+    parts.append("")
+
+    parts.append(CATEGORY_CHEATSHEET)
+    parts.append("")
+
+    parts.append("=== YOUR TURN ===")
+    parts.append("Reply with ONE JSON object. No markdown, no XML, no commentary.")
+    parts.append("Single-line example shape (do NOT copy values, just the structure):")
+    parts.append(UNIFIED_EXAMPLE_JSON)
     return "\n".join(parts)
 
 
