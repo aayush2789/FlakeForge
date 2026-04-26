@@ -248,7 +248,7 @@ class CurriculumScheduler:
         ]
         for extra in self.extra_roots:
             search_specs.append((extra, "*/flake_manifest.json"))
-        for fallback in (Path("test_repos/synthetic"), Path("seed_repos/idoft")):
+        for fallback in (Path("seed_repos/idoft"),):
             if not any(fallback == s[0] for s in search_specs):
                 search_specs.append((fallback, "*/flake_manifest.json"))
         search_specs.append((Path("data/manifests"), "*.json"))

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List
@@ -82,7 +83,7 @@ class DockerTestRunner:
             )
 
     def _pytest_cmd(self, test_id: str) -> List[str]:
-        return ["pytest", test_id, "--tb=short", "-q", "--no-header"]
+        return [sys.executable, "-m", "pytest", test_id, "--tb=short", "-q", "--no-header"]
 
     def _deps_marker_path(self) -> Path:
         return self.repo_path / ".flakeforge_deps_ready"
@@ -106,7 +107,7 @@ class DockerTestRunner:
         try:
             # Always ensure pytest exists in the active environment.
             base_cmds: list[list[str]] = [
-                ["python", "-m", "pip", "install", "-q", "pytest"],
+                [sys.executable, "-m", "pip", "install", "-q", "pytest"],
             ]
 
             # Install project deps if present. Prefer requirements.txt for speed.
@@ -115,10 +116,10 @@ class DockerTestRunner:
             setup_py = self.repo_path / "setup.py"
 
             if requirements.exists():
-                base_cmds.append(["python", "-m", "pip", "install", "-q", "-r", "requirements.txt"])
+                base_cmds.append([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"])
             elif pyproject.exists() or setup_py.exists():
                 # Editable install makes imports work for most repos.
-                base_cmds.append(["python", "-m", "pip", "install", "-q", "-e", "."])
+                base_cmds.append([sys.executable, "-m", "pip", "install", "-q", "-e", "."])
 
             for cmd in base_cmds:
                 proc = subprocess.run(
