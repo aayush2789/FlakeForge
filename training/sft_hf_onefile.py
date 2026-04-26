@@ -255,6 +255,7 @@ def install_repo_dependencies(
     ok = 0
     skipped = 0
     failed = 0
+    failed_slugs: List[str] = []
     t0 = time.time()
 
     def _write_filtered_requirements(req_path: Path) -> Optional[Path]:
@@ -341,13 +342,14 @@ def install_repo_dependencies(
             ok += 1
         except Exception as exc:
             failed += 1
+            failed_slugs.append(c.slug)
             print(f"[DEPS] FAIL {c.slug}: {exc}", flush=True)
 
         if i == 1 or i % 5 == 0 or i == total:
             elapsed = time.time() - t0
             print(f"[DEPS] progress {i}/{total} ok={ok} skipped={skipped} failed={failed} elapsed={elapsed:.1f}s", flush=True)
 
-    return {"ok": ok, "skipped": skipped, "failed": failed}
+    return {"ok": ok, "skipped": skipped, "failed": failed, "failed_slugs": sorted(set(failed_slugs))}
 
 
 def _parse_unified_diff(diff_text: str) -> List[Tuple[str, List[str], List[str]]]:
@@ -418,6 +420,7 @@ def build_sft_rows(
     skipped_diff_empty = 0
     skipped_no_hunks = 0
     skipped_no_prompt = 0
+    used_slugs: List[str] = []
 
     for i, c in enumerate(cases, start=1):
         repo_dir = cloned_repo_paths.get(c.slug)
@@ -477,6 +480,7 @@ def build_sft_rows(
 
         full_prompt = f"{sys_prompt}\n\n{prompt}"
         rows.append({"prompt": full_prompt, "completion": completion})
+        used_slugs.append(c.slug)
 
         if i == 1 or i % 5 == 0 or i == total:
             elapsed = time.time() - t0
@@ -488,6 +492,8 @@ def build_sft_rows(
                 flush=True,
             )
 
+    # Attach metadata for the caller (without changing return type):
+    setattr(build_sft_rows, "_used_slugs", sorted(set(used_slugs)))  # type: ignore[attr-defined]
     return rows
 
 
@@ -884,6 +890,7 @@ def main() -> None:
         repo_clone_root = workdir / "cloned_repos"
         dataset_path = workdir / "datasets" / "idoft_sft.jsonl"
         graph_path = workdir / "graphs" / "sft_pipeline.mmd"
+        summary_path = workdir / "reports" / "run_summary.json"
 
         print(f"[RUN] seed_root={seed_root}", flush=True)
         cases = load_idoft_cases(seed_root)
@@ -910,6 +917,8 @@ def main() -> None:
                 safe_mode=bool(args.deps_safe_mode),
             )
             print(f"[RUN] deps summary: {deps_summary}", flush=True)
+        else:
+            deps_summary = {"ok": 0, "skipped": 0, "failed": 0, "failed_slugs": []}
 
         print("[RUN] building dataset ...", flush=True)
         rows = build_sft_rows(cases, cloned)
@@ -918,6 +927,24 @@ def main() -> None:
             raise SystemExit("No SFT rows could be built (missing fix.diff or diff parse failed).")
         write_jsonl(rows, dataset_path)
         print(f"[DATA] wrote {dataset_path}", flush=True)
+
+        used_slugs = getattr(build_sft_rows, "_used_slugs", [])  # type: ignore[attr-defined]
+        summary = {
+            "cases_total": len(cases),
+            "cloned_total": len(cloned),
+            "sft_rows": len(rows),
+            "used_slugs": used_slugs,
+            "deps": deps_summary,
+        }
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(f"[REPORT] wrote summary -> {summary_path}", flush=True)
+        if deps_summary.get("failed_slugs"):
+            print(f"[REPORT] deps failed for {len(deps_summary['failed_slugs'])} repos (continuing anyway):", flush=True)
+            for s in deps_summary["failed_slugs"][:20]:
+                print(f"  - {s}", flush=True)
+            if len(deps_summary["failed_slugs"]) > 20:
+                print("  ... (see run_summary.json for full list)", flush=True)
 
         run_sft(
             dataset_path=dataset_path,
