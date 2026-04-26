@@ -461,7 +461,7 @@ Running **`python inference.py`** (with your usual args for repo path, test id, 
 
 **Visual dashboard (same run as the JSON in `data/inference_example_episode.json` — step rewards, cumulative reward, pass rate vs confidence, patch apply markers, a heatmap of every `reward_breakdown` key per step, and traces for a few components):**
 
-![Inference episode dashboard](./docs/assets/inference_episode_dashboard.png)
+![Inference episode dashboard](./assets/inference_graphs.png)
 
 Regenerate the figure after changing the example JSON (or pipe your own saved stdout to a `.json` file):
 
