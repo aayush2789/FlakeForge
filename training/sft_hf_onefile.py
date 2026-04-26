@@ -132,7 +132,9 @@ def _pip_install(
     """Run `python -m pip ...` with streaming output."""
     cmd = [sys.executable, "-m", "pip", *args]
     if constraints is not None:
-        cmd += ["-c", str(constraints)]
+        cmd += ["-c", str(Path(constraints).resolve())]
+    # Always print the exact command so debugging is easy in HF Jobs logs.
+    print(prefix + "[PIP] " + " ".join(shlex.quote(x) for x in cmd), flush=True)
     _run_stream(cmd, cwd=cwd, prefix=prefix)
 
 
@@ -283,7 +285,7 @@ def install_repo_dependencies(
         changed = False
 
         # Known incompatible pins for py3.11+ seen in the wild
-        sympy_bad = re.compile(r"^\s*sympy\s*([<]=?|==)\s*([0-9][^;#\s]*)", re.I)
+        sympy_any = re.compile(r"^\s*sympy(\[.*\])?\s*([<>=!~]=?.*)?$", re.I)
 
         for line in raw:
             s = line.strip()
@@ -291,10 +293,8 @@ def install_repo_dependencies(
                 out_lines.append(line)
                 continue
 
-            m = sympy_bad.match(s)
-            if m:
-                # sympy 0.7.x breaks on py3.11 due to inspect.getargspec removal.
-                out_lines.append("sympy>=1.10  # patched by FlakeForge safe_mode (py3.11+)")
+            if sympy_any.match(s):
+                # Drop any sympy pin and re-add a modern compatible one at the end.
                 changed = True
                 continue
 
@@ -303,6 +303,7 @@ def install_repo_dependencies(
         if not changed:
             return None
 
+        out_lines.append("sympy>=1.10  # patched by FlakeForge safe_mode (py3.11+)")
         filtered = req_path.parent / ".flakeforge_requirements.safe.txt"
         filtered.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
         return filtered
@@ -339,6 +340,9 @@ def install_repo_dependencies(
 
             if req.exists() and req.stat().st_size > 0:
                 try:
+                    # Pre-install sympy constraint first so even transitive deps won't pull 0.7.x.
+                    if safe_mode:
+                        _pip_install(["install", "sympy>=1.10"], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
                     _pip_install(["install", "-r", str(req)], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
                 except Exception as exc:
                     if not safe_mode:
@@ -349,6 +353,8 @@ def install_repo_dependencies(
                         print(f"[DEPS] no safe_mode patch available for {c.slug}; continuing (deps may be incomplete)", flush=True)
                     else:
                         print(f"[DEPS] retry with filtered requirements: {filtered.name}", flush=True)
+                        if safe_mode:
+                            _pip_install(["install", "sympy>=1.10"], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
                         _pip_install(["install", "-r", str(filtered)], prefix=f"[DEPS:{c.slug}] ", constraints=constraints)
             elif editable and (pyproject.exists() or setup_py.exists()):
                 # Editable installs can fail for older repos; keep it optional.
@@ -730,6 +736,7 @@ def submit_hf_job(
         "apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates >/dev/null; "
         f"git clone --depth 1 --branch {shlex.quote(branch)} {shlex.quote(git_url)} /workspace; "
         "cd /workspace; "
+        "echo '[JOB] repo HEAD='$(git rev-parse HEAD); "
         "python -m pip install --upgrade pip wheel setuptools; "
         "pip install -r training-requirements.txt; "
         f"python training/sft_hf_onefile.py run {forwarded}"
