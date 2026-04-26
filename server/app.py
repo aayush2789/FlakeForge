@@ -34,7 +34,15 @@ except ImportError:
         from server.FlakeForge_environment import FlakeForgeEnvironment  # type: ignore
 
 
+from fastapi.responses import HTMLResponse
+
 app = create_app(FlakeForgeEnvironment, FlakeForgeAction, FlakeForgeObservation)
+
+
+@app.get("/", response_class=HTMLResponse)
+def homepage():
+    html_path = Path(__file__).parents[1] / "templates" / "index.html"
+    return html_path.read_text(encoding="utf-8")
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):

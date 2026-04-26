@@ -1,6 +1,24 @@
 """V3 GRPO Trainer — Group Relative Policy Optimization for FlakeForge.
 
-Uses TRL's GRPOTrainer with a multi-signal verifiable reward function.
+Uses TRL's GRPOTrainer with a **verifiable offline** reward (format + consistency).
+
+**Execution / env rewards and stock GRPOTrainer — incompatible**
+
+TRL's ``GRPOTrainer`` calls the reward with *all G completions in one batch* and
+expects one scalar per completion. A naive ``env.step()`` loop would call ``step`` G
+times on the *same* episode **without** ``reset()`` between completions, stacking G
+patches on one repo. **Do not** wire ``FlakeForgeEnvironment.step``-based rewards into
+``GRPOTrainer`` without a custom trainer that does ``reset()`` + one ``step()`` per
+completion.
+
+**Path A (recommended for warm-up):** ``create_trainer(use_execution=False)`` and a
+``prompt`` dataset — offline reward only, stable and fast.
+
+**Path B (live env):** use :func:`run_episode` / :func:`build_grpo_batch` inside your
+own loop. ``run_episode`` calls ``env.reset()`` at the start of each rollout; ensure
+:meth:`FlakeForgeEnvironment.reset` restores the repo (pristine snapshot). You must
+still implement the policy / GRPO loss and ``backward()`` — :func:`build_grpo_batch`
+only returns advantages; it does not run the optimizer.
 
 Key design decisions (aligned with the training notebook):
 - Qwen/Qwen2.5-7B-Instruct as the base model (strong code reasoning)
@@ -9,7 +27,7 @@ Key design decisions (aligned with the training notebook):
 - bfloat16 over float16 for RL training stability
 - GRPO group size G=8: 8 rollouts per prompt, baseline = group mean
 - KL coefficient 0.04 (increase → 0.1 if reward collapses; decrease → 0.01 if too slow)
-- DeepSpeed ZeRO-3 compatible (device_map=None, model placement handled externally)
+- DeepSpeed ZeRO-2 by default for LoRA 7B (ZeRO-3 optional if VRAM tight)
 - Special tokens: <think>, </think>, <patch>, </patch>, <tool_call>, </tool_call>
 
 Research basis:
@@ -67,17 +85,27 @@ DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 # ── Reward functions ──────────────────────────────────────────────────────────
 
 def build_reward_function(use_execution: bool = False):
-    """Build the reward function for GRPO training.
+    """Build the reward function for **TRL GRPOTrainer** (offline only).
 
     Args:
-        use_execution: If True, includes execution-based signals (requires environment).
-                      If False, uses offline format + reasoning consistency signals only.
+        use_execution: Must stay ``False`` for stock ``GRPOTrainer``. Execution-based
+            rewards need ``env.step()`` once per completion with a fresh tree; use
+            :func:`run_episode` / a custom training loop instead (see module docstring).
 
     Returns:
-        A reward function compatible with TRL's GRPOTrainer.
+        A reward function compatible with TRL's ``GRPOTrainer``.
+
+    Raises:
+        ValueError: if ``use_execution`` is True — prevents silently broken training.
     """
     if use_execution:
-        return _execution_reward_fn
+        raise ValueError(
+            "use_execution=True is incompatible with TRL's GRPOTrainer: the trainer "
+            "scores a group of G completions in one call without env.reset() between "
+            "them, so patches would stack. Use use_execution=False for TRL, or use "
+            "run_episode / build_grpo_batch with a custom loop and FlakeForgeEnvironment "
+            "with pristine reset (see FlakeForgeEnvironment._pristine_file_snapshots)."
+        )
     return _offline_reward_fn
 
 
@@ -148,10 +176,11 @@ def _execution_reward_fn(
     completions: list,
     **kwargs: Any,
 ) -> List[float]:
-    """Online reward: full six-signal execution-verified reward.
+    """[Experimental] Per-completion env.step reward — **not** for TRL's GRPOTrainer.
 
-    Requires a running FlakeForge environment passed via kwargs["env"].
-    Falls back to offline reward if no environment is available.
+    A single call handles *len(completions)* items; a correct integration must call
+    ``env.reset()`` before *each* ``env.step()``. Stock ``GRPOTrainer`` does not do
+    that, so it must not use this. Prefer :func:`run_episode` (resets every rollout).
     """
     from agent.unified_agent import (
         extract_think,
@@ -198,12 +227,15 @@ def run_episode(
     env: Any,
     config: Dict[str, Any],
 ) -> Tuple[str, str, float]:
-    """Run a single RL episode: observe → generate → step → reward.
+    """Run a single RL episode: **reset** → observe → generate → step → reward.
+
+    Calls ``env.reset()`` at the start of **every** rollout so each completion is
+    scored on a clean repo (given ``FlakeForgeEnvironment`` pristine restore).
 
     Args:
         model: Loaded (LoRA-wrapped) causal LM.
         tokenizer: Tokenizer with special tokens added.
-        env: A FlakeForgeEnvironment instance (already reset externally).
+        env: A ``FlakeForgeEnvironment`` instance.
         config: Training config dict with generation hyperparameters.
 
     Returns:
@@ -263,16 +295,26 @@ def build_grpo_batch(
     env: Any,
     config: Dict[str, Any],
 ) -> Tuple[List[str], List[str], List[float], List[float]]:
-    """Generate G rollouts for one prompt (GRPO group).
+    """Generate G rollouts for one GRPO group (manual / custom training loop **only**).
 
-    The GRPO advantage for each response is:
+    **This does not call ``loss.backward()`` or ``optimizer.step()``** — you must
+    compute the GRPO / policy loss from ``advantages`` and the model, then backprop
+    in your own trainer. :func:`run_episode` is invoked G times; each call
+    ``env.reset()``s first, so the repo is not a stack of G patches (requires env
+    pristine restore in :meth:`FlakeForgeEnvironment.reset`).
+
+    Group advantage (for reference; TRL may normalize differently)::
         A_g = (r_g − mean(r)) / (std(r) + ε)
+
+    **reward_clip** default 15.0 so terminal bonuses (e.g. +4) from the env are not
+    cut off; tune via ``config["reward_clip"]``.
 
     Args:
         model: LoRA-wrapped causal LM.
         tokenizer: Tokenizer.
-        env: Environment instance (reset happens inside run_episode).
-        config: Training config; must contain 'grpo_group_size' (G).
+        env: ``FlakeForgeEnvironment`` (or compatible).
+        config: May include ``grpo_group_size`` (G), ``reward_clip`` (default 15.0),
+            ``normalize_rewards`` (default True; used only here, not in TRL).
 
     Returns:
         (prompts, completions, raw_rewards, advantages)
@@ -288,25 +330,34 @@ def build_grpo_batch(
         completions.append(completion)
         rewards.append(reward)
 
-    # Clip then normalise within group (GRPO core)
-    reward_clip = config.get("reward_clip", 5.0)
+    reward_clip = float(config.get("reward_clip", 15.0))
     arr = np.clip(np.array(rewards, dtype=float), -reward_clip, reward_clip)
     mean, std = arr.mean(), arr.std()
-    advantages = ((arr - mean) / (std + 1e-8)).tolist() if config.get("normalize_rewards", True) else rewards
+    advantages = ((arr - mean) / (std + 1e-8)).tolist() if config.get("normalize_rewards", True) else arr.tolist()
 
     logger.info(
         "[build_grpo_batch] G=%d mean_reward=%.3f std=%.3f max=%.3f min=%.3f",
-        G, mean, std, arr.max(), arr.min(),
+        G, float(mean), float(std), float(arr.max()), float(arr.min()),
     )
     return prompts, completions, rewards, advantages
 
 
-# ── DeepSpeed ZeRO-3 config ───────────────────────────────────────────────────
+# ── DeepSpeed ZeRO-2/3 config ────────────────────────────────────────────────
+# Prefer ZeRO-2 for 7B + LoRA: less collective overhead than stage 3; use 3 if VRAM is tight.
 
-def generate_deepspeed_config(output_path: str = "configs/deepspeed_z3.json") -> str:
-    """Write a DeepSpeed ZeRO-3 config and return its path."""
-    config = {
-        "zero_optimization": {
+def generate_deepspeed_config(
+    output_path: str = "configs/deepspeed_z2.json",
+    *,
+    zero_stage: int = 2,
+) -> str:
+    """Write a DeepSpeed ZeRO config and return its path.
+
+    Args:
+        output_path: Where to write JSON.
+        zero_stage: 2 (default, good for LoRA) or 3 (shard params; more comms).
+    """
+    if zero_stage == 3:
+        zconf = {
             "stage": 3,
             "offload_optimizer": {"device": "cpu", "pin_memory": True},
             "offload_param": {"device": "cpu", "pin_memory": True},
@@ -319,7 +370,15 @@ def generate_deepspeed_config(output_path: str = "configs/deepspeed_z3.json") ->
             "stage3_max_live_parameters": int(1e9),
             "stage3_max_reuse_distance": int(1e9),
             "stage3_gather_16bit_weights_on_model_save": True,
-        },
+        }
+    else:
+        zconf = {
+            "stage": 2,
+            "overlap_comm": True,
+            "contiguous_gradients": True,
+        }
+    config = {
+        "zero_optimization": zconf,
         "bf16": {"enabled": True},
         "gradient_clipping": 0.5,
         "train_micro_batch_size_per_gpu": 1,
@@ -327,9 +386,11 @@ def generate_deepspeed_config(output_path: str = "configs/deepspeed_z3.json") ->
     }
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
-    logger.info("[TRAINER] DeepSpeed ZeRO-3 config written to %s", path)
+    logger.info(
+        "[TRAINER] DeepSpeed ZeRO-%d config written to %s", zero_stage, path
+    )
     return str(path)
 
 
@@ -381,6 +442,10 @@ def load_model_and_tokenizer(
         attn_implementation=attn_impl,
         device_map=device_map,          # None = let DeepSpeed / accelerate place shards
     )
+    # Required when using gradient checkpointing (DeepSpeed / TRL) — avoids re-entrant
+    # cache warnings and subtle generation bugs in training.
+    if hasattr(model, "config"):
+        model.config.use_cache = False
     model.resize_token_embeddings(len(tokenizer))
 
     if use_lora:
@@ -422,27 +487,29 @@ def create_trainer(
     deepspeed_config_path: Optional[str] = None,
     **trainer_kwargs: Any,
 ) -> Any:
-    """Create a fully configured GRPOTrainer for FlakeForge V3.
+    """Create a fully configured GRPOTrainer for FlakeForge V3 (offline reward only).
 
     Args:
         model_name: HuggingFace model ID (default: Qwen2.5-7B-Instruct).
         output_dir: Checkpoint output directory.
-        sft_data_path: Path to a JSONL file produced by data_generator.py.
-        use_execution: Use live environment reward (True) or offline format reward (False).
+        sft_data_path: Path to a JSON/JSONL with a ``prompt`` column. If missing, a
+            placeholder :class:`datasets.Dataset` is created (see log).
+        use_execution: **Unsupported** — must be ``False`` (raises). Execution rewards
+            belong in a custom loop with :func:`run_episode` / :func:`build_grpo_batch`.
         use_lora: Apply LoRA adapters (strongly recommended for 7B models).
         use_flash_attention: Enable Flash Attention 2.
         wandb_project: W&B project name; set to None to disable W&B.
         wandb_run_name: W&B run name; auto-generated if None.
-        deepspeed_config_path: Path to DeepSpeed JSON; auto-generated if provided path
-            is "auto".
-        **trainer_kwargs: Override any GRPOConfig parameter.
+        deepspeed_config_path: Path to DeepSpeed JSON, or ``"auto"`` for generated ZeRO-2.
+        **trainer_kwargs: Override any ``GRPOConfig`` parameter. Keys that are not part
+            of your TRL version's ``GRPOConfig`` are dropped with a warning.
 
     Returns:
         Configured GRPOTrainer instance.
     """
     try:
         from trl import GRPOConfig, GRPOTrainer
-        from datasets import load_dataset
+        from datasets import Dataset, load_dataset
     except ImportError as exc:
         raise ImportError(
             "FlakeForge V3 training requires: pip install trl transformers datasets peft"
@@ -463,8 +530,9 @@ def create_trainer(
 
     # ── DeepSpeed ────────────────────────────────────────────────────────────
     if deepspeed_config_path == "auto":
+        # Default ZeRO-2 for 7B + LoRA; set zero_stage=3 in generate_deepspeed_config if you need it.
         deepspeed_config_path = generate_deepspeed_config(
-            os.path.join(output_dir, "deepspeed_z3.json")
+            os.path.join(output_dir, "deepspeed_z2.json"), zero_stage=2
         )
 
     # ── Model + tokenizer ────────────────────────────────────────────────────
@@ -477,13 +545,25 @@ def create_trainer(
         device_map=device_map,
     )
 
-    # ── Dataset ──────────────────────────────────────────────────────────────
+    # ── Dataset (TRL GRPO requires a non-empty train_dataset) ────────────────
     dataset = None
     if sft_data_path and Path(sft_data_path).exists():
         dataset = load_dataset("json", data_files=sft_data_path, split="train")
         logger.info(
             "[TRAINER] Loaded %d training examples from %s",
             len(dataset), sft_data_path,
+        )
+    if dataset is None:
+        n = int(os.environ.get("FF_GRPO_MIN_DATASET_SIZE", "128"))
+        placeholder = os.environ.get(
+            "FF_GRPO_PROMPT_PLACEHOLDER",
+            "You are FlakeForge. Fix the flaky test; respond with one JSON object with think and patch keys.",
+        )
+        dataset = Dataset.from_dict({"prompt": [placeholder] * n})
+        logger.warning(
+            "[TRAINER] No valid sft_data_path: using a placeholder Dataset (%d rows). "
+            "Set sft_data_path=... or FF_GRPO_MIN_DATASET_SIZE / FF_GRPO_PROMPT_PLACEHOLDER.",
+            n,
         )
 
     # ── Reward function ───────────────────────────────────────────────────────
@@ -500,7 +580,7 @@ def create_trainer(
 
         # Training schedule
         "num_train_epochs": 3,
-        "learning_rate": 1e-6,          # Low LR: RL gradients are noisy
+        "learning_rate": 5e-6,        # LoRA + RL: slightly stronger than 1e-6; tune to loss noise
         "lr_scheduler_type": "cosine",
         "warmup_steps": 50,
         "weight_decay": 0.01,
@@ -515,10 +595,9 @@ def create_trainer(
 
         # KL / clipping
         "beta": 0.04,                   # KL penalty (increase → 0.1 if reward collapses)
-
-        # Reward normalisation
-        "normalize_rewards": True,
-        "reward_clip": 5.0,             # Clip before normalisation
+        # Note: do not put reward_clip / normalize_rewards here — not standard TRL
+        # GRPOConfig fields; TRL normalizes group rewards internally. For manual
+        # :func:`build_grpo_batch`, set reward_clip in that config dict (default 15.0).
 
         # Stability
         "max_grad_norm": 0.5,           # Gradient clipping — critical for RL
@@ -531,6 +610,16 @@ def create_trainer(
         "report_to": "wandb" if wandb_project else "none",
     }
     config_kwargs.update(trainer_kwargs)
+
+    # Common foot-guns: these are not part of TRL's GRPOConfig in many versions.
+    for k in ("reward_clip", "normalize_rewards"):
+        if k in config_kwargs:
+            logger.warning(
+                "[TRAINER] Removing %r from config — not a standard GRPOConfig key; "
+                "TRL normalizes per-group rewards. For manual :func:`build_grpo_batch`, pass reward_clip in that dict.",
+                k,
+            )
+            del config_kwargs[k]
 
     # Handle version-specific GRPOConfig param names
     try:
