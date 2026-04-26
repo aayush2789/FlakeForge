@@ -373,9 +373,11 @@ def load_synthetic_cases(seed_root: Path) -> List[SyntheticCase]:
 
 
 def select_balanced_synthetic(cases: List[SyntheticCase], *, total: int = 40) -> List[SyntheticCase]:
-    """Pick a near-equal easy/medium/hard subset, prioritizing cases we can SFT-label.
+    """Pick a near-equal easy/medium/hard subset (default total=40).
 
-    We only pick repos where `_synthetic_fix_hunks(...)` returns at least one hunk.
+    IMPORTANT: We do NOT pre-filter by patchability here. Patchability is decided
+    later by actually generating a candidate patch and verifying it with pytest.
+    Pre-filtering would under-select and reduce dataset size.
     """
     by: Dict[str, List[SyntheticCase]] = {"easy": [], "medium": [], "hard": []}
     for c in cases:
@@ -396,24 +398,9 @@ def select_balanced_synthetic(cases: List[SyntheticCase], *, total: int = 40) ->
             need[k] += 1
             rem -= 1
 
-    def can_patch(case: SyntheticCase) -> bool:
-        try:
-            m = json.loads(case.manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            return False
-        return bool(_synthetic_fix_hunks(m, case.repo_dir))
-
     picked: List[SyntheticCase] = []
     for d in ("easy", "medium", "hard"):
-        got = 0
-        for c in by[d]:
-            if got >= need[d]:
-                break
-            if can_patch(c):
-                picked.append(c)
-                got += 1
-        if got < need[d]:
-            print(f"[SELECT] WARN: only {got}/{need[d]} patchable cases for difficulty={d}", flush=True)
+        picked.extend(by[d][: need[d]])
 
     return picked
 
@@ -448,6 +435,13 @@ def _synthetic_fix_hunks(manifest: Dict[str, Any], repo_dir: Path) -> List[Dict[
         # Reset singleton-owned dict each instantiation (synthetic singleton template).
         return one("            cls._instance._settings = {}", "            cls._instance._settings = {}  # reset each time")
     if category == "nondeterminism":
+        # Synthetic token generator template: test expects alpha-only tokens.
+        if "string.ascii_lowercase + string.digits" in src:
+            return one(
+                "    chars = string.ascii_lowercase + string.digits",
+                "    chars = string.ascii_lowercase",
+            )
+        # Fallback: seed random if used.
         if "import random" in src and "random.seed(" not in src:
             return one("import random", "import random\nrandom.seed(0)")
         return []
@@ -1315,7 +1309,7 @@ def main() -> None:
         seed_root = Path(args.seed_root)
         workdir = Path(args.workdir)
         repo_clone_root = workdir / "cloned_repos"
-        dataset_path = workdir / "datasets" / "idoft_sft.jsonl"
+        dataset_path = workdir / "datasets" / "sft.jsonl"
         graph_path = workdir / "graphs" / "sft_pipeline.mmd"
         summary_path = workdir / "reports" / "run_summary.json"
 
