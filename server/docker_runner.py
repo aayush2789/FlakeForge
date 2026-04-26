@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List
@@ -24,6 +25,14 @@ class DockerTestRunner:
     - USE_DOCKER_IMAGE=1 enables sandbox mode
     - LOCAL_IMAGE_NAME sets the image (default: flakeforge-env:latest)
     """
+
+    # Resolve the FlakeForge repo root once. We must keep its `__init__.py`
+    # off the pytest import path for seed-repo subprocesses, otherwise pytest
+    # walks up to the FlakeForge `pytest.ini` and tries to import the heavy
+    # FlakeForge package as a "test module" — surfacing as bogus
+    # `ModuleNotFoundError` (e.g. typeguard / openenv) and a false
+    # `infra_broken` preflight verdict for every seed repo.
+    _FF_REPO_ROOT = Path(__file__).resolve().parent.parent
 
     def __init__(self, repo_path: str) -> None:
         self.repo_path = Path(repo_path)
@@ -82,7 +91,50 @@ class DockerTestRunner:
             )
 
     def _pytest_cmd(self, test_id: str) -> List[str]:
-        return ["pytest", test_id, "--tb=short", "-q", "--no-header"]
+        # Pin rootdir/confcutdir to the seed repo so pytest never escapes up
+        # into the FlakeForge tree. `--import-mode=importlib` skips parent-dir
+        # injection into sys.path, which is what previously caused FlakeForge
+        # to be imported as part of the test package chain.
+        abs_repo = str(self.repo_path.resolve())
+        return [
+            sys.executable, "-m", "pytest", test_id,
+            "--rootdir", abs_repo,
+            "--confcutdir", abs_repo,
+            "--import-mode=importlib",
+            "-p", "no:cacheprovider",
+            "--tb=short", "-q", "--no-header",
+        ]
+
+    def _isolated_env(self) -> dict[str, str]:
+        """Return a subprocess env that hides the FlakeForge repo from pytest.
+
+        Even with rootdir/confcutdir pinned, an inherited PYTHONPATH that
+        contains the FlakeForge root will still let pytest discover and
+        import the FlakeForge package on `import FlakeForge` style probes.
+        We strip it here, and disable bytecode writes to keep seed repos
+        clean (no stray `__pycache__` dirs polluting git status).
+        """
+        env = os.environ.copy()
+        ff_root_norm = os.path.normcase(str(self._FF_REPO_ROOT.resolve()))
+        pp = env.get("PYTHONPATH", "")
+        if pp:
+            sep = os.pathsep
+            kept = []
+            for part in pp.split(sep):
+                if not part:
+                    continue
+                try:
+                    norm = os.path.normcase(str(Path(part).resolve()))
+                except Exception:
+                    norm = os.path.normcase(part)
+                if norm != ff_root_norm:
+                    kept.append(part)
+            if kept:
+                env["PYTHONPATH"] = sep.join(kept)
+            else:
+                env.pop("PYTHONPATH", None)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        return env
 
     def _deps_marker_path(self) -> Path:
         return self.repo_path / ".flakeforge_deps_ready"
@@ -91,8 +143,10 @@ class DockerTestRunner:
         """Best-effort install of repo-specific test dependencies (local mode only).
 
         Many IDoFT repos require dependencies to import modules during pytest
-        collection. Without this, preflight classifies the environment as
-        infra_broken after a single sanity run.
+        collection.  We treat pytest itself as critical (hard fail) but allow
+        requirements / editable-install failures to be non-fatal: most seed
+        repos work fine without them, and a failed `pip install -e .` should
+        never prevent the test from being attempted at all.
         """
         if self._deps_checked:
             return self._deps_ready
@@ -104,35 +158,44 @@ class DockerTestRunner:
             return True
 
         try:
-            # Always ensure pytest exists in the active environment.
-            base_cmds: list[list[str]] = [
-                ["python", "-m", "pip", "install", "-q", "pytest"],
-            ]
+            # Step 1 (critical): ensure pytest is available.
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "pytest"],
+                capture_output=True,
+                text=True,
+                cwd=self.repo_path,
+                timeout=300,
+            )
+            if proc.returncode != 0:
+                self._deps_ready = False
+                combined = f"{proc.stdout}\n{proc.stderr}".strip()
+                self._deps_error = (combined or "pytest install failed")[-800:]
+                return False
 
-            # Install project deps if present. Prefer requirements.txt for speed.
+            # Step 2 (best-effort): install declared requirements only.
+            # NEVER do `pip install -e .` on seed repos — that pollutes the
+            # .venv's site-packages with editable links to every repo,
+            # causing massive cross-contamination between unrelated projects.
             requirements = self.repo_path / "requirements.txt"
-            pyproject = self.repo_path / "pyproject.toml"
-            setup_py = self.repo_path / "setup.py"
+            req_test = self.repo_path / "requirements-test.txt"
 
+            extra_cmds: list[list[str]] = []
             if requirements.exists():
-                base_cmds.append(["python", "-m", "pip", "install", "-q", "-r", "requirements.txt"])
-            elif pyproject.exists() or setup_py.exists():
-                # Editable install makes imports work for most repos.
-                base_cmds.append(["python", "-m", "pip", "install", "-q", "-e", "."])
+                extra_cmds.append([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"])
+            if req_test.exists():
+                extra_cmds.append([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-test.txt"])
 
-            for cmd in base_cmds:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=self.repo_path,
-                    timeout=300,
-                )
-                if proc.returncode != 0:
-                    self._deps_ready = False
-                    combined = f"{proc.stdout}\n{proc.stderr}".strip()
-                    self._deps_error = (combined or "dependency install failed")[-800:]
-                    return False
+            for cmd in extra_cmds:
+                try:
+                    subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        cwd=self.repo_path,
+                        timeout=300,
+                    )
+                except Exception:
+                    pass
 
             marker.write_text("ok\n", encoding="utf-8")
             self._deps_ready = True
@@ -149,6 +212,7 @@ class DockerTestRunner:
             text=True,
             timeout=timeout_seconds,
             cwd=self.repo_path,
+            env=self._isolated_env(),
         )
 
     def _run_docker_pytest(self, test_id: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
@@ -160,6 +224,7 @@ class DockerTestRunner:
             "--memory", os.getenv("FF_DOCKER_MEMORY", "2g"),
             "-v", f"{mount_src}:/workspace",
             "-w", "/workspace",
+            "-e", "PYTHONDONTWRITEBYTECODE=1",
             self.local_image_name,
             *self._pytest_cmd(test_id),
         ]
@@ -234,9 +299,13 @@ class DockerTestRunner:
 
         try:
             cmd = [
-                "pytest",
+                sys.executable, "-m", "pytest",
                 str(tests_root),
                 f"--ignore={repo_root / exclude_test_file}",
+                "--rootdir", str(repo_root),
+                "--confcutdir", str(repo_root),
+                "--import-mode=importlib",
+                "-p", "no:cacheprovider",
                 "-x",
                 "-q",
             ]
@@ -250,6 +319,7 @@ class DockerTestRunner:
                         "--memory", os.getenv("FF_DOCKER_MEMORY", "2g"),
                         "-v", f"{mount_src}:/workspace",
                         "-w", "/workspace",
+                        "-e", "PYTHONDONTWRITEBYTECODE=1",
                         self.local_image_name,
                         *cmd,
                     ],
@@ -267,6 +337,7 @@ class DockerTestRunner:
                     text=True,
                     timeout=timeout_seconds,
                     cwd=repo_root,
+                    env=self._isolated_env(),
                 )
             # pytest exits with code 5 when every test file was excluded and
             # no tests were collected. That is not a regression; it just means

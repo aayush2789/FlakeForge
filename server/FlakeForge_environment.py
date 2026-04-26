@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import math
 import os
+import re
 import runpy
 import traceback
 import uuid
@@ -821,6 +822,8 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             "summary": summary,
         }
 
+    _TIMING_RE = re.compile(r"\b\d+\.\d+s\b")
+
     def _failure_keys(self, runs: List[RunRecord]) -> List[str]:
         keys: List[str] = []
         for r in runs:
@@ -828,9 +831,11 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 continue
             error_type = r.error_type or "UnknownError"
             message = (r.error_message or r.stderr_excerpt or "").strip()
-            # Keep the type primary, but include a short message signature so
-            # same exception with different failure causes still has entropy.
             msg_sig = message[:80] if message else ""
+            # Strip wall-clock durations ("0.17s", "1.23s") from the signature
+            # so that the same deterministic failure with slightly different
+            # timing doesn't inflate failure-entropy into a false "flaky" verdict.
+            msg_sig = self._TIMING_RE.sub("Xs", msg_sig)
             keys.append(f"{error_type}:{msg_sig}")
         return keys
 
