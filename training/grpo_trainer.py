@@ -403,74 +403,63 @@ def load_model_and_tokenizer(
     lora_alpha: int = 128,
     lora_dropout: float = 0.05,
     use_flash_attention: bool = True,
-    device_map: Optional[str] = None,
+    use_unsloth: bool = True,
+    max_seq_length: int = 4096,
+    dtype: Optional[Any] = None,
+    load_in_4bit: bool = True,
 ):
-    """Load Qwen-2.5-7B-Instruct with LoRA and FlakeForge special tokens.
+    """Load model with Unsloth (preferred) or fallback to HF+PEFT.
 
-    Args:
-        model_name: HuggingFace model ID.
-        use_lora: Whether to wrap with LoRA (default True; set False for eval only).
-        lora_r: LoRA rank.  r=64 gives ~1% trainable params at 7B scale.
-        lora_alpha: LoRA scaling factor (alpha/r = 2.0 is standard).
-        lora_dropout: LoRA dropout rate.
-        use_flash_attention: Enable Flash Attention 2 for 2× memory efficiency.
-        device_map: Passed to from_pretrained.  Leave None for DeepSpeed; 'auto' for single-GPU.
-
-    Returns:
-        (model, tokenizer) — model has LoRA applied and embeddings resized.
+    Unsloth gives 2-5x faster training, better memory efficiency, and
+    native GRPO support. Uses 4-bit QLoRA by default for 7B models.
     """
+    # Unsloth is now **mandatory** — no fallback allowed (per user request)
     try:
+        from unsloth import FastLanguageModel
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ImportError as exc:
-        raise ImportError("pip install torch transformers") from exc
+        logger.info("[TRAINER] Loading with Unsloth (mandatory — fastest path) for %s", model_name)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        padding_side="left",   # Required for batch left-padded generation
-    )
-    tokenizer.add_special_tokens(FLAKEFORGE_SPECIAL_TOKENS)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        if dtype is None:
+            dtype = None  # Unsloth auto-detects
 
-    attn_impl = "flash_attention_2" if use_flash_attention else "eager"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,     # Numerically more stable than float16 for RL
-        attn_implementation=attn_impl,
-        device_map=device_map,          # None = let DeepSpeed / accelerate place shards
-    )
-    # Required when using gradient checkpointing (DeepSpeed / TRL) — avoids re-entrant
-    # cache warnings and subtle generation bugs in training.
-    if hasattr(model, "config"):
-        model.config.use_cache = False
-    model.resize_token_embeddings(len(tokenizer))
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=max_seq_length,
+            dtype=dtype,
+            load_in_4bit=load_in_4bit,
+            trust_remote_code=True,
+        )
 
-    if use_lora:
-        try:
-            from peft import LoraConfig, get_peft_model, TaskType
-        except ImportError as exc:
-            raise ImportError("pip install peft") from exc
+        # Add our special tokens for FlakeForge structured output
+        tokenizer.add_special_tokens(FLAKEFORGE_SPECIAL_TOKENS)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
+        # Apply LoRA via Unsloth (much faster + better memory than PEFT)
+        model = FastLanguageModel.get_peft_model(
+            model,
             r=lora_r,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            target_modules=[
-                "q_proj", "k_proj", "v_proj", "o_proj",    # Attention
-                "gate_proj", "up_proj", "down_proj",         # FFN / MLP
-            ],
             bias="none",
-            inference_mode=False,
+            use_gradient_checkpointing="unsloth",  # 30% less VRAM
+            random_state=42,
+            use_rslora=False,
+            loftq_config=None,
         )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
 
-    logger.info("[TRAINER] Loaded %s (lora=%s flash=%s)", model_name, use_lora, use_flash_attention)
-    return model, tokenizer
+        logger.info("[TRAINER] Successfully loaded with Unsloth + 4-bit QLoRA (r=%d)", lora_r)
+        return model, tokenizer
+
+    except ImportError:
+        raise ImportError(
+            "Unsloth is now **mandatory**. Please install it with:\n"
+            "    pip install --upgrade --force-reinstall --no-deps \\\n"
+            "        unsloth[cu121-torch240]@git+https://github.com/unslothai/unsloth.git"
+        ) from None
+    except Exception as e:
+        raise RuntimeError(f"Unsloth model loading failed: {e}") from e
 
 
 # ── Main GRPOTrainer factory ──────────────────────────────────────────────────
@@ -569,93 +558,35 @@ def create_trainer(
     # ── Reward function ───────────────────────────────────────────────────────
     reward_fn = build_reward_function(use_execution=use_execution)
 
-    # ── GRPOConfig — all critical knobs with research-backed defaults ────────
-    # trainer_kwargs can override any of these.
-    config_kwargs: Dict[str, Any] = {
-        "output_dir": output_dir,
-
-        # Batch sizes
-        "per_device_train_batch_size": 1,
-        "gradient_accumulation_steps": 8,
-
-        # Training schedule
-        "num_train_epochs": 3,
-        "learning_rate": 5e-6,        # LoRA + RL: slightly stronger than 1e-6; tune to loss noise
-        "lr_scheduler_type": "cosine",
-        "warmup_steps": 50,
-        "weight_decay": 0.01,
-
-        # GRPO group — G=8 gives stable group variance without excessive Docker I/O
-        "num_generations": 8,
-
-        # Generation (rollout)
-        "max_completion_length": 2048,
-        "temperature": 0.8,
-        "top_p": 0.95,
-
-        # KL / clipping
-        "beta": 0.04,                   # KL penalty (increase → 0.1 if reward collapses)
-        # Note: do not put reward_clip / normalize_rewards here — not standard TRL
-        # GRPOConfig fields; TRL normalizes group rewards internally. For manual
-        # :func:`build_grpo_batch`, set reward_clip in that config dict (default 15.0).
-
-        # Stability
-        "max_grad_norm": 0.5,           # Gradient clipping — critical for RL
-        "seed": 42,
-
-        # Logging / checkpointing
-        "logging_steps": 10,
-        "save_steps": 200,
-        "eval_steps": 100,
-        "report_to": "wandb" if wandb_project else "none",
-    }
-    config_kwargs.update(trainer_kwargs)
-
-    # Common foot-guns: these are not part of TRL's GRPOConfig in many versions.
-    for k in ("reward_clip", "normalize_rewards"):
-        if k in config_kwargs:
-            logger.warning(
-                "[TRAINER] Removing %r from config — not a standard GRPOConfig key; "
-                "TRL normalizes per-group rewards. For manual :func:`build_grpo_batch`, pass reward_clip in that dict.",
-                k,
-            )
-            del config_kwargs[k]
-
-    # Handle version-specific GRPOConfig param names
+    # Unsloth GRPOTrainer is now **mandatory** (no TRL fallback)
     try:
-        grpo_config = GRPOConfig(**config_kwargs)
-    except TypeError:
-        # Older TRL (<0.9) may not have all params — strip unknowns gracefully
-        import inspect
-        valid_keys = set(inspect.signature(GRPOConfig).parameters.keys())
-        filtered = {k: v for k, v in config_kwargs.items() if k in valid_keys}
-        logger.warning(
-            "[TRAINER] GRPOConfig dropped unsupported keys: %s",
-            set(config_kwargs) - valid_keys,
-        )
-        grpo_config = GRPOConfig(**filtered)
+        from unsloth import GRPOTrainer as UnslothGRPOTrainer
+        logger.info("[TRAINER] Using Unsloth GRPOTrainer (mandatory — 2-5x faster, optimized for Qwen2.5)")
+    except ImportError:
+        raise ImportError(
+            "Unsloth is now **mandatory** for training. Please install with:\n"
+            "    pip install --upgrade --force-reinstall --no-deps \\\n"
+            "        unsloth[cu121-torch240]@git+https://github.com/unslothai/unsloth.git"
+        ) from None
 
-    # ── DeepSpeed integration ─────────────────────────────────────────────────
-    if deepspeed_config_path:
-        try:
-            grpo_config.deepspeed = deepspeed_config_path
-        except Exception:
-            pass  # Not all TRL versions expose this field
-
-    trainer = GRPOTrainer(
+    # Unsloth GRPOTrainer
+    trainer = UnslothGRPOTrainer(
         model=model,
-        processing_class=tokenizer,
-        config=grpo_config,
-        reward_funcs=reward_fn,
+        tokenizer=tokenizer,
+        args=None,  # Unsloth uses its own defaults + trainer_kwargs
         train_dataset=dataset,
+        reward_func=reward_fn,
+        max_length=4096,
+        temperature=0.8,
+        top_p=0.95,
+        num_generations=8,
+        **trainer_kwargs,
     )
 
     logger.info(
-        "[TRAINER] Created GRPOTrainer model=%s lora=%s execution=%s G=%d dataset_size=%s",
+        "[TRAINER] Created UnslothGRPOTrainer model=%s 4bit=%s G=8 dataset_size=%s",
         model_name,
-        use_lora,
-        use_execution,
-        config_kwargs["num_generations"],
+        getattr(model, "is_loaded_in_4bit", False),
         len(dataset) if dataset else "none",
     )
 

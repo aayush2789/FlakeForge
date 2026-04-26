@@ -224,62 +224,79 @@ class CurriculumScheduler:
     # ── Internal ─────────────────────────────────────────────────────────────
 
     def _load_cases(self) -> None:
-        """Discover all synthetic cases and assign them to stages."""
-        if not self.synthetic_root.exists():
-            logger.warning(
-                "[CURRICULUM] synthetic_root does not exist: %s — scheduler will use empty case pools.",
-                self.synthetic_root,
-            )
-            return
+        """Discover synthetic cases + manifest-grounded data from the original notebook style.
 
-        for manifest_path in sorted(self.synthetic_root.glob("*/flake_manifest.json")):
-            try:
-                with open(manifest_path, encoding="utf-8") as f:
-                    manifest = json.load(f)
-            except Exception as exc:
-                logger.warning("[CURRICULUM] Failed to read %s: %s", manifest_path, exc)
+        Supports:
+        1. test_repos/synthetic/*/flake_manifest.json (current V3 synthetic harness)
+        2. data/manifests/*.json (notebook-style flake manifests with flake_category, correct_action)
+        3. data/curriculum_stages/**/Stage*.json (curriculum split data)
+        """
+        search_paths = [
+            (self.synthetic_root, "*/flake_manifest.json"),
+            (Path("data/manifests"), "*.json"),
+            (Path("data/curriculum_stages"), "**/*.json"),
+        ]
+
+        loaded = 0
+        for root_path, glob_pattern in search_paths:
+            if not root_path.exists():
                 continue
 
-            case_id = manifest_path.parent.name
-            difficulty = manifest.get("difficulty", "medium").lower()
-            category = manifest.get("category", manifest.get("flake_category", "unknown"))
-            test_id = manifest.get("test_identifier", manifest.get("test_id", "tests/test_flaky.py"))
+            for manifest_path in sorted(root_path.glob(glob_pattern)):
+                try:
+                    with open(manifest_path, encoding="utf-8") as f:
+                        manifest = json.load(f)
+                except Exception as exc:
+                    logger.warning("[CURRICULUM] Failed to read %s: %s", manifest_path, exc)
+                    continue
 
-            case = {
-                "case_id": case_id,
-                "repo_path": str(manifest_path.parent),
-                "manifest_path": str(manifest_path),
-                "manifest": manifest,
-                "difficulty": difficulty,
-                "category": category,
-                "test_identifier": test_id,
-            }
-            self._all_cases.append(case)
+                case_id = manifest_path.parent.name if manifest_path.parent != root_path else manifest_path.stem
+                difficulty = manifest.get("difficulty", manifest.get("stage", "medium")).lower()
+                category = manifest.get(
+                    "category",
+                    manifest.get("flake_category", "unknown")
+                )
+                test_id = manifest.get(
+                    "test_identifier",
+                    manifest.get("test_id", "tests/test_flaky.py")
+                )
 
-            # Assign to stage by difficulty field
-            assigned = False
-            for stage in self.stages:
-                if stage.difficulty == difficulty:
-                    stage.cases.append(case)
-                    assigned = True
-                    break
+                case = {
+                    "case_id": case_id,
+                    "repo_path": str(manifest_path.parent),
+                    "manifest_path": str(manifest_path),
+                    "manifest": manifest,
+                    "difficulty": difficulty,
+                    "category": category,
+                    "test_identifier": test_id,
+                    "source": "synthetic" if "synthetic" in str(manifest_path) else "manifest",
+                }
+                self._all_cases.append(case)
 
-            if not assigned:
-                # Fallback: assign by category membership
+                # Assign to stage
+                assigned = False
                 for stage in self.stages:
-                    if category in stage.allowed_categories:
+                    if stage.difficulty == difficulty or category in stage.allowed_categories:
                         stage.cases.append(case)
                         assigned = True
                         break
 
-            if not assigned:
-                # Last resort: put in hardest stage
-                self.stages[-1].cases.append(case)
+                if not assigned:
+                    self.stages[-1].cases.append(case)  # hardest stage
+
+                loaded += 1
 
         total = sum(len(s.cases) for s in self.stages)
         logger.info(
-            "[CURRICULUM] Loaded %d cases into %d stages: %s",
+            "[CURRICULUM] Loaded %d cases (%d from manifests) into %d stages: %s",
             total,
+            loaded,
             len(self.stages),
             {s.name: len(s.cases) for s in self.stages},
         )
+
+        if total == 0:
+            logger.warning(
+                "[CURRICULUM] No training data found. Create data/manifests/*.json "
+                "with 'flake_category' and 'correct_action' fields, or populate test_repos/synthetic/."
+            )

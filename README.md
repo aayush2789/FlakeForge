@@ -152,3 +152,40 @@ Each scenario includes a flaky module, flaky tests, and a matching solution vari
 ## Validation
 
 The integration test currently collects cleanly under pytest. Full Docker-backed execution is the next runtime validation step.
+
+---
+
+## 🚀 RL Training (Best-of-the-Best Setup — Updated Apr 2026)
+
+**Current stack (after latest improvements):**
+
+- **Unsloth GRPOTrainer** (default) — 2-5× faster than TRL, excellent Qwen2.5 support, 4-bit QLoRA
+- **Curriculum learning** with 3 stages (Easy → Medium → Hard)
+- **Manifest-grounded verifiable reward** (no LLM judge needed)
+- Supports both `test_repos/synthetic/` and `data/manifests/*.json`
+
+### Quick Start (Unsloth Only)
+
+```bash
+# 1. Install training dependencies (includes Unsloth)
+uv pip install -r training-requirements.txt
+
+# 2. Run the full training pipeline
+python -m training.train_grpo --model Qwen/Qwen2.5-7B-Instruct --max-episodes 500
+```
+
+### Key Features (Updated)
+
+- **Unsloth is now mandatory** — no fallback to TRL/PEFT. Training will fail fast and tell you how to install it if missing.
+- Curriculum automatically discovers **both**:
+  - `test_repos/synthetic/*/flake_manifest.json`
+  - `data/manifests/*.json` (your notebook-style manifests with `flake_category`, `correct_action`, etc.)
+  - `data/curriculum_stages/**`
+- Uses **Unsloth GRPOTrainer** with 4-bit QLoRA + gradient checkpointing
+- GRPO group size defaults to 8
+- Full V3 structured JSON output (`{"think": {...}, "patch": {...}}`)
+- W&B logging enabled by default (`flakeforge-rl` project)
+
+**Main entrypoint**: `training/train_grpo.py` (moved from root as requested — sorry for putting it at root earlier).
+
+The original Jupyter notebook (`FlakeForge_RL_Training (2).ipynb`) has been fully integrated with modern Unsloth, proper curriculum that reads your manifest data, and V3 JSON format.
