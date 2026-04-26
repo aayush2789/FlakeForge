@@ -328,6 +328,27 @@ The default training path targets Qwen2.5-Coder models, with QLoRA/Unsloth suppo
 
 This setup is useful because flaky-test repair has sparse success signals. Many attempts do not fully fix the test. GRPO lets the model learn from relative differences: which candidate was more structured, more applicable, closer to the failure site, less hacky, or more stabilizing.
 
+### Training logs: `training/train_grpo_tinker.py` (real env rewards)
+
+We also implemented a Tinker-backed GRPO runner in `training/train_grpo_tinker.py` that splits responsibilities:
+
+- **Remote GPU (Tinker)**: samples a group of candidates per prompt and runs the GRPO update (`forward_backward`, `optim_step`).
+- **Local environment (FlakeForge)**: performs `env.reset()` + `env.step()` so reward is grounded in real execution (patch apply, compile checks, repeated `pytest` runs, and oracle/validator signals).
+
+The logs below show what one rollout “looks like” at the environment level:
+
+- **`[ENV] RESET` / `restored ... from pristine snapshot`**: each attempt starts from a clean checkout so candidates don’t contaminate each other.
+- **`[ENV] STEP ... category=...`**: the predicted root-cause category extracted from the model’s structured `think`.
+- **`[ENV] PATCH success=True ... validation_score=...`**: patch validator result (apply + syntax/compile health).
+- **`[ENV] REWARD total=... breakdown={...}`**: the scalar learning signal plus per-term contributions (format/compile/stability/entropy/anti-hack/oracle/etc).
+- **`[ENV] PREFLIGHT ... should_train: False ... reason: ...`**: the gate that skips cases that are stable, deterministic bugs, or infra-broken (so GRPO budget goes to true flaky-like episodes).
+
+![Training log excerpt 1](images/IMG1.jpeg)
+
+![Training log excerpt 2](images/IMG2.jpeg)
+
+![Training log excerpt 3](images/IMG3.jpeg)
+
 ---
 
 ## 11. Results and Early Insights
