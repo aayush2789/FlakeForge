@@ -1,4 +1,4 @@
-"""FlakeForge V3 Server — environment, reward, and detection."""
+"""FlakeForge V3 Server — environment, reward, detection, and API."""
 
 from .FlakeForge_environment import FlakeForgeEnvironment, create_flakeforge_environment
 from .reward import compute_verifiable_reward
