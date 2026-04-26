@@ -10,6 +10,8 @@ pyproject.toml
 ./client.py
 ./inference.py
 ./models.py
+./run_curriculum.py
+./templates/index.html
 openenv_FlakeForge.egg-info/PKG-INFO
 openenv_FlakeForge.egg-info/SOURCES.txt
 openenv_FlakeForge.egg-info/dependency_links.txt

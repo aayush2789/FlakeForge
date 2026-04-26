@@ -20,7 +20,7 @@ from typing import Any
 class WorkerPool:
     """Minimal worker pool that processes jobs synchronously in tests."""
 
-    QUEUE_CAPACITY = 5  # intentionally small
+
 
     def __init__(self) -> None:
         self._queue: list[Any] = []

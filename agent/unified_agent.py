@@ -35,239 +35,251 @@ class ModelBackend(Protocol):
     def generate(self, prompt: str, *, system_prompt: str) -> str: ...
 
 
-_UNIFIED_RESPONSE_SCHEMA = """{
-  "think": {
-    "claims": [
-      {
-        "claim_id": "c1",
-        "category": "concurrency",
-        "entity": "submit",
-        "location": "source.py::WorkerPool.submit",
-        "ast_node_type": "FunctionDef",
-        "polarity": "present",
-        "predicted_effect": "Removing the false queue-full branch should make the request stable.",
-        "reason": "The worker submit path can return queue_full before taking the lock."
-      }
-    ],
-    "confidence": 0.85
-  },
-  "patch": {
-    "hunks": [
-      {
-        "hunk_id": "h1",
-        "file": "source.py",
-        "search": "        if random.random() < 0.30:\\n            return False\\n\\n        with self._lock:",
-        "replace": "        with self._lock:",
-        "rationale": "Removes the false queue-full branch so capacity is checked only inside the lock.",
-        "addresses_claim": "c1"
-      }
-    ]
-  }
-}"""
+UNIFIED_SYSTEM_PROMPT = """You are FlakeForge, a debugging agent that fixes flaky Python tests.
 
-UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that fixes flaky tests.
+Reply with ONE JSON object. No markdown, no XML, no commentary.
 
-Respond with EXACTLY ONE JSON object matching this schema:
-{_UNIFIED_RESPONSE_SCHEMA}
+Shape (single-line example, no embedded newlines):
+{"think":{"claims":[{"category":"async_wait","entity":"asyncio.wait_for","location":"source.py::fetch","polarity":"present","reason":"timeout=0.5 too small for slow runs"}],"confidence":0.85},"patch":{"hunks":[{"file":"source.py","search":"timeout=0.5","replace":"timeout=5.0"}]}}
 
-ROOT_CAUSE_TYPES: async_wait, concurrency, test_order_dependency,
-resource_leak, shared_state, network, platform_dependency, nondeterminism,
-import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
+CATEGORIES (pick exactly ONE per claim):
+async_wait, concurrency, test_order_dependency, resource_leak, shared_state,
+network, platform_dependency, nondeterminism, import_side_effect,
+module_cache_pollution, fixture_scope_leak, mock_residue, unknown.
 
-Important root-cause guidance:
-- Prefer patching SOURCE UNDER TEST over TEST SOURCE. Only patch tests when the assertion or fixture is the root cause.
-- Do NOT choose async_wait unless the failing flow actually uses async, await, wait_for, timeout, or sleep.
-- Do NOT choose module_cache_pollution just because module-level globals exist. Use it only for import/module cache behavior such as lru_cache, sys.modules, import-time side effects, or cache decorators.
-- If failures mention queue_full, WorkerPool, submit, QUEUE_CAPACITY, or random.random() in a queue path, classify as concurrency or nondeterminism and patch source.py::WorkerPool.submit.
+PATCH RULES (read carefully — failing these breaks the run):
+1. "search" must be ONE single line copied VERBATIM from SOURCE UNDER TEST.
+   - Same leading spaces. No tabs. No trailing spaces.
+   - Pick a line that is unique in the file (a distinctive expression or assignment).
+2. Do NOT put line breaks inside "search" or "replace". No "\\n" sequences.
+   If you need a multi-line edit, pick the SHORTEST single anchor line and
+   express the whole new block in "replace" using JSON's standard "\\n" escape
+   ONLY when truly necessary (prefer single-line replacements).
+3. "replace" must keep the SAME leading indentation as the search line.
+4. Inside JSON strings escape only what JSON requires:
+     " becomes \\"
+     \\ becomes \\\\
+   Never invent extra backslashes. Never add stray commas after backslashes.
+5. Prefer the smallest fix. Never add sleep(), retry decorators, or @pytest.mark.skip.
+6. Patch source.py, not the test file, unless the bug is in the test itself.
+7. If you cannot find a clear fix, return:
+   {"think":{"claims":[{"category":"unknown","entity":"","location":"","polarity":"present","reason":"need more evidence"}],"confidence":0.2},"patch":{"hunks":[]}}
 
-Rules for "think":
-- "think.claims" is a non-empty list.
-- Each claim object must use exactly these model-facing keys:
-  claim_id, category, entity, location, ast_node_type, polarity, predicted_effect, reason.
-- "category" must be one ROOT_CAUSE_TYPES value.
-- "polarity" is "present" when you assert the bug exists in the current code.
-- "predicted_effect" is mandatory; forecast the expected pass-rate change.
-- Do not include validator-filled keys such as verdict, oracle_score, format_penalty, applied, or apply_error.
-
-Rules for "patch":
-- "patch.hunks" is a non-empty list of search/replace operations.
-- Each hunk object must use exactly these model-facing keys:
-  hunk_id, file, search, replace, rationale, addresses_claim.
-- "file" must be a repo-relative path.
-- "search" must be copied VERBATIM from the source shown in the observation,
-  including the EXACT leading whitespace of every line (do NOT trim or re-indent).
-- "replace" must use the SAME absolute indentation as the lines it replaces.
-  When patching a method body, every replacement line must start with the same
-  indentation as the corresponding lines in the source file (typically 4 or 8
-  spaces from the left margin). Do NOT add or remove leading whitespace.
-- Prefer SMALL hunks: target only the buggy lines, not the entire function.
-- "replace" may be an empty string "" to delete the search block.
-- "addresses_claim" must equal a claim_id from "think.claims".
-
-JSON STRING FORMAT FOR "search" / "replace":
-- Both fields are JSON strings. Use \\n for line breaks and \\\" for quotes.
-- Tabs are forbidden; use spaces only.
-- Never wrap "search" or "replace" in markdown fences or extra quotes.
-
-GLOBAL RULES:
-- Do NOT output XML tags such as <think> or <patch>.
-- Do NOT wrap your answer in Markdown fences (no ```).
-- Do NOT add text before or after the JSON object.
-- Do NOT add sleep() calls, retry decorators, or @pytest.mark.skip.
-- Prefer minimal, surgical fixes that address the root cause.
-- If an earlier patch failed validation, do not switch to unrelated categories. Use the same evidence and produce a more exact source.py hunk.
-- If uncertain about root cause, use category "unknown" rather than guessing.
-
-PENALTY: Any response that is not one valid JSON object receives a format penalty that reduces your reward.
+NEVER:
+- Wrap the JSON in ```json ... ``` fences.
+- Emit <think> or <patch> tags.
+- Add prose before or after the JSON.
+- Repeat a category that already failed twice in the run history.
 """
 
 
-def build_unified_prompt(observation: FlakeForgeObservation) -> str:
-    parts = ["=== FLAKY TEST OBSERVATION ===\n"]
+_CATEGORY_CHEATSHEET = (
+    "=== HOW TO PICK A CATEGORY (read RECENT RUNS / LAST FAILURE first) ===\n"
+    "- TimeoutError, hang, slow run, asyncio.wait_for / await        -> async_wait\n"
+    "- random.random(), time.time(), datetime.now(), shuffle         -> nondeterminism\n"
+    "- threads, Lock/Event/Queue, race messages, queue_full           -> concurrency\n"
+    "- globals reused across tests, leak symptoms after second run   -> shared_state\n"
+    "- requests/httpx/socket flakes, ConnectionError                  -> network\n"
+    "- @pytest.fixture(scope=session/module) with mutable state       -> fixture_scope_leak\n"
+    "- @lru_cache, sys.modules reuse, cache decorators                -> module_cache_pollution\n"
+    "- top-level side effects at import time                          -> import_side_effect\n"
+    "- patch() / monkeypatch not torn down                            -> mock_residue\n"
+    "- only fails when run after another test                         -> test_order_dependency\n"
+    "- Linux-only / Windows-only / freeing socket ports               -> platform_dependency\n"
+    "- file/socket/handle not closed                                  -> resource_leak\n"
+    "- nothing matches confidently                                    -> unknown"
+)
 
-    parts.append(f"Test: {observation.test_identifier}")
-    parts.append(f"Step: {observation.step}/{observation.step + observation.steps_remaining}")
-    parts.append(f"Current pass rate: {observation.current_pass_rate:.2f}")
-    parts.append(f"Baseline pass rate: {observation.baseline_pass_rate:.2f}")
+
+def _last_attempt_diagnosis(observation: FlakeForgeObservation) -> List[str]:
+    """Summarise the most recent step's outcome in one short block.
+
+    The 7B model needs an explicit verdict so it can decide whether to keep
+    the same hypothesis (clean failure / unapplied patch) or switch to a new
+    one (regression / repeated dead-end).
+    """
+    history = observation.think_history or []
+    patches = observation.patches_applied or []
+
+    if not history and not patches:
+        return []
+
+    last_think = history[-1] if history else {}
+    last_patch = patches[-1] if patches else None
+
+    cats = last_think.get("categories") or []
+    primary_cat = cats[0] if cats else "unknown"
+    entities = last_think.get("entities") or []
+    pr_after = last_think.get("pass_rate_after", observation.current_pass_rate)
+    pr_before = observation.baseline_pass_rate
+    reward = last_think.get("reward", observation.last_reward)
+
+    applied = bool(last_patch and last_patch.applied_successfully)
+    files = ", ".join(last_patch.target_files) if last_patch else "—"
+
+    if not applied:
+        outcome = "PATCH DID NOT APPLY (search text not found in file)"
+        verdict = (
+            "Fix this turn: keep the SAME root cause but rewrite \"search\" as ONE shorter, "
+            "more distinctive line copied verbatim from SOURCE UNDER TEST."
+        )
+    elif pr_after < pr_before - 0.05:
+        outcome = f"REGRESSION applied {pr_before:.2f} -> {pr_after:.2f}"
+        verdict = (
+            "The previous category was wrong. Pick a DIFFERENT category this turn "
+            "and patch a different line."
+        )
+    elif pr_after > pr_before + 0.05:
+        outcome = f"IMPROVED {pr_before:.2f} -> {pr_after:.2f}"
+        verdict = "Keep refining the same category; tighten the patch."
+    else:
+        outcome = f"NO EFFECT {pr_before:.2f} -> {pr_after:.2f}"
+        verdict = (
+            "Same category may still be right but the line you patched was not the cause. "
+            "Pick a DIFFERENT line, or switch to a related category."
+        )
+
+    lines = [
+        f"Hypothesis: {primary_cat}",
+        f"Entities:   {', '.join(entities[:3]) if entities else '—'}",
+        f"Files:      {files}",
+        f"Outcome:    {outcome}",
+        f"Reward:     {reward:+.3f}",
+        f"Verdict:    {verdict}",
+    ]
+    return lines
+
+
+def _scenario_hints(observation: FlakeForgeObservation) -> List[str]:
+    """Per-state guidance the model can act on without re-reading everything."""
+    history = observation.think_history or []
+    if not history:
+        return [
+            "- This is the FIRST step. Pick the most likely category from RECENT RUNS.",
+            "- Patch source.py (not tests/) unless the test itself is buggy.",
+            "- Keep \"search\" to ONE distinctive single line from SOURCE UNDER TEST.",
+        ]
+
+    cat_counts: Dict[str, int] = {}
+    for h in history:
+        cats = h.get("categories") or ["unknown"]
+        cat_counts[cats[0]] = cat_counts.get(cats[0], 0) + 1
+    repeated = [c for c, n in cat_counts.items() if n >= 2]
+
+    hints: List[str] = []
+    if repeated:
+        hints.append(
+            f"- You already tried {', '.join(sorted(repeated))} more than once with no success. "
+            "Do NOT pick those categories again unless you have new evidence."
+        )
+    hints.extend([
+        "- If your previous patch did not apply: shorten \"search\" to ONE distinctive line.",
+        "- If pass_rate dropped: the last category was wrong; switch.",
+        "- If pass_rate did not move: try a different LINE (still in source.py) or a related category.",
+    ])
+    return hints
+
+
+def build_unified_prompt(observation: FlakeForgeObservation) -> str:
+    """Compact prompt designed for small (≤7B) models.
+
+    Layout (each section is short and bounded):
+      1. TASK header         — what test, what step, what pass-rate goal.
+      2. SOURCE UNDER TEST   — the file the model should patch (≤1800 chars).
+      3. TEST FUNCTION       — the test that is flaky (≤1000 chars).
+      4. LAST FAILURE        — tail of the most recent failing stack (≤900 chars).
+      5. RECENT RUNS         — at most 5 most recent run outcomes.
+      6. DEEP SIGNALS        — single-line summary of static / dynamic alerts.
+      7. TARGETING HINTS     — top causal hints (≤4).
+      8. LAST ATTEMPT        — verdict on the previous step (only if any).
+      9. SCENARIO GUIDE      — what to do this turn given the state above.
+     10. CATEGORY HINTS      — short cheatsheet to map symptoms -> category.
+     11. YOUR TURN           — one-line schema reminder, single-line example.
+    """
+    parts: List[str] = []
+
+    parts.append("=== TASK ===")
+    parts.append(f"Test:       {observation.test_identifier}")
+    parts.append(f"Step:       {observation.step + 1} of {observation.step + observation.steps_remaining}")
+    parts.append(
+        f"Pass rate:  baseline={observation.baseline_pass_rate:.2f}  "
+        f"current={observation.current_pass_rate:.2f}  goal=1.00"
+    )
     parts.append("")
 
-    if observation.test_function_source:
-        parts.append("=== TEST SOURCE ===")
-        parts.append(observation.test_function_source[:3000])
-        parts.append("")
-
     if observation.source_under_test:
-        parts.append("=== SOURCE UNDER TEST ===")
-        parts.append(observation.source_under_test[:3000])
+        parts.append("=== SOURCE UNDER TEST  (PATCH THIS FILE: source.py) ===")
+        parts.append(observation.source_under_test[:1800])
         parts.append("")
 
-    if observation.run_history:
-        parts.append("=== RUN HISTORY (last 10) ===")
-        for r in observation.run_history[-10:]:
-            status = "PASS" if r.passed else f"FAIL({r.error_type or 'unknown'})"
-            msg = f"  {status} [{r.duration_ms}ms]"
-            if r.error_message:
-                msg += f" - {r.error_message[:100]}"
-            parts.append(msg)
+    if observation.test_function_source:
+        parts.append("=== TEST FUNCTION ===")
+        parts.append(observation.test_function_source[:1000])
         parts.append("")
 
     if observation.failing_stack_trace:
-        parts.append("=== FAILING STACK TRACE ===")
-        parts.append(observation.failing_stack_trace[:2000])
+        parts.append("=== LAST FAILURE (tail) ===")
+        parts.append(observation.failing_stack_trace[-900:])
+        parts.append("")
+
+    if observation.run_history:
+        parts.append("=== RECENT RUNS (last 5) ===")
+        for r in observation.run_history[-5:]:
+            verdict = "PASS" if r.passed else f"FAIL({r.error_type or 'err'})"
+            line = f"- {verdict}  {r.duration_ms}ms"
+            if not r.passed and r.error_message:
+                line += f"  msg={r.error_message[:80]}"
+            parts.append(line)
         parts.append("")
 
     deep: List[str] = []
-    if observation.module_cache_violations:
-        deep.append(f"Module cache violations: {', '.join(observation.module_cache_violations[:5])}")
-    if observation.fixture_scope_risks:
-        deep.append(f"Fixture scope risks: {', '.join(observation.fixture_scope_risks[:5])}")
-    if observation.mock_residue_sites:
-        deep.append(f"Mock residue sites: {', '.join(observation.mock_residue_sites[:5])}")
-    if observation.import_side_effect_files:
-        deep.append(f"Import side effects: {', '.join(observation.import_side_effect_files[:5])}")
     if observation.async_contamination_alive:
-        deep.append("ALERT: Async tasks/threads survived past test boundary!")
-    if deep:
-        parts.append("=== DEEP FLAKINESS SIGNALS ===")
-        parts.extend(deep)
-        parts.append("")
-
-    if observation.failure_frontier:
-        parts.append("=== CAUSAL FRONTIER ===")
-        parts.append(f"Failure site: {observation.failure_frontier}")
-        if observation.call_chain_to_frontier:
-            parts.append(f"Call chain: {' → '.join(observation.call_chain_to_frontier)}")
-        if observation.boundary_crossings:
-            parts.append(f"Boundary crossings: {', '.join(observation.boundary_crossings)}")
-        parts.append("")
-
+        deep.append("async tasks/threads survived past test boundary")
+    if observation.module_cache_violations:
+        deep.append(f"module-cache hot spots: {', '.join(observation.module_cache_violations[:3])}")
+    if observation.fixture_scope_risks:
+        deep.append(f"fixture-scope risks: {', '.join(observation.fixture_scope_risks[:3])}")
+    if observation.mock_residue_sites:
+        deep.append(f"mock residue: {', '.join(observation.mock_residue_sites[:3])}")
+    if observation.import_side_effect_files:
+        deep.append(f"import side effects: {', '.join(observation.import_side_effect_files[:3])}")
     if observation.order_dependency_detected:
-        parts.append("⚠️ ORDER DEPENDENCY: Test fails when run in reverse order")
+        deep.append("test order matters (fails when reordered)")
     if observation.infrastructure_sensitive:
-        parts.append("⚠️ INFRASTRUCTURE SENSITIVE: Test outcome changes under resource pressure")
-
-    if observation.file_tree:
-        parts.append("\n=== FILE TREE ===")
-        parts.extend(observation.file_tree[:20])
+        deep.append("infrastructure-sensitive (fails under resource pressure)")
+    if deep:
+        parts.append("=== DEEP SIGNALS ===")
+        parts.extend(f"- {s}" for s in deep)
+        parts.append("")
 
     if observation.causal_hints:
-        parts.append("\n=== TARGETING HINTS ===")
-        parts.extend([f"- {hint}" for hint in observation.causal_hints[:10]])
-        parts.append(
-            "Prioritize patch hunks in the highest-score hinted files unless direct evidence contradicts them."
-        )
+        parts.append("=== TARGETING HINTS ===")
+        parts.extend(f"- {h}" for h in observation.causal_hints[:4])
+        parts.append("")
 
-    if observation.patches_applied:
-        parts.append("\n=== PREVIOUS PATCHES (this episode) ===")
-        for p in observation.patches_applied[-3:]:
-            s = "✓" if p.applied_successfully else "✗"
-            parts.append(
-                f"  {s} {', '.join(p.target_files)} ({p.lines_changed} lines)"
-                f" → pass_rate={p.pass_rate_after:.2f}"
-            )
+    diag = _last_attempt_diagnosis(observation)
+    if diag:
+        parts.append("=== LAST ATTEMPT ===")
+        parts.extend(diag)
+        parts.append("")
 
-    if observation.last_think_text:
-        parts.append("\n=== PREVIOUS REASONING (JSON) ===")
-        parts.append(observation.last_think_text[:800])
+    parts.append("=== SCENARIO GUIDE (do this now) ===")
+    parts.extend(_scenario_hints(observation))
+    parts.append("")
 
-    # ── Hypothesis trail: show the full per-step history so the agent can ────
-    # learn from its own trajectory and avoid repeating failed hypotheses.
-    if observation.think_history:
-        parts.append("\n=== HYPOTHESIS TRAIL (all prior steps) ===")
+    parts.append(_CATEGORY_CHEATSHEET)
+    parts.append("")
 
-        # Count category repetitions so we can flag staleness.
-        cat_counts: Dict[str, int] = {}
-        for h in observation.think_history:
-            primary = h["categories"][0] if h.get("categories") else "unknown"
-            cat_counts[primary] = cat_counts.get(primary, 0) + 1
-
-        for h in observation.think_history:
-            step = h.get("step", "?")
-            cats = h.get("categories", [])
-            ents = h.get("entities", [])
-            oracle = h.get("oracle_score")
-            pr = h.get("pass_rate_after", 0.0)
-            rew = h.get("reward", 0.0)
-
-            oracle_str = f"{oracle:+.2f}" if oracle is not None else "N/A"
-            ent_str = ", ".join(ents[:3]) if ents else "—"
-            cat_str = " + ".join(cats[:2]) if cats else "unknown"
-
-            flag = ""
-            if cats and cat_counts.get(cats[0], 0) > 1:
-                flag = " ⚠️ REPEATED"
-
-            parts.append(
-                f"  Step {step}: [{cat_str}]{flag}  entities=[{ent_str}]"
-                f"  oracle={oracle_str}  pass_rate={pr:.2f}  reward={rew:+.3f}"
-            )
-
-        # Collect stale categories (tried ≥ 2 times without achieving pass_rate=1.0).
-        stale = [cat for cat, cnt in cat_counts.items() if cnt >= 2]
-        if stale:
-            parts.append(
-                f"\n⛔ STALE HYPOTHESES (tried {', '.join(stale)} multiple times with no solution)."
-            )
-            parts.append(
-                "Your reward will be HEAVILY penalised if you repeat these categories again."
-            )
-            parts.append("You MUST propose a DIFFERENT root cause category and NEW entities.")
-
-    parts.append("\n=== YOUR TURN ===")
-    turn_instruction = "Output one JSON object with top-level keys think and patch. No XML, no Markdown fences."
-    if observation.think_history:
-        stale_cats = {
-            h["categories"][0]
-            for h in observation.think_history
-            if h.get("categories")
-        }
-        attempted = ", ".join(sorted(stale_cats))
-        turn_instruction = (
-            f"IMPORTANT: You already tried [{attempted}]. "
-            "Propose a genuinely DIFFERENT root cause. "
-            "Output one JSON object with top-level keys think and patch. No XML, no Markdown fences."
-        )
-    parts.append(turn_instruction)
+    parts.append("=== YOUR TURN ===")
+    parts.append("Reply with ONE JSON object. No markdown, no XML, no commentary.")
+    parts.append("Single-line example shape (do NOT copy values, just the structure):")
+    parts.append(
+        '{"think":{"claims":[{"category":"<one>","entity":"<symbol>",'
+        '"location":"source.py::<func>","polarity":"present","reason":"<short>"}],'
+        '"confidence":0.0},"patch":{"hunks":[{"file":"source.py",'
+        '"search":"<one distinctive line copied from SOURCE UNDER TEST>",'
+        '"replace":"<replacement line>"}]}}'
+    )
     return "\n".join(parts)
 
 
@@ -643,8 +655,13 @@ class UnifiedFlakeForgeAgent:
             )
             retry_prompt = (
                 prompt
-                + "\n\nSTRICT RETRY: Return EXACTLY one valid JSON object matching the schema. "
-                + "Do not include markdown, prose, XML tags, or escaped pseudo-diff text."
+                + "\n\n=== STRICT RETRY ===\n"
+                + "Your previous reply was not valid JSON or had no usable hunks.\n"
+                + "Common mistakes to AVOID this time:\n"
+                + "- Multi-line \"search\" (use ONE single line copied from SOURCE UNDER TEST).\n"
+                + "- Stray backslashes (\\\\\\\\, \\,, trailing \\). Inside JSON only \\\" and \\\\ are needed.\n"
+                + "- Markdown fences, XML tags, or any text outside the JSON object.\n"
+                + "Reply with EXACTLY one JSON object that matches the shape shown above."
             )
             retry_raw = self.backend.generate(retry_prompt, system_prompt=self.system_prompt)
             (

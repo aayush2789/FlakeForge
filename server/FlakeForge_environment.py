@@ -156,6 +156,9 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self.chaos_runner = chaos_runner
         self._episode_state: Optional[EpisodeState] = None
         self._openenv_state: Optional[FlakeForgeState] = None
+        # First successful reset() captures a full .py tree snapshot; every later reset() restores
+        # it so consecutive episodes (and GRPO group rollouts that reset each time) do not stack patches.
+        self._pristine_file_snapshots: Optional[Dict[str, str]] = None
 
     def reset(
         self,
@@ -168,7 +171,10 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         # Allow remote clients to configure env at reset-time.
         if "repo_path" in kwargs and kwargs["repo_path"]:
-            self.repo_path = Path(str(kwargs["repo_path"]))
+            new_repo = Path(str(kwargs["repo_path"]))
+            if self.repo_path.resolve() != new_repo.resolve():
+                self._pristine_file_snapshots = None  # different tree — re-baseline on next line
+            self.repo_path = new_repo
         if "test_identifier" in kwargs and kwargs["test_identifier"]:
             self.test_identifier = str(kwargs["test_identifier"])
         if "max_steps" in kwargs and kwargs["max_steps"] is not None:
@@ -178,6 +184,16 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         episode_id = episode_id or str(uuid.uuid4())[:8]
         logger.info("[ENV] RESET episode=%s test=%s", episode_id, self.test_identifier)
+
+        if self._pristine_file_snapshots:
+            try:
+                restore_repo_files(self.repo_path, self._pristine_file_snapshots)
+                logger.info(
+                    "[ENV] Restored %d .py file(s) from pristine snapshot",
+                    len(self._pristine_file_snapshots),
+                )
+            except Exception as exc:
+                logger.warning("[ENV] Pristine restore failed (non-fatal): %s", exc)
 
         self._reset_demo_repo_if_present()
 
@@ -280,6 +296,13 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             self._episode_state.last_done_reason = preflight["summary"]["reason"]
             observation.done = True
             observation.done_reason = self._episode_state.last_done_reason
+
+        if self._pristine_file_snapshots is None:
+            self._pristine_file_snapshots = dict(self._collect_sources())
+            logger.info(
+                "[ENV] Recorded pristine snapshot of %d .py file(s) for future resets",
+                len(self._pristine_file_snapshots),
+            )
         return observation
 
     def step(
