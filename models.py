@@ -89,17 +89,29 @@ class StructuredThink(BaseModel):
 
 
 class PatchHunk(BaseModel):
-    """One search/replace hunk expressed as structured fields."""
+    """One search/replace hunk expressed as structured fields.
+
+    Modes (inference may set ``file`` from the observation; models may omit it):
+    - **Search/replace:** non-empty ``search`` + ``replace`` (fuzzy / indent matching at apply time).
+    - **Line replace:** ``line_number`` (1-based) + ``replace`` = full new line; ``search`` may be
+      empty until the runtime expands it from disk for the legacy patch string.
+    """
 
     hunk_id: str = Field(description="Unique ID within this patch block, e.g. 'h1'")
     file: str = Field(
-        description="Repo-relative path to the file being patched, e.g. 'pybrake/notifier.py'"
+        default="",
+        description="Repo-relative path; leave empty for inference to use observation.source_file",
     )
     search: str = Field(
-        description="Exact lines to find in the file (copied verbatim, preserving indentation)"
+        default="",
+        description="Key line(s) or block to find (approximate is OK; applier can fuzzy-match)",
+    )
+    line_number: Optional[int] = Field(
+        default=None,
+        description="1-based line index to replace in target file; alternative to search block",
     )
     replace: str = Field(
-        description="Lines that replace the search block (may be empty string to delete)"
+        description="Lines that replace the search block (may be empty string to delete), or the full new line when using line_number",
     )
     rationale: str = Field(
         default="",
@@ -194,6 +206,10 @@ class FlakeForgeObservation(Observation):
 
     test_function_source: str
     source_under_test: str
+    source_file: str = Field(
+        default="",
+        description="Repo-relative path to the primary file under test (SUT), for patches without a model-chosen file",
+    )
     relevant_imports: List[str] = Field(default_factory=list)
     file_tree: List[str] = Field(default_factory=list)
     async_markers: List[str] = Field(default_factory=list)

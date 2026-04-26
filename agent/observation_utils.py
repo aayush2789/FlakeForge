@@ -38,6 +38,7 @@ def build_observation_from_state(state: Any) -> FlakeForgeObservation:
         steps_remaining=state.steps_remaining,
         test_function_source=state.current_test_source,
         source_under_test=state.current_source_under_test,
+        source_file=getattr(state, "source_file", None) or "",
         run_history=state.run_history[-20:] if state.run_history else [],
         current_pass_rate=state.current_pass_rate,
         baseline_pass_rate=state.baseline_pass_rate,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 
 try:
@@ -30,100 +31,121 @@ except ImportError:
 
 logger = get_logger(__name__)
 
+# Fuzzy/approximate "search" is OK — applier can align indentation; line_number mode is allowed.
+
+
+def _target_line_snippets(source: str, limit: int = 6) -> List[str]:
+    """Short lines the model is likely to edit (timeouts, async, etc.)."""
+    if not source:
+        return []
+    out: List[str] = []
+    keys = (
+        "timeout", "wait_for", "asyncio", "await ", "async def", "sleep(",
+        "thread", "lock", "random", "time.", "patch(", "monkeypatch",
+    )
+    for line in source.splitlines():
+        low = line.lower()
+        if any(k in low for k in keys):
+            s = line.rstrip()[:220]
+            if s.strip() and s not in out:
+                out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _primary_target_line(source: str) -> str:
+    """One high-salience line to copy exactly (or use line_number + replace)."""
+    if not source:
+        return ""
+    for pat in (r"timeout", r"asyncio\.", r"async def", r"await ", r"wait_for", r"sleep\("):
+        for line in source.splitlines():
+            if re.search(pat, line, re.I) and line.strip():
+                return line.rstrip()[:500]
+    for line in source.splitlines():
+        if line.strip():
+            return line.rstrip()[:500]
+    return ""
+
 
 class ModelBackend(Protocol):
     def generate(self, prompt: str, *, system_prompt: str) -> str: ...
 
 
-_UNIFIED_RESPONSE_SCHEMA = """{
+UNIFIED_SYSTEM_PROMPT = """\
+You are FlakeForge, a debugging agent that fixes flaky Python tests.
+
+OUTPUT: exactly one JSON object — no text before or after, no markdown fences, no XML tags.
+
+Do NOT include a "file" field in patch hunks — the run assigns PATCH TARGET FILE for you.
+
+{
   "think": {
     "claims": [
       {
         "claim_id": "c1",
-        "category": "concurrency",
-        "entity": "submit",
-        "location": "source.py::WorkerPool.submit",
-        "ast_node_type": "FunctionDef",
+        "category": "<category>",
+        "entity": "function_or_class_name",
+        "location": "path/to/file.py::Class.method",
         "polarity": "present",
-        "predicted_effect": "Removing the false queue-full branch should make the request stable.",
-        "reason": "The worker submit path can return queue_full before taking the lock."
+        "reason": "one sentence why it causes flakiness"
       }
     ],
-    "confidence": 0.85
+    "confidence": 0.8
   },
   "patch": {
     "hunks": [
       {
         "hunk_id": "h1",
-        "file": "source.py",
-        "search": "        if random.random() < 0.30:\\n            return False\\n\\n        with self._lock:",
-        "replace": "        with self._lock:",
-        "rationale": "Removes the false queue-full branch so capacity is checked only inside the lock.",
+        "search": "a key line or small block from TARGET LINE / SOURCE (approximate is OK)",
+        "replace": "the fixed line(s), same indent as the original",
         "addresses_claim": "c1"
       }
     ]
   }
-}"""
+}
 
-UNIFIED_SYSTEM_PROMPT = f"""You are FlakeForge, an expert debugging agent that fixes flaky tests.
+OR use line mode (no search needed; give 1-based line number and full new line):
+  "hunks": [ { "hunk_id": "h1", "line_number": 42, "replace": "    x = 1" } ]
 
-Respond with EXACTLY ONE JSON object matching this schema:
-{_UNIFIED_RESPONSE_SCHEMA}
+CATEGORIES — choose based on what the test logs and source show:
+  async_wait           logs: TimeoutError, asyncio.TimeoutError, "timed out"
+                       fix:  increase timeout, add await, use asyncio.wait_for
+  concurrency          logs: race condition, assertion changes between runs, sporadic failure
+                       fix:  add threading.Lock, fix shared mutable access
+  test_order_dependency  logs: passes alone (-k), fails in full suite
+                       fix:  add teardown/setUp to isolate state between tests
+  resource_leak        logs: "Address already in use", file descriptor exhaustion
+                       fix:  add close/teardown, use context manager
+  shared_state         logs: global or class-level variable mutated in one test breaks another
+                       fix:  reset state in fixture teardown or setUp
+  network              logs: ConnectionRefusedError, DNS failure, slow remote call
+                       fix:  mock the network call
+  nondeterminism       logs: float comparison fails, dict ordering differs, random output
+                       fix:  seed random, use assertAlmostEqual, sort output
+  import_side_effect   logs: module-level code executes on import and changes global state
+                       fix:  move initialization inside a function
+  module_cache_pollution  source: @lru_cache, sys.modules mutation, module-level globals
+                       fix:  call cache_clear() in fixture teardown
+  fixture_scope_leak   source: session/module fixture returns mutable object without yield
+                       fix:  add yield and cleanup after yield
+  mock_residue         source: mock.patch() called without with-block or .stop()
+                       fix:  use "with mock.patch(...)" or call patcher.stop() in teardown
+  unknown              use when evidence is genuinely unclear
 
-ROOT_CAUSE_TYPES: async_wait, concurrency, test_order_dependency,
-resource_leak, shared_state, network, platform_dependency, nondeterminism,
-import_side_effect, module_cache_pollution, fixture_scope_leak, mock_residue, unknown
+PATCH RULES:
+- Prefer the TARGET LINE the prompt gives you: copy that line for "search" when possible, or set "line_number" + "replace".
+- "search" can be a key line or short block (applier can fuzzy/match; close is OK).
+- "replace" must use the same indentation as the line(s) you change.
+- Prefer patching the source-under-test over test code unless the test/fixture is the bug.
+- Keep hunks small. "replace" may be "" to delete a small block.
+- Do NOT add sleep(), @pytest.mark.skip, or broad refactors.
+- For async / timeout: increase timeout= values or use asyncio.wait_for with a higher timeout; keep call shape.
 
-Important root-cause guidance:
-- Prefer patching SOURCE UNDER TEST over TEST SOURCE. Only patch tests when the assertion or fixture is the root cause.
-- Do NOT choose async_wait unless the failing flow actually uses async, await, wait_for, timeout, or sleep.
-- Do NOT choose module_cache_pollution just because module-level globals exist. Use it only for import/module cache behavior such as lru_cache, sys.modules, import-time side effects, or cache decorators.
-- If failures mention queue_full, WorkerPool, submit, QUEUE_CAPACITY, or random.random() in a queue path, classify as concurrency or nondeterminism and patch source.py::WorkerPool.submit.
-- For the moderate_load_jitter_flaky repo, the expected target is source.py::WorkerPool.submit. Remove the random queue-full branch; do not patch tests/test_flaky.py.
-
-Rules for "think":
-- "think.claims" is a non-empty list.
-- Each claim object must use exactly these model-facing keys:
-  claim_id, category, entity, location, ast_node_type, polarity, predicted_effect, reason.
-- "category" must be one ROOT_CAUSE_TYPES value.
-- "polarity" is "present" when you assert the bug exists in the current code.
-- "predicted_effect" is mandatory; forecast the expected pass-rate change.
-- Do not include validator-filled keys such as verdict, oracle_score, format_penalty, applied, or apply_error.
-
-Rules for "patch":
-- "patch.hunks" is a non-empty list of search/replace operations.
-- Each hunk object must use exactly these model-facing keys:
-  hunk_id, file, search, replace, rationale, addresses_claim.
-- "file" must be a repo-relative path.
-- "search" must be copied VERBATIM from the source shown in the observation,
-  including the EXACT leading whitespace of every line (do NOT trim or re-indent).
-- "replace" must use the SAME absolute indentation as the lines it replaces.
-  When patching a method body, every replacement line must start with the same
-  indentation as the corresponding lines in the source file (typically 4 or 8
-  spaces from the left margin). Do NOT add or remove leading whitespace.
-- Prefer SMALL hunks: target only the buggy lines, not the entire function.
-- "replace" may be an empty string "" to delete the search block.
-- "addresses_claim" must equal a claim_id from "think.claims".
-
-JSON STRING FORMAT FOR "search" / "replace":
-- Both fields are JSON strings. Use \\n for line breaks and \\\" for quotes.
-- Tabs are forbidden; use spaces only.
-- Never wrap "search" or "replace" in markdown fences or extra quotes.
-
-GLOBAL RULES:
-- Do NOT output XML tags such as <think> or <patch>.
-- Do NOT wrap your answer in Markdown fences (no ```).
-- Do NOT add text before or after the JSON object.
-- Do NOT add sleep() calls, retry decorators, or @pytest.mark.skip.
-- Prefer minimal, surgical fixes that address the root cause.
-- If an earlier patch failed validation, do not switch to unrelated categories. Use the same evidence and produce a more exact source.py hunk.
-- If uncertain about root cause, use category "unknown" rather than guessing.
-
-PENALTY: Any response that is not one valid JSON object receives a format penalty that reduces your reward.
-"""
+INVALID JSON = zero reward. Output only the JSON object."""
 
 
-def build_unified_prompt(observation: FlakeForgeObservation) -> str:
+def build_unified_prompt(observation: FlakeForgeObservation, *, retry_hint: Optional[str] = None) -> str:
     parts = ["=== FLAKY TEST OBSERVATION ===\n"]
 
     parts.append(f"Test: {observation.test_identifier}")
@@ -142,20 +164,33 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
         parts.append(observation.source_under_test[:3000])
         parts.append("")
 
-        src_lower = observation.source_under_test.lower()
-        if (
-            "queue_full" in src_lower
-            and "workerpool" in src_lower
-            and "random.random() < 0.30" in observation.source_under_test
-        ):
-            parts.append("=== HIGH-CONFIDENCE LOCALIZATION HINT ===")
-            parts.append("This repo's observed flake is the false queue_full path in source.py::WorkerPool.submit.")
-            parts.append("Use category concurrency. Patch source.py, not tests/test_flaky.py.")
-            parts.append("Remove this exact branch from WorkerPool.submit:")
-            parts.append("        if random.random() < 0.30:")
-            parts.append("            return False")
-            parts.append("Keep the existing with self._lock: capacity check.")
+    if getattr(observation, "source_file", None):
+        parts.append("=== PATCH TARGET FILE (use this; do not choose another file in JSON) ===")
+        parts.append(str(observation.source_file))
+        parts.append("")
+
+    sut = observation.source_under_test or ""
+    if sut:
+        ptl = _primary_target_line(sut)
+        if ptl:
+            parts.append("=== TARGET LINE (copy this line for search, or set line_number to its line) ===")
+            parts.append(ptl)
             parts.append("")
+        tsnip = _target_line_snippets(sut, limit=5)
+        if tsnip:
+            parts.append("=== CANDIDATE LINES (relevant to timeouts / async / nondeterminism) ===")
+            for line in tsnip:
+                parts.append(f"  • {line}")
+            parts.append("")
+
+    stack_and_sut = f"{getattr(observation, 'failing_stack_trace', '') or ''}\n{sut}"
+    if re.search(r"timeout|Timeout|asyncio|async def|await |Cancelled", stack_and_sut, re.I):
+        parts.append(
+            "=== TEMPLATE: async / timeout (async_wait) ===\n"
+            "Find timeout=, wait_for(..., timeout=), or time limits and INCREASE the numeric value; "
+            "or ensure awaits complete. Do not change unrelated logic."
+        )
+        parts.append("")
 
     if observation.run_history:
         parts.append("=== RUN HISTORY (last 10) ===")
@@ -269,9 +304,36 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
             )
             parts.append("You MUST propose a DIFFERENT root cause category and NEW entities.")
 
+    if retry_hint:
+        parts.append(f"\n=== RETRY INSTRUCTION ===\n{retry_hint}")
+
     parts.append("\n=== YOUR TURN ===")
-    turn_instruction = "Output one JSON object with top-level keys think and patch. No XML, no Markdown fences."
-    if observation.think_history:
+
+    # Determine the right recovery instruction based on what happened last.
+    last_patch = observation.patches_applied[-1] if observation.patches_applied else None
+    last_regression = (
+        last_patch is not None
+        and last_patch.applied_successfully
+        and last_patch.pass_rate_after < observation.baseline_pass_rate - 0.05
+    )
+    last_patch_failed = last_patch is not None and not last_patch.applied_successfully
+
+    if retry_hint:
+        # Per-attempt hint takes precedence — it already contains the action to take.
+        turn_instruction = "Fix the issue described in RETRY INSTRUCTION above, then output one JSON object."
+    elif last_regression:
+        turn_instruction = (
+            f"REGRESSION DETECTED: last patch lowered pass_rate to {last_patch.pass_rate_after:.2f}. "
+            "Keep the SAME root cause hypothesis and produce a more conservative or exact fix. "
+            "Do NOT switch categories. Output one JSON object."
+        )
+    elif last_patch_failed:
+        turn_instruction = (
+            "PATCH FAILED: the search text was not found in the source. "
+            "Copy the search block EXACTLY (same whitespace) from the source shown above. "
+            "Output one JSON object."
+        )
+    elif observation.think_history:
         stale_cats = {
             h["categories"][0]
             for h in observation.think_history
@@ -279,10 +341,16 @@ def build_unified_prompt(observation: FlakeForgeObservation) -> str:
         }
         attempted = ", ".join(sorted(stale_cats))
         turn_instruction = (
-            f"IMPORTANT: You already tried [{attempted}]. "
-            "Propose a genuinely DIFFERENT root cause. "
-            "Output one JSON object with top-level keys think and patch. No XML, no Markdown fences."
+            f"IMPORTANT: You already tried [{attempted}] with no improvement. "
+            "Propose a DIFFERENT root cause category supported by the evidence above. "
+            "Output one JSON object."
         )
+    else:
+        turn_instruction = (
+            "Output one JSON object with top-level keys think and patch. "
+            "No XML tags, no markdown fences, no text outside the JSON."
+        )
+
     parts.append(turn_instruction)
     return "\n".join(parts)
 
@@ -317,8 +385,10 @@ def _load_json_object(text: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _patch_dict_to_search_replace(patch_data: Any) -> str:
-    """Convert validator-compatible JSON hunk fields to legacy patch text."""
+def _patch_dict_to_search_replace(
+    patch_data: Any, *, default_file: str = "",
+) -> str:
+    """Convert JSON patch hunks to legacy search/replace patch text (with --- file header)."""
     if not isinstance(patch_data, dict):
         return ""
     hunks = patch_data.get("hunks", [])
@@ -329,24 +399,73 @@ def _patch_dict_to_search_replace(patch_data: Any) -> str:
     for hunk in hunks:
         if not isinstance(hunk, dict):
             continue
-        file_path = str(hunk.get("file") or "").strip()
+        file_path = str(hunk.get("file") or default_file or "").strip()
         search = hunk.get("search")
         replace = hunk.get("replace")
-        if not file_path or not isinstance(search, str) or not isinstance(replace, str):
+        ln = hunk.get("line_number")
+        if not isinstance(replace, str):
             continue
-        if not search.strip():
+        if not file_path:
+            continue
+        # Line-only hunks: search filled later by finalize_for_inference; skip until then.
+        if (ln is not None and int(ln) > 0) and not (isinstance(search, str) and search.strip()):
+            continue
+        if not isinstance(search, str) or (not str(search).strip() and (ln is None or int(ln) <= 0)):
             continue
         blocks.append(
             "\n".join([
                 f"--- {file_path}",
                 "<<<<<<< SEARCH",
-                search.rstrip("\n"),
+                (search or "").rstrip("\n"),
                 "=======",
                 replace.rstrip("\n"),
                 ">>>>>>> REPLACE",
             ])
         )
     return "\n\n".join(blocks)
+
+
+def finalize_for_inference(
+    action: "FlakeForgeAction",
+    observation: "FlakeForgeObservation",
+    repo_root: Path,
+) -> "FlakeForgeAction":
+    """Assign PATCH TARGET file from the observation, expand line_number→search, rebuild patch_text.
+
+    Use this in the inference loop only; the model must not pick ``file`` itself.
+    """
+    root = Path(str(repo_root))
+    if not action.structured_patch or not action.structured_patch.hunks:
+        return action
+    tgt = (getattr(observation, "source_file", None) or "").replace("\\", "/").strip()
+    if not tgt:
+        return action
+
+    new_hunks: List[PatchHunk] = []
+    for h in action.structured_patch.hunks:
+        nh = h.model_copy()
+        nh.file = tgt
+        if nh.line_number is not None and int(nh.line_number) > 0:
+            path = root / tgt
+            if path.is_file():
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                    lines = text.splitlines()
+                    idx = int(nh.line_number) - 1
+                    if 0 <= idx < len(lines):
+                        nh.search = lines[idx]
+                except OSError:
+                    pass
+        new_hunks.append(nh)
+
+    new_sp = action.structured_patch.model_copy(update={"hunks": new_hunks})
+    patch_dict = {
+        "hunks": [h.model_dump(exclude_unset=False) for h in new_hunks],
+    }
+    new_pt = _patch_dict_to_search_replace(patch_dict, default_file=tgt)
+    return action.model_copy(
+        update={"structured_patch": new_sp, "patch_text": new_pt}
+    )
 
 
 def extract_patch(response: str) -> str:
@@ -417,7 +536,7 @@ _NORM_MAP: Dict[str, str] = {
 }
 
 _ALLOWED_HUNK_KEYS = {
-    "hunk_id", "file", "search", "replace", "rationale", "addresses_claim",
+    "hunk_id", "file", "search", "replace", "rationale", "addresses_claim", "line_number",
 }
 
 
@@ -517,7 +636,24 @@ def _parse_structured_patch(patch_raw: Any) -> "StructuredPatch":
         clean.setdefault("hunk_id", f"h{i+1}")
         clean.setdefault("rationale", "")
         clean.setdefault("addresses_claim", "")
-        if "file" not in clean or "search" not in clean or "replace" not in clean:
+        clean.setdefault("file", "")
+        clean.setdefault("search", "")
+        if "replace" not in clean or not isinstance(clean.get("replace"), str):
+            partial_penalty = min(partial_penalty, -0.3)
+            continue
+        # line mode OR search mode
+        ln: Optional[int] = None
+        if "line_number" in clean and clean["line_number"] is not None:
+            try:
+                ln = int(clean["line_number"])
+            except (TypeError, ValueError):
+                ln = None
+            clean["line_number"] = ln
+        if ln is not None and ln > 0:
+            if not (clean.get("search") or "").strip():
+                # ok — finalize will set search
+                pass
+        elif not (clean.get("search") or "").strip():
             partial_penalty = min(partial_penalty, -0.3)
             continue
         try:
@@ -599,8 +735,8 @@ class UnifiedFlakeForgeAgent:
         self.backend = backend
         self.system_prompt = UNIFIED_SYSTEM_PROMPT
 
-    def generate(self, observation: FlakeForgeObservation) -> FlakeForgeAction:
-        prompt = build_unified_prompt(observation)
+    def generate(self, observation: FlakeForgeObservation, *, retry_hint: Optional[str] = None) -> FlakeForgeAction:
+        prompt = build_unified_prompt(observation, retry_hint=retry_hint)
         raw_response = self.backend.generate(prompt, system_prompt=self.system_prompt)
 
         response_obj = _load_json_object(raw_response)
@@ -611,7 +747,10 @@ class UnifiedFlakeForgeAgent:
             think_raw = json.dumps(response_obj.get("think", {}), ensure_ascii=False)
             structured_think = _parse_structured_think(response_obj.get("think", {}))
             structured_patch = _parse_structured_patch(response_obj.get("patch", {}))
-            patch_raw = _patch_dict_to_search_replace(response_obj.get("patch", {}))
+            patch_raw = _patch_dict_to_search_replace(
+                response_obj.get("patch", {}),
+                default_file=getattr(observation, "source_file", None) or "",
+            )
         else:
             think_raw = extract_think(raw_response)
             patch_raw = extract_patch(raw_response)

@@ -182,7 +182,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self._reset_demo_repo_if_present()
 
         # Read source files
-        test_source, source_under_test = self._read_sources()
+        test_source, source_under_test, source_file_rel = self._read_sources()
         file_tree = self._build_file_tree()
 
         # Three-stage gate: Sanity → Determinism → Flakiness.
@@ -243,6 +243,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             original_source_under_test=source_under_test,
             current_test_source=test_source,
             current_source_under_test=source_under_test,
+            source_file=source_file_rel,
             run_history=baseline_runs,
             baseline_pass_rate=baseline_pass_rate,
             current_pass_rate=baseline_pass_rate,
@@ -521,7 +522,11 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             self._episode_state.regression_detected = True
 
         # Re-read modified sources
-        self._episode_state.current_test_source, self._episode_state.current_source_under_test = self._read_sources()
+        (
+            self._episode_state.current_test_source,
+            self._episode_state.current_source_under_test,
+            self._episode_state.source_file,
+        ) = self._read_sources()
 
         # Determine if episode is terminal
         done = (
@@ -579,6 +584,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             steps_remaining=self._episode_state.steps_remaining,
             test_function_source=self._episode_state.current_test_source,
             source_under_test=self._episode_state.current_source_under_test,
+            source_file=self._episode_state.source_file,
             relevant_imports=self._extract_imports(self._episode_state.current_test_source),
             file_tree=self._episode_state.file_tree,
             run_history=self._episode_state.run_history[-20:],
@@ -831,16 +837,28 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         return any(needle in message for needle in infra_needles)
 
     def _run_tests(self, n: int) -> List[RunRecord]:
-        """Run the target test n times, collecting results."""
+        """Run the target test n times, collecting results.
+
+        When FF_FULL_FILE_MODE=1 (set automatically for ORDER_DEPENDENCY /
+        RESOURCE_LEAK / SHARED_STATE categories), each call runs the *entire*
+        test file so that tests earlier in the file can leak state into the
+        target test, reproducing the real-world flakiness.
+        """
         if self.runner is None:
             logger.warning("[ENV] No runner configured — returning synthetic runs")
             return self._synthetic_runs(n)
 
+        use_full_file = os.environ.get("FF_FULL_FILE_MODE", "0").strip().lower() in {"1", "true", "yes"}
+        run_fn = (
+            getattr(self.runner, "run_test_full_file", None)
+            if use_full_file
+            else None
+        ) or self.runner.run_test
+
         results: List[RunRecord] = []
         for _ in range(n):
             try:
-                # DockerTestRunner uses run_test, not run_single
-                result = self.runner.run_test(self.test_identifier)
+                result = run_fn(self.test_identifier)
                 results.append(result)
             except Exception as exc:
                 results.append(RunRecord(
@@ -868,10 +886,16 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             ))
         return results
 
-    def _read_sources(self) -> Tuple[str, str]:
-        """Read test and source-under-test files."""
+    def _read_sources(self) -> Tuple[str, str, str]:
+        """Read test and source-under-test files.
+
+        Returns (test_text, source_under_test_excerpt, source_file_rel).
+        ``source_file_rel`` is the repo-relative path to the primary patch target: the resolved
+        SUT file when found, else the test file path, else "".
+        """
         test_source = ""
         source_under_test = ""
+        source_file_rel = ""
 
         # Find test file
         test_parts = self.test_identifier.split("::")
@@ -884,6 +908,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                     test_source = test_path.read_text(encoding="utf-8", errors="ignore")[:8000]
                 except Exception:
                     pass
+            source_file_rel = test_file_hint.replace("\\", "/")
 
         # Try to find source under test from imports
         if test_source:
@@ -891,11 +916,17 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 if candidate.exists() and candidate.is_file():
                     try:
                         source_under_test = candidate.read_text(encoding="utf-8", errors="ignore")[:8000]
+                        source_file_rel = str(
+                            candidate.resolve().relative_to(self.repo_path.resolve())
+                        ).replace("\\", "/")
                         break
                     except Exception:
                         pass
 
-        return test_source, source_under_test
+        if not source_file_rel and test_file_hint:
+            source_file_rel = test_file_hint.replace("\\", "/")
+
+        return test_source, source_under_test, source_file_rel
 
     def _source_candidates_from_test(self, test_source: str, test_file_hint: str) -> List[Path]:
         """Resolve likely source files from imports in the target test."""

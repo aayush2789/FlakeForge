@@ -26,11 +26,19 @@ except Exception:
 
 try:
     from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
-    from agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
+    from agent.unified_agent import (
+        UnifiedFlakeForgeAgent,
+        build_unified_prompt,
+        finalize_for_inference,
+    )
     from server.FlakeForge_environment import FlakeForgeEnvironment
 except ImportError:
     from .models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
-    from .agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
+    from .agent.unified_agent import (
+        UnifiedFlakeForgeAgent,
+        build_unified_prompt,
+        finalize_for_inference,
+    )
     from .server.FlakeForge_environment import FlakeForgeEnvironment
 
 try:
@@ -146,6 +154,88 @@ def _info_from_observation(observation: Any) -> Dict[str, Any]:
     return info
 
 
+
+# ── Inference-mode safety helpers ────────────────────────────────────────────
+
+# LLM calls per environment step: do not call env.step until format + grounded patch succeed.
+_MAX_INFERENCE_LLM_RETRIES: int = int(os.environ.get("FF_INFERENCE_LLM_RETRIES", "7"))
+_MAX_CONSECUTIVE_FAILURES = 10  # consecutive bad steps before early-stopping the episode
+ALLOW_FUZZY_MATCH: bool = os.environ.get("FF_ALLOW_FUZZY_GROUNDING", "1") not in ("0", "false", "False")
+
+
+def _fuzzy_grounding_ok(search: str, blob: str) -> bool:
+    """7B-friendly: a key line or approximate block may still apply via patch_applier fuzzy match."""
+    if not (search or "").strip():
+        return True
+    if search in blob:
+        return True
+    blob_n = blob.replace("\r\n", "\n")
+    for line in search.splitlines():
+        t = line.strip()
+        if len(t) < 2:
+            continue
+        if t in blob or t in blob_n:
+            return True
+    return False
+
+
+def _check_patch_grounding(
+    action: "FlakeForgeAction",
+    observation: "FlakeForgeObservation",
+    repo_path: Optional[Path] = None,
+) -> str:
+    """Return '' if the patch is plausibly grounded, else a short error for the next retry.
+
+    Uses full on-disk SUT when ``repo_path`` + ``observation.source_file`` are available so
+    checks are not truncated by observation limits. Fuzzy is allowed for ``search`` when
+    :data:`ALLOW_FUZZY_MATCH` is true (aligns with ``fuzzy_applied`` in the applier).
+    """
+    hunks = getattr(getattr(action, "structured_patch", None), "hunks", None) or []
+    if not hunks:
+        return ""
+
+    full_text = "\n".join(
+        filter(
+            None,
+            [
+                getattr(observation, "source_under_test", "") or "",
+                getattr(observation, "test_function_source", "") or "",
+            ],
+        )
+    )
+    if repo_path and getattr(observation, "source_file", None):
+        sp = (Path(repo_path) / str(observation.source_file)).resolve()
+        try:
+            sp.relative_to(Path(repo_path).resolve())
+        except ValueError:
+            return "source_file path escapes repo"
+        if sp.is_file():
+            try:
+                full_text = sp.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                pass
+    if not (full_text or "").strip():
+        return ""
+
+    for hunk in hunks:
+        ln = getattr(hunk, "line_number", None)
+        if ln is not None and int(ln) > 0:
+            n = len(full_text.splitlines())
+            if 1 <= int(ln) <= n:
+                continue
+            return f"line_number {ln} is out of range (file has {n} lines)"
+        search = (getattr(hunk, "search", "") or "").strip()
+        if not search:
+            return "hunk has no search and no line_number; use TARGET LINE for search or line_number+replace"
+        if search in full_text or search in full_text.replace("\r\n", "\n"):
+            continue
+        if ALLOW_FUZZY_MATCH and _fuzzy_grounding_ok(search, full_text):
+            continue
+        preview = search[:60].replace("\n", "↵")
+        return f"search not found in target file: \"{preview}...\" (use the TARGET LINE line verbatim or line_number+replace)"
+    return ""
+
+
 class LLMBackend:
     """LLM backend that calls OpenAI-compatible APIs."""
 
@@ -234,15 +324,14 @@ class LLMBackend:
                                     "items": {
                                         "type": "object",
                                         "additionalProperties": True,
-                                        "required": [
-                                            "file",
-                                            "search",
-                                            "replace",
-                                        ],
+                                        "required": ["replace"],
                                         "properties": {
-                                            "file": {"type": "string"},
+                                            "hunk_id": {"type": "string"},
                                             "search": {"type": "string"},
                                             "replace": {"type": "string"},
+                                            "line_number": {"type": "integer", "minimum": 1},
+                                            "rationale": {"type": "string"},
+                                            "addresses_claim": {"type": "string"},
                                         },
                                     },
                                 },
@@ -387,6 +476,18 @@ async def run_episode(
 ) -> Dict[str, Any]:
     """Run a single episode of the unified inference loop.
 
+    Inference-mode guards (not used for training the same way):
+    - Re-generate up to ``_MAX_INFERENCE_LLM_RETRIES`` (``FF_INFERENCE_LLM_RETRIES``) times
+      per env step: invalid JSON, loose grounding, or empty patch *after finalize* (no
+      ``env.step`` until success or the episode ends with
+      ``done_reason=inference_invalid_exhausted_retries``).
+    - ``finalize_for_inference`` sets ``file`` from ``observation.source_file`` and expands
+      ``line_number`` → ``search`` for the patch string.
+    - Grounding: substring or, when ``FF_ALLOW_FUZZY_GROUNDING`` is on, per-line fuzzy
+      match; full file is read from disk when possible (not only the observation excerpt).
+    - Regression: ``build_unified_prompt`` nudges the model after a bad apply/pass drop.
+    - Early stop: ``_MAX_CONSECUTIVE_FAILURES`` regressed/invalid apply steps in a row.
+
     Returns:
         Episode result dict with trajectory, rewards, and metadata.
     """
@@ -413,8 +514,84 @@ async def run_episode(
             step_output.info.get("deep_signals", {}),
         )
 
+    consecutive_failures = 0
+    repo_root: Optional[Path] = getattr(env, "repo_path", None)
+
     while not step_output.done:
-        action = agent.generate(observation)
+        # ── Per-step: retry until valid + grounded, or else abort (no bad env.step) ──
+        retry_hint: Optional[str] = None
+        action: Optional[FlakeForgeAction] = None
+
+        for attempt in range(_MAX_INFERENCE_LLM_RETRIES):
+            candidate = agent.generate(observation, retry_hint=retry_hint)
+            if repo_root is not None:
+                candidate = finalize_for_inference(candidate, observation, Path(repo_root))
+
+            think_ok = getattr(
+                getattr(candidate, "structured_think", None), "format_penalty", -1.0
+            ) >= 0.0
+            patch_ok_fmt = getattr(
+                getattr(candidate, "structured_patch", None), "format_penalty", -1.0
+            ) >= 0.0
+
+            if not think_ok or not patch_ok_fmt:
+                retry_hint = (
+                    "FORMAT_ERROR: return only one JSON object with think + patch. "
+                    "No markdown, no text outside JSON."
+                )
+                if verbose:
+                    logger.warning(
+                        "[EPISODE] step=%d attempt=%d FORMAT invalid (think=%s patch=%s) — retrying",
+                        observation.step + 1,
+                        attempt,
+                        think_ok,
+                        patch_ok_fmt,
+                    )
+                continue
+
+            grounding_err = _check_patch_grounding(
+                candidate, observation, repo_path=repo_root
+            )
+            if grounding_err:
+                retry_hint = (
+                    f"GROUNDING: {grounding_err} — copy the line from TARGET LINE / SOURCE, "
+                    "or use {line_number, replace} (1-based) with the full new line."
+                )
+                if verbose:
+                    logger.warning(
+                        "[EPISODE] step=%d attempt=%d GROUNDING: %s — retrying",
+                        observation.step + 1,
+                        attempt,
+                        grounding_err,
+                    )
+                continue
+
+            if not (getattr(candidate, "patch_text", None) or "").strip():
+                retry_hint = (
+                    "EMPTY_PATCH: add patch.hunks with search+replace, or line_number+replace, "
+                    "as in the system prompt. File is assigned for you; do not pick a file path."
+                )
+                if verbose:
+                    logger.warning(
+                        "[EPISODE] step=%d attempt=%d empty patch after finalize — retrying",
+                        observation.step + 1,
+                        attempt,
+                    )
+                continue
+
+            action = candidate
+            break
+        else:
+            if verbose:
+                logger.error(
+                    "[EPISODE] step=%d gave up after %d LLM attempts (invalid/grounding)",
+                    observation.step + 1,
+                    _MAX_INFERENCE_LLM_RETRIES,
+                )
+            episode_result["done_reason"] = "inference_invalid_exhausted_retries"
+            break
+
+        assert action is not None  # only reachable after successful for-loop break
 
         if verbose:
             logger.info(
@@ -425,6 +602,7 @@ async def run_episode(
                 len(action.patch_text),
             )
 
+        # ── Environment step ─────────────────────────────────────────────────
         step_result = env.step(action)
         if asyncio.iscoroutine(step_result):
             step_result = await step_result
@@ -437,16 +615,36 @@ async def run_episode(
         pass_rate_after = step_output.state.current_pass_rate
         pass_rate_before = observation.baseline_pass_rate
 
+        # ── Failure / regression accounting ─────────────────────────────────
+        patch_applied = step_output.info.get("patch_result", {}).get("success", False)
+        regression = pass_rate_after < pass_rate_before - 0.05
+
+        if not patch_applied or regression:
+            consecutive_failures += 1
+        else:
+            consecutive_failures = 0
+
         logger.info(
-            f"[EPISODE] RESULT step={step_output.state.step_count} reward={reward:.4f} "
-            f"pass_rate={pass_rate_before:.2f}->{pass_rate_after:.2f} "
-            f"done={done} reason={step_output.info.get('done_reason', '')}"
+            "[EPISODE] RESULT step=%d reward=%.4f pass_rate=%.2f->%.2f "
+            "patch_applied=%s regression=%s consecutive_failures=%d done=%s reason=%s",
+            step_output.state.step_count,
+            reward,
+            pass_rate_before,
+            pass_rate_after,
+            patch_applied,
+            regression,
+            consecutive_failures,
+            done,
+            step_output.info.get("done_reason", ""),
         )
         if breakdown and verbose:
-            logger.info(f"    Breakdown: {breakdown}")
+            logger.info("    Breakdown: %s", breakdown)
 
-        if not step_output.info.get("patch_result", {}).get("success", False) and verbose:
-            logger.warning(f"    [DEBUG] Patch failed to apply. Raw response excerpt: {action.raw_response[:200]}...")
+        if not patch_applied and verbose:
+            logger.warning(
+                "    [DEBUG] Patch failed to apply. Raw response excerpt: %s...",
+                action.raw_response[:200],
+            )
 
         step_data = {
             "step": step_output.state.step_count,
@@ -454,17 +652,15 @@ async def run_episode(
             "predicted_confidence": action.predicted_confidence,
             "think_text": action.think_text[:500],
             "patch_text": action.patch_text,
-            "patch_applied": step_output.info.get("patch_result", {}).get("success", False),
+            "patch_applied": patch_applied,
             "reward": step_output.reward,
             "reward_breakdown": step_output.info.get("reward_breakdown", {}),
-            "pass_rate": step_output.state.current_pass_rate,
+            "pass_rate": pass_rate_after,
             "done": step_output.done,
         }
         episode_result["trajectory"].append(step_data)
         episode_result["total_reward"] += step_output.reward
-        episode_result["reward_breakdown_history"].append(
-            step_output.info.get("reward_breakdown", {})
-        )
+        episode_result["reward_breakdown_history"].append(breakdown)
 
         if verbose:
             logger.info(
@@ -472,14 +668,26 @@ async def run_episode(
                 step_data["step"],
                 step_output.reward,
                 observation.baseline_pass_rate,
-                step_output.state.current_pass_rate,
+                pass_rate_after,
                 step_output.done,
                 step_output.info.get("done_reason", ""),
             )
 
+        # ── Early stopping on collapse ────────────────────────────────────────
+        if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES and not done:
+            logger.warning(
+                "[EPISODE] EARLY STOP: %d consecutive failures (patch_applied=%s regression=%s)",
+                consecutive_failures,
+                patch_applied,
+                regression,
+            )
+            episode_result["done_reason"] = "early_stop_consecutive_failures"
+            break
+
     episode_result["steps"] = step_output.state.step_count
     episode_result["final_pass_rate"] = step_output.state.current_pass_rate
-    episode_result["done_reason"] = step_output.info.get("done_reason", "unknown")
+    if episode_result["done_reason"] == "in_progress":
+        episode_result["done_reason"] = step_output.info.get("done_reason", "unknown")
 
     return episode_result
 
@@ -490,6 +698,7 @@ def run_inference(
     model_name: Optional[str] = None,
     max_steps: Optional[int] = None,
     num_runs: int = 10,
+    test_timeout: Optional[int] = None,
     api_base: Optional[str] = None,
     api_key: Optional[str] = None,
     verbose: bool = True,
@@ -499,6 +708,8 @@ def run_inference(
     Creates the environment and agent, runs an episode, and returns
     the result dict with trajectory, rewards, and metadata.
     """
+    if test_timeout is not None:
+        os.environ["FF_TEST_TIMEOUT_SECONDS"] = str(test_timeout)
     max_steps = int(max_steps or os.environ.get("INFERENCE_MAX_STEPS", 8))
     backend = LLMBackend(
         model_name=model_name,
@@ -684,6 +895,40 @@ def _select_seed_cases(
     return selected
 
 
+# Categories whose flakiness requires state to accumulate across runs in the
+# SAME directory (leaked files, global vars, CSV rows, etc.).  In Docker every
+# run is a fresh --rm container so state is always clean → always passes.
+# Force local mode for these so the persistent episode worktree lets state leak.
+_LOCAL_MODE_CATEGORIES: set = {"RESOURCE_LEAK", "ORDER_DEPENDENCY", "SHARED_STATE"}
+
+# Categories that need their own project deps (numpy, aioredis …) before pytest
+# can even collect tests.  Auto-install is always enabled for IDoFT seed runs
+# via _apply_category_env.
+
+
+def _apply_category_env(category: str) -> Dict[str, str]:
+    """Return env-var overrides for the given flake category, and apply them.
+
+    IDoFT seed runs ALWAYS use local mode (USE_DOCKER_IMAGE=0) because:
+    - Docker's ephemeral --rm containers re-download deps on every run (slow/timeout).
+    - Pip's local cache makes re-installs nearly instant after the first run.
+    - RESOURCE_LEAK/ORDER_DEPENDENCY need persistent state between runs, which
+      only the local runner provides.
+    """
+    overrides: Dict[str, str] = {
+        "FF_AUTO_INSTALL_DEPS": "1",
+        "FF_FULL_FILE_MODE": "0",
+        "USE_DOCKER_IMAGE": "0",  # always local for IDoFT; see docstring
+    }
+    if category.upper() in _LOCAL_MODE_CATEGORIES:
+        # Run full test file so polluter tests can leak state into the victim.
+        overrides["FF_FULL_FILE_MODE"] = "1"
+    # Apply to process environment so DockerTestRunner.__init__ picks them up.
+    for k, v in overrides.items():
+        os.environ[k] = v
+    return overrides
+
+
 def run_seed_inference(
     *,
     seed_root: str | Path,
@@ -693,6 +938,7 @@ def run_seed_inference(
     model_name: Optional[str],
     max_steps: Optional[int],
     num_runs: int,
+    test_timeout: Optional[int],
     api_base: Optional[str],
     api_key: Optional[str],
     verbose: bool,
@@ -702,15 +948,18 @@ def run_seed_inference(
 
     for idx, seed_case in enumerate(cases, start=1):
         worktree = _materialize_case_repo(seed_case, isolate=isolate)
+        category = seed_case["flake_category"]
+        env_overrides = _apply_category_env(category)
         if verbose:
             logger.info(
-                "[INFERENCE] Seed case %d/%d id=%s category=%s test=%s repo=%s",
+                "[INFERENCE] Seed case %d/%d id=%s category=%s test=%s repo=%s env=%s",
                 idx,
                 len(cases),
                 seed_case["case_id"],
-                seed_case["flake_category"],
+                category,
                 seed_case["test_id"],
                 worktree,
+                env_overrides,
             )
 
         try:
@@ -720,6 +969,7 @@ def run_seed_inference(
                 model_name=model_name,
                 max_steps=max_steps,
                 num_runs=num_runs,
+                test_timeout=test_timeout,
                 api_base=api_base,
                 api_key=api_key,
                 verbose=verbose,
@@ -755,6 +1005,98 @@ def run_seed_inference(
     }
 
 
+def _probe_all_cases(
+    *,
+    seed_root: str | Path,
+    case: Optional[str],
+    limit: Optional[int],
+    num_runs: int,
+    test_timeout: Optional[int],
+    verbose: bool,
+) -> Dict[str, Any]:
+    """Quick-scan every IDoFT case under seed_root (max-steps=0) to find flaky ones.
+
+    Returns a summary dict with cases bucketed as: flaky / stable / broken.
+    Prints a compact progress line per case so you can watch live.
+    """
+    cases = _select_seed_cases(_load_seed_cases(seed_root), case=case, limit=limit)
+    flaky: List[Dict] = []
+    stable: List[Dict] = []
+    broken: List[Dict] = []
+
+    for idx, seed_case in enumerate(cases, start=1):
+        case_id = seed_case["case_id"]
+        category = seed_case["flake_category"]
+        difficulty = seed_case["difficulty"]
+        env_overrides = _apply_category_env(category)
+        worktree = _materialize_case_repo(seed_case, isolate=True)
+        print(
+            f"[{idx:3d}/{len(cases)}] {case_id}  ({category}/{difficulty}) ...",
+            end=" ",
+            flush=True,
+        )
+        try:
+            result = run_inference(
+                repo_path=str(worktree),
+                test_identifier=seed_case["test_id"],
+                model_name=None,
+                max_steps=0,
+                num_runs=num_runs,
+                test_timeout=test_timeout,
+                api_base=None,
+                api_key=None,
+                verbose=False,
+            )
+            reason = result.get("done_reason", "")
+            pass_rate = result.get("final_pass_rate", 0.0)
+            entry = {
+                "case_id": case_id,
+                "flake_category": category,
+                "idoft_category": seed_case.get("idoft_category", ""),
+                "difficulty": difficulty,
+                "test_id": seed_case["test_id"],
+                "done_reason": reason,
+                "pass_rate": pass_rate,
+            }
+            if "flaky" in reason or (0.05 < pass_rate < 0.95):
+                bucket = flaky
+                label = f"FLAKY  pass_rate={pass_rate:.2f}"
+            elif "stable" in reason or pass_rate >= 0.95:
+                bucket = stable
+                label = f"stable pass_rate={pass_rate:.2f}"
+            else:
+                bucket = broken
+                label = f"BROKEN reason={reason}"
+            bucket.append(entry)
+            print(label, flush=True)
+        except Exception as exc:
+            broken.append({
+                "case_id": case_id,
+                "flake_category": category,
+                "difficulty": difficulty,
+                "test_id": seed_case["test_id"],
+                "error": str(exc),
+            })
+            print(f"ERROR  {exc}", flush=True)
+
+    print(
+        f"\n=== Probe complete: {len(flaky)} flaky / {len(stable)} stable / {len(broken)} broken ===",
+        flush=True,
+    )
+    if flaky:
+        print("\nFLAKY cases (ready for training):")
+        for c in flaky:
+            print(f"  --case {c['case_id']}  ({c['flake_category']}/{c['difficulty']})  pass_rate={c['pass_rate']:.2f}")
+
+    return {
+        "seed_root": str(Path(seed_root).resolve()),
+        "total": len(cases),
+        "flaky": flaky,
+        "stable": stable,
+        "broken": broken,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run FlakeForge unified inference episode")
     parser.add_argument("--repo-path", default=_default_repo_path(), help="Path to target repo")
@@ -768,6 +1110,14 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Max seed cases to run")
     parser.add_argument("--list-cases", action="store_true", help="List seed cases from --seed-root and exit")
     parser.add_argument(
+        "--probe-all",
+        action="store_true",
+        help=(
+            "Quick-scan every case under --seed-root (--max-steps 0) and print a table "
+            "of which cases are genuinely flaky vs stable/broken."
+        ),
+    )
+    parser.add_argument(
         "--no-isolation",
         action="store_true",
         help="Patch seed repos in place instead of copying to outputs/inference_repos first",
@@ -775,13 +1125,19 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("MODEL_NAME"), help="LLM model name")
     parser.add_argument("--max-steps", type=int, default=None, help="Max episode steps")
     parser.add_argument("--num-runs", type=int, default=int(os.environ.get("NUM_RUNS", 10)), help="Repeated test runs per step")
+    parser.add_argument(
+        "--test-timeout",
+        type=int,
+        default=None,
+        help="Seconds allowed for each pytest/docker run (default: FF_TEST_TIMEOUT_SECONDS or 30)",
+    )
     parser.add_argument("--api-base", default=os.environ.get("API_BASE_URL") or os.environ.get("OPENAI_API_BASE"), help="OpenAI-compatible base URL")
     parser.add_argument("--api-key", default=os.environ.get("NVIDIA_API_KEY") or os.environ.get("OPENAI_API_KEY"), help="API key")
     parser.add_argument("--quiet", action="store_true", help="Disable verbose logging")
     args = parser.parse_args()
 
     try:
-        if args.seed_root or args.list_cases:
+        if args.seed_root or args.list_cases or args.probe_all:
             seed_root = args.seed_root or _default_seed_root()
             if args.list_cases:
                 cases = _select_seed_cases(_load_seed_cases(seed_root), case=args.case, limit=args.limit)
@@ -800,6 +1156,15 @@ def main() -> None:
                         for item in cases
                     ],
                 }
+            elif args.probe_all:
+                result = _probe_all_cases(
+                    seed_root=seed_root,
+                    case=args.case,
+                    limit=args.limit,
+                    num_runs=args.num_runs,
+                    test_timeout=args.test_timeout,
+                    verbose=not args.quiet,
+                )
             else:
                 result = run_seed_inference(
                     seed_root=seed_root,
@@ -809,6 +1174,7 @@ def main() -> None:
                     model_name=args.model,
                     max_steps=args.max_steps,
                     num_runs=args.num_runs,
+                    test_timeout=args.test_timeout,
                     api_base=args.api_base,
                     api_key=args.api_key,
                     verbose=not args.quiet,
@@ -820,6 +1186,7 @@ def main() -> None:
                 model_name=args.model,
                 max_steps=args.max_steps,
                 num_runs=args.num_runs,
+                test_timeout=args.test_timeout,
                 api_base=args.api_base,
                 api_key=args.api_key,
                 verbose=not args.quiet,

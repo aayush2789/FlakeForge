@@ -38,6 +38,8 @@ class EpisodeState(BaseModel):
     original_source_under_test: str = ""
     current_test_source: str = ""
     current_source_under_test: str = ""
+    # Repo-relative path to the file whose text is in current_source_under_test (or test file fallback)
+    source_file: str = ""
 
     # Run data
     run_history: List[RunRecord] = Field(default_factory=list)

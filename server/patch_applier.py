@@ -41,6 +41,8 @@ class PatchHunk:
     file_path: str
     search_text: str
     replace_text: str
+    # When set (1-based), apply `replace_text` as the new full line; ignore search/fuzzy in that case.
+    line_number: Optional[int] = None
 
 
 def parse_search_replace_hunks(patch_text: str) -> List[PatchHunk]:
@@ -98,6 +100,7 @@ def parse_search_replace_hunks(patch_text: str) -> List[PatchHunk]:
                     file_path=current_file,
                     search_text=search,
                     replace_text=replace,
+                    line_number=None,
                 ))
             continue
 
@@ -567,14 +570,30 @@ def apply_structured_patch(
     # Convert StructuredPatch.hunks → internal PatchHunk dataclass list.
     internal_hunks: List[PatchHunk] = []
     for h in structured_patch.hunks:
-        file_path = h.file or default_target or ""
-        if not file_path or not h.search:
-            continue  # skip mal-formed hunks
-        internal_hunks.append(PatchHunk(
-            file_path=file_path,
-            search_text=h.search,
-            replace_text=h.replace,
-        ))
+        file_path = (h.file or default_target or "").strip()
+        if not file_path:
+            continue
+        ln: Optional[int] = getattr(h, "line_number", None)
+        if ln is not None and int(ln) > 0:
+            internal_hunks.append(
+                PatchHunk(
+                    file_path=file_path,
+                    search_text="",
+                    replace_text=h.replace,
+                    line_number=int(ln),
+                )
+            )
+            continue
+        if not (h.search or "").strip():
+            continue
+        internal_hunks.append(
+            PatchHunk(
+                file_path=file_path,
+                search_text=h.search,
+                replace_text=h.replace,
+                line_number=None,
+            )
+        )
 
     if not internal_hunks:
         return {
@@ -643,14 +662,15 @@ def apply_structured_patch(
             original = target.read_text(encoding="utf-8", errors="ignore")
             originals.setdefault(target, original)
 
-            modified = _apply_single_hunk(original, hunk.search_text, hunk.replace_text)
-            if modified is None:
-                modified = _apply_fuzzy_hunk(original, hunk.search_text, hunk.replace_text)
+            if hunk.line_number is not None and hunk.line_number > 0:
+                modified = _apply_line_replacement(
+                    original, hunk.line_number, hunk.replace_text
+                )
                 if modified is None:
                     rollback()
                     return {
                         "success": False,
-                        "error": f"search_text_not_found_in_{target.name}",
+                        "error": f"line_number_out_of_range_in_{target.name}",
                         "files_modified": files_modified,
                         "lines_changed": total_lines_changed,
                         "hunks_applied": hunks_applied,
@@ -659,7 +679,26 @@ def apply_structured_patch(
                         "protected_file": False,
                         "fuzzy_applied": fuzzy_applied,
                     }
-                fuzzy_applied = True
+            else:
+                modified = _apply_single_hunk(original, hunk.search_text, hunk.replace_text)
+                if modified is None:
+                    modified = _apply_fuzzy_hunk(
+                        original, hunk.search_text, hunk.replace_text
+                    )
+                    if modified is None:
+                        rollback()
+                        return {
+                            "success": False,
+                            "error": f"search_text_not_found_in_{target.name}",
+                            "files_modified": files_modified,
+                            "lines_changed": total_lines_changed,
+                            "hunks_applied": hunks_applied,
+                            "diff": "\n".join(all_diffs),
+                            "noop": False,
+                            "protected_file": False,
+                            "fuzzy_applied": fuzzy_applied,
+                        }
+                    fuzzy_applied = True
 
             target.write_text(modified, encoding="utf-8")
             lines_changed = _count_lines_changed(original, modified)
@@ -711,6 +750,19 @@ def apply_structured_patch(
             "protected_file": False,
             "fuzzy_applied": fuzzy_applied,
         }
+
+
+def _apply_line_replacement(
+    original: str, line_number: int, new_line: str
+) -> Optional[str]:
+    """Replace a single 1-based line. ``new_line`` is the full new line (no trailing \\n)."""
+    if line_number < 1:
+        return None
+    parts = original.split("\n")
+    if line_number > len(parts):
+        return None
+    parts[line_number - 1] = new_line
+    return "\n".join(parts)
 
 
 def _apply_single_hunk(original: str, search: str, replace: str) -> Optional[str]:
