@@ -83,6 +83,7 @@ class EpisodeState(BaseModel):
     last_reward_breakdown: Dict[str, float] = Field(default_factory=dict)
     last_patch_result: Dict[str, Any] = Field(default_factory=dict)
     last_done_reason: str = ""
+    last_environment_note: str = ""
 
     # Per-step think summaries — powers diversity penalty + hypothesis trail prompt.
     # Each entry: {step, categories, entities, reason_signatures, oracle_score,

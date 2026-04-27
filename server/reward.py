@@ -116,10 +116,14 @@ def compute_compile_reward(
     *,
     rejected_by_validator: bool = False,
     rolled_back: bool = False,
+    rolled_back_due_to_performance: bool = False,
 ) -> float:
     """Score patch applicability and syntax correctness. Returns -1.0..1.0."""
     if rejected_by_validator:
         return -0.5
+    if rolled_back_due_to_performance:
+        # Applied and tested, then reverted by env — partial penalty, not full apply failure.
+        return -0.35
     if rolled_back:
         return 0.0
     if not patch_applied_successfully:
@@ -325,7 +329,8 @@ def compute_verifiable_reward(
     """Compute the full multi-signal verifiable reward."""
     patch_applied = patch_result.get("success", False)
     rejected_by_validator = bool(patch_result.get("rejected_by_validator", False))
-    rolled_back = bool(patch_result.get("rolled_back", False))
+    rolled_back_due_to_performance = bool(patch_result.get("rolled_back_due_to_performance", False))
+    rolled_back = bool(patch_result.get("rolled_back", False)) and not rolled_back_due_to_performance
     syntax_error = patch_result.get("syntax_error") if patch_applied else None
     files_modified = patch_result.get("files_modified", [])
     lines_changed = patch_result.get("lines_changed", 0)
@@ -360,6 +365,7 @@ def compute_verifiable_reward(
         syntax_error,
         rejected_by_validator=rejected_by_validator,
         rolled_back=rolled_back,
+        rolled_back_due_to_performance=rolled_back_due_to_performance,
     )
     breakdown.regression_penalty = -1.5 if regression_detected else 0.0
     breakdown.anti_hack_penalty = compute_anti_hack_penalty(
@@ -373,7 +379,7 @@ def compute_verifiable_reward(
         breakdown.total_reward = -2.0 if breakdown.anti_hack_penalty < 0.0 else -1.0
         return breakdown
 
-    if breakdown.compile_reward < 1.0:
+    if breakdown.compile_reward < 1.0 and not rolled_back_due_to_performance:
         breakdown.total_reward = round(
             breakdown.format_reward * 0.5
             + breakdown.compile_reward * 1.0,
@@ -381,8 +387,11 @@ def compute_verifiable_reward(
         )
         return breakdown
 
-    # PatchValidator positive shaping
-    if patch_applied and patch_result.get("validation_score") is not None:
+    # PatchValidator positive shaping (include tentative applies reverted for performance)
+    if (
+        (patch_applied or rolled_back_due_to_performance)
+        and patch_result.get("validation_score") is not None
+    ):
         try:
             vs = float(patch_result["validation_score"])
             breakdown.patch_validation_signal = round(0.2 * max(0.0, min(1.0, vs)), 4)

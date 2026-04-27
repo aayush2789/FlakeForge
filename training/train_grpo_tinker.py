@@ -47,7 +47,6 @@ Requirements
 Environment
 -----------
     TINKER_API_KEY       — set in .env or exported in shell
-    USE_DOCKER_IMAGE=0   — local pytest (default, fastest)
 """
 
 from __future__ import annotations

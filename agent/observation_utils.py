@@ -36,6 +36,7 @@ def build_observation_from_state(state: Any) -> FlakeForgeObservation:
         test_identifier=state.test_identifier,
         step=state.step_count,
         steps_remaining=state.steps_remaining,
+        repo_root=getattr(state, "repo_path", "") or "",
         test_function_source=state.current_test_source,
         source_under_test=state.current_source_under_test,
         run_history=state.run_history[-20:] if state.run_history else [],
@@ -67,6 +68,7 @@ def build_observation_from_state(state: Any) -> FlakeForgeObservation:
         last_patch_text=state.last_patch_text or "",
         last_reward=state.last_reward or 0.0,
         file_tree=state.file_tree or [],
+        last_environment_note=getattr(state, "last_environment_note", "") or "",
     )
 
 

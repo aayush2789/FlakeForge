@@ -166,7 +166,11 @@ class TestRunnerRegressions:
                 encoding="utf-8",
             )
 
-            result = DockerTestRunner(str(root)).run_test("tests/test_ok.py::test_ok")
+            runner = DockerTestRunner(str(root))
+            # This test targets pytest stdout/RC parsing, not per-repo pip bootstrap.
+            runner._deps_checked = True
+            runner._deps_ready = True
+            result = runner.run_test("tests/test_ok.py::test_ok")
 
             assert result.passed is True
 

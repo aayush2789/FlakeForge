@@ -10,7 +10,7 @@ import shutil
 import traceback
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 try:
     from dotenv import load_dotenv
@@ -26,11 +26,13 @@ except Exception:
 
 try:
     from models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
-    from agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
+    from agent.tool_loop import ToolContext
+    from agent.unified_agent import ToolAugmentedFlakeForgeAgent, UnifiedFlakeForgeAgent, build_unified_prompt
     from server.FlakeForge_environment import FlakeForgeEnvironment
 except ImportError:
     from .models import FlakeForgeAction, FlakeForgeObservation, FlakeForgeState
-    from .agent.unified_agent import UnifiedFlakeForgeAgent, build_unified_prompt
+    from .agent.tool_loop import ToolContext
+    from .agent.unified_agent import ToolAugmentedFlakeForgeAgent, UnifiedFlakeForgeAgent, build_unified_prompt
     from .server.FlakeForge_environment import FlakeForgeEnvironment
 
 try:
@@ -334,7 +336,7 @@ class LLMBackend:
 
 
 def _build_default_runner(repo_path: str) -> Optional[Any]:
-    """Wrap DockerTestRunner for FlakeForgeEnvironment (expects run_test)."""
+    """Wrap the local pytest runner for FlakeForgeEnvironment (expects run_test)."""
     try:
         from server.docker_runner import DockerTestRunner
     except Exception:
@@ -381,7 +383,7 @@ def _run_async(coro: Any) -> Any:
 
 async def run_episode(
     env: FlakeForgeEnvironment,
-    agent: UnifiedFlakeForgeAgent,
+    agent: Union[UnifiedFlakeForgeAgent, ToolAugmentedFlakeForgeAgent],
     verbose: bool = True,
     reset_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -414,7 +416,12 @@ async def run_episode(
         )
 
     while not step_output.done:
-        action = agent.generate(observation)
+        tool_ctx = ToolContext(
+            repo_root=getattr(observation, "repo_root", "") or "",
+            observation=observation,
+            env=env,
+        )
+        action = agent.generate(observation, tool_context=tool_ctx)
 
         if verbose:
             logger.info(
@@ -506,7 +513,7 @@ def run_inference(
         api_key=api_key,
     )
 
-    agent = UnifiedFlakeForgeAgent(backend=backend)
+    agent = ToolAugmentedFlakeForgeAgent(backend=backend)
 
     if _should_use_remote_env():
         env_url = (os.environ.get("ENV_BASE_URL") or "http://localhost:5000").strip()
@@ -546,7 +553,7 @@ def run_inference(
     else:
         runner = _build_default_runner(repo_path)
         if runner is None and verbose:
-            logger.warning("[INFERENCE] Could not create DockerTestRunner adapter; environment will use synthetic runs.")
+            logger.warning("[INFERENCE] Could not create pytest runner adapter; environment will use synthetic runs.")
 
         # Create environment
         env = FlakeForgeEnvironment(

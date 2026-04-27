@@ -132,7 +132,7 @@ def _offline_reward_fn(
 ) -> List[float]:
     """Offline reward: format compliance + reasoning consistency.
 
-    Used for initial GRPO warm-up before the live Docker environment is
+    Used for initial GRPO warm-up before the live online environment is
     available.  TRL handles group-relative normalization internally; this
     function returns raw per-completion scalars.
 

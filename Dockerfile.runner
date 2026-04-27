@@ -1,5 +1,0 @@
-FROM python:3.11-slim
-WORKDIR /workspace
-COPY server/requirements.docker-runner.txt /tmp/req.txt
-RUN pip install --no-cache-dir -r /tmp/req.txt
-# Default command is unused; FlakeForge passes pytest on docker run

@@ -55,7 +55,6 @@ def main():
         ]
 
         env = os.environ.copy()
-        env["USE_DOCKER_IMAGE"] = "0"
         env["FF_INFERENCE_REPO_ROOT"] = str(worktree_root)
 
         # Safety: never pass --no-isolation or --no-backup here. inference.py

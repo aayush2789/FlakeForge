@@ -155,7 +155,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
         self.test_identifier = test_identifier or default_test
         self.max_steps = max_steps
         self.num_runs = num_runs
-        # Default to DockerTestRunner if no runner provided
+        # Default to local pytest runner if no runner provided
         self.runner = runner or DockerTestRunner(str(self.repo_path))
         self.chaos_runner = chaos_runner
         self._episode_state: Optional[EpisodeState] = None
@@ -343,6 +343,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             return observation
 
         self._episode_state.step_count += 1
+        pre_step_pass_rate = self._episode_state.current_pass_rate
         logger.info(
             "[ENV] STEP %d/%d category=%s",
             self._episode_state.step_count,
@@ -496,14 +497,10 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
                 logger.debug("[ENV] Regression check failed: %s", exc)
         patch_result["regression_detected"] = regression_detected
 
-        # --- 5. Compute reward ---
-        pre_entropy = failure_mode_entropy(self._episode_state.run_history[-self.num_runs:])
-        observation = self._build_observation()  # Build before reward for causal proximity
-
-        # Oracle: verify structured claims against pre/post patch sources.
+        # --- 4b. Oracle (needs post-patch disk; run before optional performance rollback) ---
         oracle_score: Optional[float] = None
         if action.structured_think is not None and action.structured_think.claims:
-            post_sources = self._collect_sources()  # current disk = post-patch
+            post_sources = self._collect_sources()
             try:
                 annotated_think, oracle_score = verify_structured_think(
                     action.structured_think,
@@ -520,6 +517,65 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             except Exception as exc:
                 logger.warning("[ENV] Oracle verification failed (non-fatal): %s", exc)
 
+        # --- 4c. Tentative patch gate: rollback if regression or no meaningful improvement ---
+        outcome_pass_rate_for_learning = post_pass_rate
+        rolled_back_due_to_performance = False
+        effective_run_extend: List[RunRecord] = []
+        self._episode_state.last_environment_note = ""
+        had_valid_apply_and_tests = bool(
+            patch_result.get("success") and not syntax_error and bool(post_runs)
+        )
+
+        if had_valid_apply_and_tests and rollback_snapshots:
+            MIN_MEANINGFUL_IMPROVEMENT = 0.02
+            solved = post_pass_rate >= 1.0 - 1e-9
+            gain = post_pass_rate - pre_step_pass_rate
+            insufficient_gain = (not solved) and (gain < MIN_MEANINGFUL_IMPROVEMENT)
+            if regression_detected or insufficient_gain:
+                rolled_back_due_to_performance = True
+                outcome_pass_rate_for_learning = post_pass_rate
+                try:
+                    restore_repo_files(self.repo_path, rollback_snapshots)
+                except Exception as exc:
+                    logger.error("[ENV] Performance rollback restore failed: %s", exc)
+                patch_result["rolled_back_due_to_performance"] = True
+                patch_result["rolled_back"] = True
+                patch_result["success"] = False
+                patch_result["error"] = "rolled_back_due_to_regression_or_no_improvement"
+                patch_result["tentative_pass_rate"] = post_pass_rate
+                patch_result["pass_rate_before_step"] = pre_step_pass_rate
+                post_pass_rate = pre_step_pass_rate
+                effective_run_extend = []
+                if regression_detected:
+                    detail = (
+                        f"regression or worse vs baseline (tentative pass rate "
+                        f"{outcome_pass_rate_for_learning:.2f}, baseline "
+                        f"{self._episode_state.baseline_pass_rate:.2f})"
+                    )
+                else:
+                    detail = (
+                        f"no meaningful improvement (tentative {outcome_pass_rate_for_learning:.2f} vs "
+                        f"{pre_step_pass_rate:.2f} before patch; require +{MIN_MEANINGFUL_IMPROVEMENT:.2f} "
+                        f"gain unless all test runs pass)"
+                    )
+                self._episode_state.last_environment_note = (
+                    "The environment reverted your last patch — "
+                    + detail
+                    + ". Try a different root-cause category or code location. "
+                    "Do not try to undo changes yourself; the workspace was restored automatically."
+                )
+                logger.warning("[ENV] PERFORMANCE ROLLBACK: %s", detail)
+            else:
+                effective_run_extend = list(post_runs)
+        elif patch_result.get("success") and not syntax_error:
+            effective_run_extend = list(post_runs)
+
+        committed_successfully = had_valid_apply_and_tests and not rolled_back_due_to_performance
+
+        # --- 5. Compute reward ---
+        pre_entropy = failure_mode_entropy(self._episode_state.run_history[-self.num_runs:])
+        observation = self._build_observation()
+
         reward_breakdown = compute_verifiable_reward(
             action=action,
             observation=observation,
@@ -534,28 +590,30 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
 
         # --- 6. Update state ---
         self._episode_state.current_pass_rate = post_pass_rate
-        self._episode_state.run_history.extend(post_runs)
+        self._episode_state.run_history.extend(effective_run_extend)
         self._episode_state.last_think_text = action.think_text
         self._episode_state.last_patch_text = action.patch_text
         self._episode_state.last_reward = reward_breakdown.total_reward
         self._episode_state.last_reward_breakdown = reward_breakdown.to_dict()
         self._episode_state.last_patch_result = patch_result
 
-        # Build and store per-step think summary for diversity tracking.
         think_summary = self._build_think_summary(
             action=action,
             oracle_score=oracle_score,
-            pass_rate_after=post_pass_rate,
+            pass_rate_after=outcome_pass_rate_for_learning,
             reward=reward_breakdown.total_reward,
         )
+        if rolled_back_due_to_performance:
+            think_summary["patch_reverted_by_env"] = True
+            think_summary["tentative_pass_rate"] = outcome_pass_rate_for_learning
         self._episode_state.step_think_history.append(think_summary)
 
-        if patch_result["success"]:
+        if committed_successfully:
             self._episode_state.patches_applied.append(PatchRecord(
                 patch_text=action.patch_text,
                 target_files=patch_result.get("files_modified", []),
                 lines_changed=patch_result.get("lines_changed", 0),
-                pass_rate_after=post_pass_rate,
+                pass_rate_after=outcome_pass_rate_for_learning,
                 applied_successfully=True,
             ))
             self._episode_state.total_diff_lines += patch_result.get("lines_changed", 0)
@@ -621,6 +679,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             test_identifier=self._episode_state.test_identifier,
             step=self._episode_state.step_count,
             steps_remaining=self._episode_state.steps_remaining,
+            repo_root=str(self._episode_state.repo_path),
             test_function_source=self._episode_state.current_test_source,
             source_under_test=self._episode_state.current_source_under_test,
             relevant_imports=self._extract_imports(self._episode_state.current_test_source),
@@ -661,6 +720,7 @@ class FlakeForgeEnvironment(Environment[FlakeForgeAction, FlakeForgeObservation,
             done_reason=self._episode_state.last_done_reason,
             reward=self._episode_state.last_reward,
             think_history=list(self._episode_state.step_think_history),
+            last_environment_note=self._episode_state.last_environment_note,
         )
 
     def _build_think_summary(

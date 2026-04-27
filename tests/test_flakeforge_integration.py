@@ -56,6 +56,7 @@ Strategy: Increase timeout
     result = await asyncio.wait_for(fetch(), timeout=0.5)
 >>>>>>> REPLACE
 </patch>"""
+
         assert "Root Cause: async_wait" in extract_think(response)
         assert "<<<<<<< SEARCH" in extract_patch(response)
 
@@ -441,8 +442,8 @@ class TestObservationBuilding:
             mock_residue_sites=["test_flaky.py:10 — patch() without context"],
         )
         prompt = build_unified_prompt(obs)
-        assert "Module cache violations" in prompt
-        assert "Mock residue sites" in prompt
+        assert "module-cache hot spots" in prompt
+        assert "mock residue:" in prompt
 
     def test_observation_run_history_limit(self):
         runs = [RunRecord(passed=True, duration_ms=100) for _ in range(30)]

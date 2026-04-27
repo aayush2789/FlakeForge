@@ -118,7 +118,7 @@ class ChaosAmplifiedRunner(DockerTestRunner):
             logger.warning(
                 "chaos_runner: stressor unavailable for profile=%s — "
                 "falling back to clean run. Install stress-ng and iproute2 "
-                "inside the Docker image to enable chaos amplification.",
+                "on the host to enable chaos amplification.",
                 profile.value,
             )
             return self.run_test_n_times(test_id, n=n, max_workers=max_workers)

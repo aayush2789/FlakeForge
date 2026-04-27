@@ -220,7 +220,7 @@ The canonical list is **`ROOT_CAUSE_TYPES`** in `models.py`. Each value is docum
 - **Output:** a `CausalGraph` (nodes, edges, boundary warnings) rendered into `FlakeForgeObservation.causal_graph` and short **`causal_hints`** for the LLM.
 - **Why it matters:** Patches that edit files **far** from the **failure frontier** or **causal** neighborhood are easy to down-weight; see **causal_proximity_reward** in `server/reward.py`.
 
-### Deep flakiness scanners
+### Deep flakiness scanners 
 
 *Implementation: `server/deep_flakiness.py`.*
 

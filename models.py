@@ -192,6 +192,11 @@ class FlakeForgeObservation(Observation):
     step: int
     steps_remaining: int
 
+    repo_root: str = Field(
+        default="",
+        description="Absolute or workspace-relative path to the repo under test (for agent tools).",
+    )
+
     test_function_source: str
     source_under_test: str
     relevant_imports: List[str] = Field(default_factory=list)
@@ -281,6 +286,10 @@ class FlakeForgeObservation(Observation):
     last_reward: float = 0.0
     reward_breakdown: Dict[str, float] = Field(default_factory=dict)
     patch_result: Dict[str, Any] = Field(default_factory=dict)
+    last_environment_note: str = Field(
+        default="",
+        description="One-step hint from the environment (e.g. automatic patch revert).",
+    )
     done_reason: str = ""
     reward: float = 0.0
     done: bool = False

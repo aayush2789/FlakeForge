@@ -135,8 +135,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--num-runs", type=int, default=6,
                    help="Pytest reps the env runs per env.step (online phase).")
-    p.add_argument("--use-docker", action="store_true",
-                   help="Set USE_DOCKER_IMAGE=1 so the runner uses the sandbox image.")
     p.add_argument("--env-quick-runs", type=int, default=3,
                    help="Preflight quick-stage runs per reset (online phase).")
     p.add_argument("--env-confirm-runs", type=int, default=3,
@@ -230,9 +228,6 @@ def run_warmup(args: argparse.Namespace, model: Any, tokenizer: Any, wandb_run: 
 
 def run_online(args: argparse.Namespace, model: Any, tokenizer: Any, wandb_run: Any) -> None:
     print(f"\n=== Phase 2 (online): OnlineGRPOLoop x {args.max_online_episodes} episodes ===", flush=True)
-
-    if args.use_docker:
-        os.environ["USE_DOCKER_IMAGE"] = "1"
 
     curriculum = CurriculumScheduler(
         synthetic_root=args.curriculum_root,

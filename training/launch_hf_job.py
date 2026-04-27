@@ -105,8 +105,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     forwarded.add_argument("--learning-rate", type=float, default=1e-5)
     forwarded.add_argument("--kl-beta", type=float, default=0.04)
     forwarded.add_argument("--num-runs", type=int, default=6)
-    forwarded.add_argument("--use-docker", action="store_true",
-                           help="Set USE_DOCKER_IMAGE=1 inside the job (rarely useful in HF Jobs).")
     forwarded.add_argument("--output-dir", default="outputs/flakeforge-coder7b")
     forwarded.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "flakeforge-rl"))
     forwarded.add_argument("--wandb-run-name", default=None)
@@ -133,8 +131,6 @@ def _build_train_command(args: argparse.Namespace) -> List[str]:
         cmd += ["--wandb-run-name", args.wandb_run_name]
     if args.no_wandb:
         cmd += ["--no-wandb"]
-    if args.use_docker:
-        cmd += ["--use-docker"]
     return cmd
 
 

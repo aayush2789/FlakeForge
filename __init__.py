@@ -23,11 +23,13 @@ from .models import (
 )
 
 from .agent.unified_agent import (
+    ToolAugmentedFlakeForgeAgent,
     UnifiedFlakeForgeAgent,
+    build_minimal_agent_prompt,
     build_unified_prompt,
-    extract_think,
-    extract_patch,
     extract_category_from_think,
+    extract_patch,
+    extract_think,
 )
 
 from .server.FlakeForge_environment import (
@@ -54,7 +56,9 @@ __all__ = [
     "FlakeforgeAction",
     "FlakeforgeObservation",
     # Agent
+    "ToolAugmentedFlakeForgeAgent",
     "UnifiedFlakeForgeAgent",
+    "build_minimal_agent_prompt",
     "build_unified_prompt",
     "extract_think",
     "extract_patch",

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 try:
     from models import (
-        FlakeForgeAction, FlakeForgeObservation, 
+        FlakeForgeAction, FlakeForgeObservation,
         StructuredThink, ThinkClaim,
         StructuredPatch, PatchHunk,
     )
@@ -17,6 +17,27 @@ except ImportError:
         FlakeForgeAction, FlakeForgeObservation,
         StructuredThink, ThinkClaim,
         StructuredPatch, PatchHunk,
+    )
+
+try:
+    from agent.action_schema import PatchActionModel, ToolCallActionModel, parse_agent_step_json
+    from agent.tool_loop import (
+        TOOL_MANIFEST_TEXT,
+        ToolContext,
+        ToolExecutor,
+        ToolTraceEntry,
+        build_default_tool_executor,
+        format_tool_trace_for_prompt,
+    )
+except ImportError:
+    from .action_schema import PatchActionModel, ToolCallActionModel, parse_agent_step_json
+    from .tool_loop import (
+        TOOL_MANIFEST_TEXT,
+        ToolContext,
+        ToolExecutor,
+        ToolTraceEntry,
+        build_default_tool_executor,
+        format_tool_trace_for_prompt,
     )
 
 try:
@@ -61,7 +82,7 @@ PATCH RULES (read carefully — failing these breaks the run):
      \\ becomes \\\\
    Never invent extra backslashes. Never add stray commas after backslashes.
 5. Prefer the smallest fix. Never add sleep(), retry decorators, or @pytest.mark.skip.
-6. Patch source.py, not the test file, unless the bug is in the test itself.
+6. Patch the file which causes the flakiness, not the test file, unless the bug is in the test itself.
 7. If you cannot find a clear fix, return:
    {"think":{"claims":[{"category":"unknown","entity":"","location":"","polarity":"present","reason":"need more evidence"}],"confidence":0.2},"patch":{"hunks":[]}}
 
@@ -188,48 +209,163 @@ UNIFIED_EXAMPLE_JSON = (
     '"replace":"<replacement line>"}]}}'
 )
 
+MINI_CATEGORY_HINT = (
+    "Categories (short): timeout/asyncio -> async_wait; random/time -> nondeterminism; "
+    "threads/Lock -> concurrency; lru_cache/globals -> module_cache_pollution/shared_state; "
+    "patch/monkeypatch -> mock_residue; import-time side effects -> import_side_effect. "
+    "Use tools for deep scans and graph detail."
+)
 
-def build_unified_prompt(observation: FlakeForgeObservation) -> str:
-    """Compact prompt designed for small (≤7B) models.
+TOOL_PATCH_EXAMPLE = (
+    '{"action":"patch","think":{"claims":[{"category":"async_wait","entity":"wait_for",'
+    '"location":"source.py::fetch","polarity":"present","reason":"..."}],"confidence":0.8},'
+    '"patch":{"hunks":[{"file":"source.py","search":"timeout=0.5","replace":"timeout=5.0"}]}}'
+)
 
-    Layout (each section is short and bounded):
-      1. TASK header         — what test, what step, what pass-rate goal.
-      2. SOURCE UNDER TEST   — the file the model should patch (≤1800 chars).
-      3. TEST FUNCTION       — the test that is flaky (≤1000 chars).
-      4. LAST FAILURE        — tail of the most recent failing stack (≤900 chars).
-      5. RECENT RUNS         — at most 5 most recent run outcomes.
-      6. DEEP SIGNALS        — single-line summary of static / dynamic alerts.
-      7. TARGETING HINTS     — top causal hints (≤4).
-      8. LAST ATTEMPT        — verdict on the previous step (only if any).
-      9. SCENARIO GUIDE      — what to do this turn given the state above.
-     10. CATEGORY HINTS      — short cheatsheet to map symptoms -> category.
-     11. YOUR TURN           — one-line schema reminder, single-line example.
-    """
+TOOL_CALL_EXAMPLE = '{"action":"tool_call","tool":"deep_flakiness_scan","args":{}}'
+
+TOOL_AUGMENTED_SYSTEM_PROMPT = f"""You are FlakeForge, a debugging agent that fixes flaky Python tests.
+
+Each turn reply with ONE JSON object only. No markdown, no XML, no prose outside JSON.
+
+You may either:
+1) Gather evidence: {TOOL_CALL_EXAMPLE}
+2) Submit a final fix: {TOOL_PATCH_EXAMPLE}
+
+When to use tools:
+- Need static flakiness signals, call graph, file list, or file/AST contents before patching.
+- If LAST FAILURE + SOURCE already pinpoint the bug, you may patch immediately.
+
+When to patch:
+- You are confident about the root cause and the single-line SEARCH anchor, OR
+- Tool budget is exhausted / same tool error repeats — submit best-effort patch (possibly empty hunks).
+
+{TOOL_MANIFEST_TEXT}
+
+PATCH RULES (same as unified agent):
+1. "search" must be ONE single line copied VERBATIM from SOURCE UNDER TEST (same indentation).
+2. Prefer single-line replacements; use JSON \\\\n in "replace" only if unavoidable.
+3. No sleep(), no retry decorators, no pytest.mark.skip.
+4. Patch production source, not the test, unless the bug is in the test.
+
+CATEGORIES (one per claim): async_wait, concurrency, test_order_dependency, resource_leak,
+shared_state, network, platform_dependency, nondeterminism, import_side_effect,
+module_cache_pollution, fixture_scope_leak, mock_residue, unknown.
+
+NEVER wrap JSON in code fences or add text outside the JSON object.
+"""
+
+
+def _build_shared_prompt_sections(
+    observation: FlakeForgeObservation,
+    tool_trace: List[ToolTraceEntry],
+    *,
+    source_limit: int,
+    test_limit: int,
+    failure_limit: int,
+) -> List[str]:
+    """Task header, bounded source/test/failure, optional formatted tool trace."""
     parts: List[str] = []
-
     parts.append("=== TASK ===")
     parts.append(f"Test:       {observation.test_identifier}")
-    parts.append(f"Step:       {observation.step + 1} of {observation.step + observation.steps_remaining}")
+    parts.append(
+        f"Step:       {observation.step + 1} of "
+        f"{observation.step + observation.steps_remaining}"
+    )
     parts.append(
         f"Pass rate:  baseline={observation.baseline_pass_rate:.2f}  "
         f"current={observation.current_pass_rate:.2f}  goal=1.00"
     )
+    if getattr(observation, "repo_root", ""):
+        parts.append(f"Repo:       {observation.repo_root}")
     parts.append("")
 
     if observation.source_under_test:
-        parts.append("=== SOURCE UNDER TEST  (PATCH THIS FILE: source.py) ===")
-        parts.append(observation.source_under_test[:1800])
+        parts.append("=== SOURCE UNDER TEST (patch target) ===")
+        parts.append(observation.source_under_test[:source_limit])
         parts.append("")
 
     if observation.test_function_source:
         parts.append("=== TEST FUNCTION ===")
-        parts.append(observation.test_function_source[:1000])
+        parts.append(observation.test_function_source[:test_limit])
         parts.append("")
 
-    if observation.failing_stack_trace:
+    trace = observation.failing_stack_trace or ""
+    err_type = ""
+    if observation.run_history:
+        for r in reversed(observation.run_history):
+            if not r.passed and r.error_type:
+                err_type = r.error_type
+                break
+    if trace:
         parts.append("=== LAST FAILURE (tail) ===")
-        parts.append(observation.failing_stack_trace[-900:])
+        if err_type:
+            parts.append(f"error_type: {err_type}")
+        parts.append(trace[-failure_limit:])
         parts.append("")
+
+    ft = format_tool_trace_for_prompt(tool_trace)
+    if ft:
+        parts.append(ft)
+        parts.append("")
+
+    note = (getattr(observation, "last_environment_note", None) or "").strip()
+    if note:
+        parts.append("=== ENVIRONMENT NOTICE ===")
+        parts.append(note)
+        parts.append("")
+
+    return parts
+
+
+def _compact_last_attempt_line(observation: FlakeForgeObservation) -> List[str]:
+    """At most one short block for minimal prompt."""
+    diag = _last_attempt_diagnosis(observation)
+    if not diag:
+        pr = observation.patch_result or {}
+        if pr and observation.step > 0:
+            return [
+                "=== LAST STEP ===",
+                f"patch_applied={pr.get('success')} err={str(pr.get('error', ''))[:120]}",
+                "",
+            ]
+        return []
+    return ["=== LAST STEP (summary) ===", diag[0], diag[3] if len(diag) > 3 else "", ""]
+
+
+def build_minimal_agent_prompt(
+    observation: FlakeForgeObservation,
+    tool_trace: List[ToolTraceEntry],
+) -> str:
+    """Minimal user prompt: essentials + tool observations only (no deep preloads)."""
+    parts = _build_shared_prompt_sections(
+        observation,
+        tool_trace,
+        source_limit=1200,
+        test_limit=800,
+        failure_limit=700,
+    )
+    parts.extend(_compact_last_attempt_line(observation))
+    parts.append(MINI_CATEGORY_HINT)
+    parts.append("")
+    parts.append("=== YOUR TURN ===")
+    parts.append('Either {"action":"tool_call","tool":"<name>","args":{...}} or ')
+    parts.append('{"action":"patch","think":{...},"patch":{...}}  (see system prompt examples).')
+    return "\n".join(parts)
+
+
+def build_unified_prompt(observation: FlakeForgeObservation) -> str:
+    """Legacy fat prompt: shared core (no tool trace) plus runs, deep signals, hints.
+
+    Prefer :func:`build_minimal_agent_prompt` for tool-augmented agents.
+    """
+    parts = _build_shared_prompt_sections(
+        observation,
+        [],
+        source_limit=1800,
+        test_limit=1000,
+        failure_limit=900,
+    )
 
     if observation.run_history:
         parts.append("=== RECENT RUNS (last 5) ===")
@@ -615,7 +751,8 @@ class UnifiedFlakeForgeAgent:
         self.backend = backend
         self.system_prompt = UNIFIED_SYSTEM_PROMPT
 
-    def generate(self, observation: FlakeForgeObservation) -> FlakeForgeAction:
+    def generate(self, observation: FlakeForgeObservation, **kwargs: Any) -> FlakeForgeAction:
+        del kwargs  # tool_context (tool-augmented agent) is ignored here
         prompt = build_unified_prompt(observation)
         raw_response = self.backend.generate(prompt, system_prompt=self.system_prompt)
 
@@ -736,4 +873,198 @@ class UnifiedFlakeForgeAgent:
             predicted_confidence=predicted_confidence,
             action_type="UNIFIED_PATCH",
             parameters={},
+        )
+
+
+def _finalize_flakeforge_action(
+    raw_response: str,
+    think_raw: str,
+    patch_raw: str,
+    structured_think: StructuredThink,
+    structured_patch: StructuredPatch,
+    *,
+    action_type: str = "TOOL_AUGMENTED_PATCH",
+    log_prefix: str = "[TOOL_AUG_AGENT]",
+) -> FlakeForgeAction:
+    predicted_category = (
+        structured_think.primary_category
+        if structured_think.claims
+        else extract_category_from_think(think_raw)
+    )
+    predicted_confidence = (
+        structured_think.confidence
+        if structured_think.claims
+        else extract_confidence_from_think(think_raw)
+    )
+
+    if structured_think.format_penalty < 0.0:
+        logger.warning(
+            "%s think object invalid (penalty=%.1f); using tolerant parsing.",
+            log_prefix,
+            structured_think.format_penalty,
+        )
+    if structured_patch.format_penalty < 0.0:
+        logger.warning(
+            "%s patch object invalid (penalty=%.1f).",
+            log_prefix,
+            structured_patch.format_penalty,
+        )
+
+    logger.info(
+        "%s category=%s confidence=%.2f patch_hunks=%d",
+        log_prefix,
+        predicted_category,
+        predicted_confidence,
+        len(structured_patch.hunks),
+    )
+
+    return FlakeForgeAction(
+        raw_response=raw_response,
+        think_text=think_raw,
+        patch_text=patch_raw,
+        structured_think=structured_think,
+        structured_patch=structured_patch,
+        predicted_category=predicted_category,
+        predicted_confidence=predicted_confidence,
+        action_type=action_type,
+        parameters={},
+    )
+
+
+def _decode_patch_payload(raw: str, think_d: Any, patch_d: Any) -> tuple:
+    think_raw = json.dumps(think_d, ensure_ascii=False) if isinstance(think_d, dict) else str(think_d)
+    parsed_think = _parse_structured_think(think_d if isinstance(think_d, dict) else {})
+    parsed_patch = _parse_structured_patch(patch_d if isinstance(patch_d, dict) else {})
+    patch_raw = _patch_dict_to_search_replace(patch_d if isinstance(patch_d, dict) else {})
+    return think_raw, patch_raw, parsed_think, parsed_patch
+
+
+class ToolAugmentedFlakeForgeAgent:
+    """Multi-turn agent: model alternates tool_call JSON and final patch JSON before env.step."""
+
+    def __init__(
+        self,
+        backend: ModelBackend,
+        *,
+        max_tool_calls: int = 12,
+        max_llm_rounds: int = 24,
+    ) -> None:
+        self.backend = backend
+        self.system_prompt = TOOL_AUGMENTED_SYSTEM_PROMPT
+        self.max_tool_calls = max_tool_calls
+        self.max_llm_rounds = max_llm_rounds
+
+    def generate(
+        self,
+        observation: FlakeForgeObservation,
+        *,
+        tool_context: ToolContext,
+    ) -> FlakeForgeAction:
+        trace: List[ToolTraceEntry] = []
+        executor = build_default_tool_executor(max_calls_total=self.max_tool_calls)
+        last_raw = ""
+
+        for round_i in range(self.max_llm_rounds):
+            prompt = build_minimal_agent_prompt(observation, trace)
+            raw = self.backend.generate(prompt, system_prompt=self.system_prompt)
+            last_raw = raw
+            data = _load_json_object(raw)
+            step = parse_agent_step_json(data)
+
+            if isinstance(step, ToolCallActionModel):
+                trace.append(executor.execute(tool_context, step.tool, step.args))
+                continue
+
+            if isinstance(step, PatchActionModel):
+                think_d = step.think if isinstance(step.think, dict) else {}
+                patch_d = step.patch if isinstance(step.patch, dict) else {}
+                think_raw, patch_raw, structured_think, structured_patch = _decode_patch_payload(
+                    raw, think_d, patch_d
+                )
+                should_retry = (
+                    structured_patch.format_penalty < 0.0
+                    or len(structured_patch.hunks) == 0
+                    or not patch_raw.strip()
+                )
+                if should_retry:
+                    logger.warning(
+                        "[TOOL_AUG_AGENT] Patch decode weak/empty; strict retry once (round %d).",
+                        round_i,
+                    )
+                    retry_prompt = (
+                        prompt
+                        + "\n\n=== STRICT RETRY ===\n"
+                        + "Emit {\"action\":\"patch\",\"think\":{...},\"patch\":{\"hunks\":[...]}} only. "
+                        + "One-line search from SOURCE UNDER TEST; valid JSON.\n"
+                    )
+                    retry_raw = self.backend.generate(retry_prompt, system_prompt=self.system_prompt)
+                    last_raw = retry_raw
+                    retry_data = _load_json_object(retry_raw)
+                    retry_step = parse_agent_step_json(retry_data)
+                    if isinstance(retry_step, PatchActionModel):
+                        think_d = retry_step.think if isinstance(retry_step.think, dict) else {}
+                        patch_d = retry_step.patch if isinstance(retry_step.patch, dict) else {}
+                    elif isinstance(retry_data, dict):
+                        think_d = retry_data.get("think", {}) if isinstance(retry_data.get("think"), dict) else {}
+                        patch_d = retry_data.get("patch", {}) if isinstance(retry_data.get("patch"), dict) else {}
+                    think_raw, patch_raw, structured_think, structured_patch = _decode_patch_payload(
+                        retry_raw, think_d, patch_d
+                    )
+                return _finalize_flakeforge_action(
+                    last_raw,
+                    think_raw,
+                    patch_raw,
+                    structured_think,
+                    structured_patch,
+                )
+
+            # Legacy single JSON with think/patch only
+            if isinstance(data, dict) and (
+                isinstance(data.get("think"), dict) or isinstance(data.get("patch"), dict)
+            ):
+                think_d = data.get("think", {}) if isinstance(data.get("think"), dict) else {}
+                patch_d = data.get("patch", {}) if isinstance(data.get("patch"), dict) else {}
+                think_raw, patch_raw, structured_think, structured_patch = _decode_patch_payload(
+                    raw, think_d, patch_d
+                )
+                if structured_patch.format_penalty >= 0.0 and structured_patch.hunks and patch_raw.strip():
+                    return _finalize_flakeforge_action(
+                        raw,
+                        think_raw,
+                        patch_raw,
+                        structured_think,
+                        structured_patch,
+                    )
+
+            trace.append(
+                ToolTraceEntry(
+                    turn=len(trace) + 1,
+                    tool="(parse)",
+                    ok=False,
+                    summary="Output was not a valid tool_call or patch action; try again.",
+                )
+            )
+
+        logger.warning("[TOOL_AUG_AGENT] Exhausted max_llm_rounds=%s", self.max_llm_rounds)
+        fallback_think = {
+            "claims": [
+                {
+                    "claim_id": "c1",
+                    "category": "unknown",
+                    "entity": "",
+                    "location": "",
+                    "polarity": "present",
+                    "reason": "tool loop exhausted without a valid patch",
+                }
+            ],
+            "confidence": 0.15,
+        }
+        think_raw = json.dumps(fallback_think, ensure_ascii=False)
+        return _finalize_flakeforge_action(
+            last_raw,
+            think_raw,
+            "",
+            _parse_structured_think(fallback_think),
+            StructuredPatch(hunks=[]),
+            action_type="TOOL_AUGMENTED_EXHAUSTED",
         )
